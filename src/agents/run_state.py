@@ -43,7 +43,6 @@ from ._redaction import (
     hook_payload_diagnostics,
     redaction_scope,
     require_clean,
-    require_clean_history,
 )
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
@@ -2017,10 +2016,9 @@ class RunState(Generic[TContext, TAgent]):
             require_clean(snapshot)
             if policy is not None:
                 # Restored items nest the transcript inside per-agent records.
-                original = snapshot["original_input"]
-                prefix = original if isinstance(original, list) else []
+                prefix = ItemHelpers.input_to_new_input_list(snapshot["original_input"])
                 for key in ("generated_items", "session_items"):
-                    require_clean_history([*prefix, *(item["raw_item"] for item in snapshot[key])])
+                    require_clean([*prefix, *(item["raw_item"] for item in snapshot[key])])
             return snapshot
 
     def _serialize_snapshot(

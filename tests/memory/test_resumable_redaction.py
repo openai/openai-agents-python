@@ -70,6 +70,56 @@ async def test_compaction_scrubs_history_before_replacing_it(streamed: bool, ato
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("unread", [False, True])
+async def test_compaction_cannot_complete_a_secret_in_retained_history(
+    streamed: bool, unread: bool
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agents.memory import OpenAIResponsesCompactionSession, SQLiteSession
+
+    store = SQLiteSession("test")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(output=[{"role": "assistant", "content": SECRET[10:]}])
+    )
+    session = OpenAIResponsesCompactionSession(
+        "test",
+        store,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+    agent = Agent(name="worker", model=ScriptedModel([[get_text_message("ok")]]))
+    try:
+        if unread:
+            await store.add_items([{"role": "user", "content": "older"}])
+        await store.add_items(
+            [{"role": "user", "content": SECRET[:10]}, {"role": "user", "content": "recent"}]
+        )
+        response = run(
+            agent,
+            "go",
+            streamed=streamed,
+            session=session,
+            run_config=RunConfig(redact_text=redact, session_settings={"limit": 1}),
+        )
+        if unread:
+            assert (await response).final_output == "ok"
+            client.responses.compact.assert_not_awaited()
+        else:
+            with pytest.raises(UserError, match="redact_text"):
+                await response
+        history = await store.get_items(limit=10)
+        assert SECRET[:10] in repr(history)
+        assert SECRET[10:] not in repr(history)
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
 @pytest.mark.parametrize("paused", [False, True], ids=["ready", "paused"])
 async def test_protected_session_requires_policy_before_claim_after_restart(
@@ -306,8 +356,8 @@ async def test_standalone_serialization_checks_context_at_every_export(streamed:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("split", [False, True])
-async def test_standalone_dirty_legacy_state_is_refused_before_execution(split: bool) -> None:
+@pytest.mark.parametrize("source", ["full", "assistant", "user"])
+async def test_standalone_dirty_legacy_state_is_refused_before_execution(source: str) -> None:
     from agents import RunState
 
     executed: list[str] = []
@@ -321,19 +371,19 @@ async def test_standalone_dirty_legacy_state_is_refused_before_execution(split: 
         executed.append(value)
         return "changed"
 
+    prefix = [get_text_message(SECRET[:10])] if source == "assistant" else []
     model = ScriptedModel(
         [
-            [get_text_message(SECRET[:10]), get_function_tool_call("lookup", "{}", "lookup")],
+            [*prefix, get_function_tool_call("lookup", "{}", "lookup")],
             [get_function_tool_call("change", '{"value": "ok"}')],
             [get_text_message("done")],
         ]
-        if split
+        if source != "full"
         else [[get_function_tool_call("change", json.dumps({"value": SECRET}))]]
     )
     agent = Agent(name="assistant", model=model, tools=[change, lookup])
-    paused = await Runner.run(
-        agent, "go" if split else SECRET, run_config=RunConfig(tracing_disabled=True)
-    )
+    prompt = {"full": SECRET, "assistant": "go", "user": SECRET[:10]}[source]
+    paused = await Runner.run(agent, prompt, run_config=RunConfig(tracing_disabled=True))
     snapshot = paused.to_state().to_json()
     snapshot["$schemaVersion"] = "1.23"
     snapshot.pop("requires_redaction", None)
@@ -345,7 +395,7 @@ async def test_standalone_dirty_legacy_state_is_refused_before_execution(split: 
         )
     assert SECRET not in str(failure.value)
     assert executed == []
-    assert len(model.calls) == (2 if split else 1)
+    assert len(model.calls) == (1 if source == "full" else 2)
 
 
 @pytest.mark.asyncio

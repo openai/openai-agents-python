@@ -167,6 +167,36 @@ def _check_joined(value: Any, redact: _Redactor) -> None:
             _walk("".join(parts), redact, "check")
 
 
+def _check_transcript(items: list[Any], redact: _Redactor) -> None:
+    """Check text in transcript order without intervening protocol fields."""
+    replies, outputs, conversation, operations = [], [], [], []
+    for item in items:
+        if not isinstance(item, (dict, BaseModel)):
+            continue
+        fields = _entries(item)
+        if "role" in fields and "content" in fields:
+            content = fields["content"]
+            if fields["role"] == "assistant":
+                replies.append(content)
+                outputs.append(content)
+            conversation.append(content)
+            operations.append(content)
+        for key in ("arguments", "input"):
+            if key in fields:
+                operations.append(fields[key])
+        if "output" in fields:
+            outputs.append(fields["output"])
+            conversation.append(fields["output"])
+            operations.append(fields["output"])
+
+    # Each view adds to the preceding one. Skip identical views and single values.
+    checked = 1
+    for view in (replies, outputs, conversation, operations):
+        if len(view) > checked:
+            _check_joined(view, redact)
+            checked = len(view)
+
+
 def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
     if isinstance(value, str):
         # Function arguments and serialized RunState can contain escaped JSON strings.
@@ -184,6 +214,7 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
         # Structured prompts and tool results can split a secret across text parts.
         if len(items) > 1:
             _check_joined(items, redact)
+            _check_transcript(items, redact)
         if all(a is b for a, b in zip(items, value, strict=True)):
             return value
         return tuple(items) if isinstance(value, tuple) else items
@@ -245,27 +276,6 @@ def _apply(value: _T, mode: _Mode) -> _T:
 def require_clean(value: object) -> None:
     """Refuse a change to an identity, approval receipt or serialized checkpoint."""
     _apply(value, "check")
-
-
-def require_clean_history(items: list[Any]) -> None:
-    """Check the transcript, including the text a consumer sees without protocol fields."""
-    require_clean(items)
-    messages = []
-    visible = []
-    for item in items:
-        if not isinstance(item, (dict, BaseModel)):
-            continue
-        fields = _entries(item)
-        if fields.get("role") == "assistant":
-            content = fields.get("content")
-            messages.append(content)
-            visible.append(content)
-        elif "output" in fields:
-            visible.append(fields["output"])
-    if len(messages) > 1:
-        require_clean(messages)
-    if len(visible) > len(messages):
-        require_clean(visible)
 
 
 def redact_payload(value: _T) -> _T:
@@ -330,7 +340,7 @@ def redact_response(response: ModelResponse, history: list[Any]) -> ModelRespons
             require_clean(item)
     result = copy(response)
     result.output = redact_items(response.output)
-    require_clean_history([*history, *result.output])
+    require_clean([*history, *result.output])
     # Consumers concatenate text parts. Refuse fragments which form a secret together.
     for extract in (ItemHelpers.extract_text, ItemHelpers.extract_refusal):
         require_clean("".join(extract(item) or "" for item in result.output))

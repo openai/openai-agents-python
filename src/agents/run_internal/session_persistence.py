@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
-from .._redaction import current_redactor, require_clean_history
+from .._redaction import current_redactor, require_clean
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from .._tool_invocation import tool_output_identity
 from ..agent import Agent
@@ -322,7 +322,7 @@ async def _session_add_items(
     """Append session items while preserving the legacy method call shape."""
     if current_redactor() is not None:
         history = await _session_get_items(session, wrapper=wrapper)
-        require_clean_history([*history, *items])
+        require_clean([*history, *items])
     session_wrapper = _get_session_wrapper(session, wrapper)
 
     async def write_items() -> None:
@@ -655,7 +655,7 @@ def require_clean_run_items(
         return
     # Some resume and guardrail paths have already appended this batch.
     batch = {id(item) for item in items}
-    require_clean_history(
+    require_clean(
         [
             *ItemHelpers.input_to_new_input_list(original),
             *(item.raw_item for item in prior if id(item) not in batch),

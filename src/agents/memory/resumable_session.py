@@ -18,7 +18,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from .._redaction import current_redactor, require_clean, require_clean_history
+from .._redaction import current_redactor, require_clean
 from ..exceptions import (
     UserError,
     _data_redacted_error_boundary,
@@ -327,7 +327,6 @@ class ResumableSession:
         self._validate_run(input)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
-            require_clean_history(self._checkpoint.history)
         if self.is_paused:
             from ..run_internal.native_approvals import validate_native_restore_hooks
 

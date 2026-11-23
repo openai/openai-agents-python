@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
-from .._redaction import hook_payload_diagnostics, redact_items, require_clean
+from .._redaction import current_redactor, hook_payload_diagnostics, redact_items, require_clean
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
@@ -359,6 +359,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if snapshot is not None:
                 session_items = _normalize_compaction_session_items(snapshot.items)
                 complete = snapshot.complete
+                if not complete and current_redactor() is not None:
+                    # A summary could complete a match in the unread prefix.
+                    return
             else:
                 # Backends without atomic suffix replacement still require complete
                 # coverage, established by a finite read after the hook approves.
@@ -492,6 +495,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
         if snapshot is not None:
+            if suffix_start and current_redactor() is not None:
+                require_clean([*snapshot.items[:suffix_start], *output_items])
 
             async def replace_snapshot(snapshot: _CompactionSnapshot) -> bool:
                 replaced = await snapshot.replace_suffix(suffix_start, output_items)

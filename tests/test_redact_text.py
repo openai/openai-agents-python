@@ -643,7 +643,7 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
     ("source", "history"),
     [
         (source, history)
-        for source in ("model", "tool", "resume", "mixed")
+        for source in ("model", "tool", "resume", "mixed", "user", "arguments")
         for history in ("session", "conversation_id", "previous_response_id")
     ]
     + [("next_prompt", "session")],
@@ -654,11 +654,11 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
     executed = []
 
     @tool(needs_approval=source == "resume")
-    def lookup(i: int) -> str:
+    def lookup(i: int, query: str = "") -> str:
         executed.append(i)
         if source == "tool":
             return "private-" if not i else "example"
-        if source == "mixed":
+        if source in {"mixed", "user", "arguments"}:
             return "example"
         return "ok"
 
@@ -673,6 +673,10 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
         script = [[assistant_message("private-")], [assistant_message("example")]]
     elif source == "mixed":
         script = [[assistant_message("private-"), first], [assistant_message("ok")]]
+    elif source in {"user", "arguments"}:
+        if source == "arguments":
+            first = function_call("lookup", {"i": 0, "query": "private-"}, call_id="one")
+        script = [[first], [assistant_message("ok")]]
     elif source == "model":
         script = [
             [assistant_message("private-"), first],
@@ -697,7 +701,7 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
         return await Runner.run(agent, value, run_config=config, **options)
 
     try:
-        value: str | RunState = "go"
+        value: str | RunState = "private-" if source == "user" else "go"
         if source == "resume":
             paused = await invoke(value)
             value = await RunState.from_json(agent, paused.to_state().to_json())
@@ -707,7 +711,7 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
             value = "continue"
         with pytest.raises(UserError, match="redact_text"):
             await invoke(value)
-        assert len(model.calls) == (1 if source == "mixed" else 2)
+        assert len(model.calls) == (1 if source in {"mixed", "user", "arguments"} else 2)
         if source == "model":
             assert executed == [0]
         assert "example" not in str(published)
