@@ -73,6 +73,22 @@ class Count(BaseModel):
         return value
 
 
+async def test_decision_results_require_explicit_value_for_truth_tests():
+    predicate = await decide("Even?", provider=Provider(False), input="1")
+    label = await decide(
+        "Which?", provider=Provider("left"), input="turn", choices=["left", "right"]
+    )
+    typed = await decide(
+        "How many?", provider=Provider({"count": 2}), input="pair", output_type=Count
+    )
+    assert predicate.value is False
+    assert label.value == "left"
+    assert typed.value.count == 2
+    for result in (predicate, label, typed):
+        with pytest.raises(TypeError, match=r"\.value"):
+            bool(result)
+
+
 async def test_explicit_input_and_choices_are_captured_before_await():
     provider = Provider(False)
     evidence = [{"values": [1]}]

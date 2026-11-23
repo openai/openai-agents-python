@@ -1,196 +1,84 @@
 # OpenAI Agents SDK [![PyPI](https://img.shields.io/pypi/v/openai-agents?label=pypi%20package)](https://pypi.org/project/openai-agents/)
 
-The OpenAI Agents SDK is a lightweight yet powerful framework for building multi-agent workflows. It is provider-agnostic, supporting the OpenAI Responses and Chat Completions APIs, as well as 100+ other LLMs.
-
-<img src="https://cdn.openai.com/API/docs/images/orchestration.png" alt="Image of the Agents Tracing UI" style="max-height: 803px;">
-
-> [!NOTE]
-> Looking for the JavaScript/TypeScript version? Check out [Agents SDK JS/TS](https://github.com/openai/openai-agents-js).
-
-### Core concepts:
-
-1. [**Agents**](https://openai.github.io/openai-agents-python/agents): LLMs configured with instructions, tools, guardrails, and handoffs
-1. [**Sandbox agents**](https://openai.github.io/openai-agents-python/sandbox_agents): Agents preconfigured to work with a container to perform work over long time horizons.
-1. [**Realtime agents**](https://openai.github.io/openai-agents-python/realtime/quickstart/): Build powerful voice agents with `gpt-realtime-2.1` and full agent features
-1. [**Voice agents**](https://openai.github.io/openai-agents-python/voice/quickstart/): Build voice pipelines that combine speech-to-text, an agent workflow, and text-to-speech
-1. **[Agents as tools](https://openai.github.io/openai-agents-python/tools/#agents-as-tools) / [Handoffs](https://openai.github.io/openai-agents-python/handoffs/)**: Delegating to other agents for specific tasks
-1. [**Tools**](https://openai.github.io/openai-agents-python/tools/): Various Tools let agents take actions (functions, MCP, hosted tools)
-1. [**Guardrails**](https://openai.github.io/openai-agents-python/guardrails/): Configurable safety checks for input and output validation
-1. [**Human in the loop**](https://openai.github.io/openai-agents-python/human_in_the_loop/): Built-in mechanisms for involving humans across agent runs
-1. [**Sessions**](https://openai.github.io/openai-agents-python/sessions/): Automatic conversation history management across agent runs
-1. [**Tracing**](https://openai.github.io/openai-agents-python/tracing/): Built-in tracking of agent runs, allowing you to view, debug and optimize your workflows
-
-Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
+Build Python agent workflows with instructions, tools, handoffs, and conversation history. Run agents with OpenAI models or another supported model provider.
 
 ## Get started
 
-To get started, set up your Python environment (Python 3.10 or newer required), and then install OpenAI Agents SDK package.
+For the standard SDK, use Python 3.10 or newer and install `openai-agents` with `pip install openai-agents` or `uv add openai-agents`. Optional extras include `openai-agents[voice]`, `openai-agents[redis]`, and `openai-agents[docker]`.
 
-### venv
+<a id="venv"></a>
+<a id="uv"></a>
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install openai-agents
-```
+For environment setup, see the [SDK quickstart](https://openai.github.io/openai-agents-python/quickstart/).
 
-For voice support, install with the optional `voice` group: `pip install 'openai-agents[voice]'`. For Redis session support, install with the optional `redis` group: `pip install 'openai-agents[redis]'`.
+<a id="example"></a>
+<a id="run-your-first-agents"></a>
+<a id="run-a-text-agent"></a>
 
-### uv
+## Run your first agent
 
-If you're familiar with [uv](https://docs.astral.sh/uv/), installing the package would be even easier:
-
-```bash
-uv init
-uv add openai-agents
-```
-
-For voice support, install with the optional `voice` group: `uv add 'openai-agents[voice]'`. For Redis session support, install with the optional `redis` group: `uv add 'openai-agents[redis]'`.
-
-On the experimental `feat/simple-codex` branch, you can select embedded Codex Core for a run with `RunConfig(model_provider=CodexProvider())`. See the [Codex provider guide](docs/models/codex.md) for GitHub prerelease wheels, authentication, and a runnable example.
-
-## Run your first agents
-
-The SDK supports four primary ways to run agents. Set the `OPENAI_API_KEY` environment variable before running any of these examples.
-
-### Run a text agent
-
-Use a text `Agent` for workflows that do not need a persistent realtime connection or a sandbox workspace.
+This example uses the standard SDK and OpenAI's default model provider. Set `OPENAI_API_KEY` in your environment, save the script as `agent.py`, and run `python agent.py`. It sends live model requests and can incur charges.
 
 ```python
 from agents import Agent, Runner
+from agents.decorators import tool
 
-agent = Agent(name="Assistant", instructions="You are a helpful assistant")
 
-result = Runner.run_sync(agent, "Write a haiku about recursion in programming.")
-print(result.final_output)
+@tool
+def greeting(name: str) -> str:
+    return f"Hello, {name}!"
 
-# Code within the code,
-# Functions calling themselves,
-# Infinite loop's dance.
-```
 
-(_For Jupyter notebook users, see [hello_world_jupyter.ipynb](https://github.com/openai/openai-agents-python/blob/main/examples/basic/hello_world_jupyter.ipynb)_)
-
-### Run a sandbox agent
-
-Use a [`SandboxAgent`](https://openai.github.io/openai-agents-python/sandbox_agents) when the agent needs to inspect files, run commands, apply patches, or preserve workspace state across longer tasks.
-
-This example uses `UnixLocalSandboxClient`, which is supported on macOS and Linux. On Windows, use `DockerSandboxClient` with the `openai-agents[docker]` extra or a hosted sandbox client instead; see [Sandbox clients](https://openai.github.io/openai-agents-python/sandbox/clients/) for setup details.
-
-```python
-from agents import Runner
-from agents.run import RunConfig
-from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
-from agents.sandbox.entries import GitRepo
-from agents.sandbox.sandboxes import UnixLocalSandboxClient
-
-agent = SandboxAgent(
-    name="Workspace Assistant",
-    instructions="Inspect the sandbox workspace before answering.",
-    default_manifest=Manifest(
-        entries={"repo": GitRepo(repo="openai/openai-agents-python", ref="main")}
-    ),
+agent = Agent(
+    name="Assistant",
+    instructions="Use greeting to greet the user, then return the greeting.",
+    tools=[greeting],
 )
-
-result = Runner.run_sync(
-    agent,
-    "Inspect the repo README and summarize what this project does.",
-    run_config=RunConfig(sandbox=SandboxRunConfig(client=UnixLocalSandboxClient())),
-)
+result = Runner.run_sync(agent, "Greet Ada.")
 print(result.final_output)
 ```
 
-### Run a realtime agent
+The script prints a greeting for Ada; wording can vary. The SDK calls `greeting` when the model requests the tool.
 
-Use a [`RealtimeAgent`](https://openai.github.io/openai-agents-python/realtime/quickstart/) for low-latency, server-side voice and multimodal experiences over WebSocket.
+See the [Jupyter example](https://github.com/openai/openai-agents-python/blob/main/examples/basic/hello_world_jupyter.ipynb) for notebook use.
 
-```python
-import asyncio
-from agents.realtime import RealtimeAgent, RealtimeRunner
+## Experimental Codex mode
 
+Try [experimental embedded Codex](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/codex/README.md) when your agent needs to inspect or change a workspace with Codex's native tools while keeping the Python SDK's tools, handoffs, and guardrails.
 
-async def main() -> None:
-    agent = RealtimeAgent(
-        name="Assistant", instructions="You are a helpful voice assistant. Keep responses short."
-    )
-    runner = RealtimeRunner(starting_agent=agent)
-    session = await runner.run()
+## Choose an agent mode
 
-    async with session:
-        await session.send_message("Say hello in one short sentence.")
-        async for event in session:
-            if event.type == "audio":
-                # Forward or play event.audio.data.
-                pass
-            elif event.type == "history_added":
-                print(event.item)
-            elif event.type == "agent_end":
-                break
+<a id="run-a-sandbox-agent"></a>
+<a id="run-a-realtime-agent"></a>
+<a id="run-a-voice-agent"></a>
 
+| Task | Guide and setup |
+| --- | --- |
+| Run a text workflow | [Agents](https://openai.github.io/openai-agents-python/agents/) and [models](https://openai.github.io/openai-agents-python/models/); configure credentials for your provider. |
+| Work in a sandbox workspace | [Sandbox agents](https://openai.github.io/openai-agents-python/sandbox_agents/) and [sandbox clients](https://openai.github.io/openai-agents-python/sandbox/clients/); configure a client. The local Unix client supports macOS and Linux; Windows can use Docker or a hosted client. |
+| Delegate a task to the Codex CLI | [`codex_tool`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/tools.md#experimental-codex-tool); install and authenticate the CLI separately. |
+| Run a realtime voice or multimodal agent | [Realtime quickstart](https://openai.github.io/openai-agents-python/realtime/quickstart/); configure OpenAI credentials and a WebSocket connection. |
+| Combine speech recognition, an agent, and speech generation | [Voice quickstart](https://openai.github.io/openai-agents-python/voice/quickstart/); install the voice extra and configure OpenAI credentials. |
 
-if __name__ == "__main__":
-    asyncio.run(main())
-```
+## Guides and examples
 
-### Run a voice agent
+<a id="core-concepts"></a>
 
-Use a [`VoicePipeline`](https://openai.github.io/openai-agents-python/voice/quickstart/) to turn audio into text, run an agent workflow, and stream generated speech.
+- [Tools](https://openai.github.io/openai-agents-python/tools/): Python functions, MCP, and hosted tools.
+- [Agents as tools](https://openai.github.io/openai-agents-python/tools/#agents-as-tools) and [handoffs](https://openai.github.io/openai-agents-python/handoffs/): delegate tasks to other agents.
+- [Guardrails](https://openai.github.io/openai-agents-python/guardrails/) and [human in the loop](https://openai.github.io/openai-agents-python/human_in_the_loop/): validate inputs and outputs, and pause for approval.
+- [Sessions](https://openai.github.io/openai-agents-python/sessions/) and [tracing](https://openai.github.io/openai-agents-python/tracing/): manage conversation history and inspect runs.
+- [Examples](https://github.com/openai/openai-agents-python/tree/main/examples) and [documentation](https://openai.github.io/openai-agents-python/): find additional workflows and API references.
+- [JavaScript/TypeScript SDK](https://github.com/openai/openai-agents-js): use the SDK in JavaScript or TypeScript.
 
-```python
-import asyncio
+## Get help
 
-import numpy as np
-
-from agents import Agent
-from agents.voice import AudioInput, SingleAgentVoiceWorkflow, VoicePipeline
-
-
-async def main() -> None:
-    agent = Agent(name="Assistant", instructions="You are a helpful voice assistant.")
-    pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
-    audio_input = AudioInput(buffer=np.zeros(24000 * 3, dtype=np.int16))
-
-    result = await pipeline.run(audio_input)
-    async for event in result.stream():
-        if event.type == "voice_stream_event_audio":
-            # Forward or play event.data.
-            pass
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Explore the [examples](https://github.com/openai/openai-agents-python/tree/main/examples) directory to see the SDK in action, and read our [documentation](https://openai.github.io/openai-agents-python/) for more details.
+Use [GitHub issues](https://github.com/openai/openai-agents-python/issues) for questions, bug reports, and feedback. Report security vulnerabilities through [SECURITY.md](https://github.com/openai/openai-agents-python/blob/main/SECURITY.md).
 
 ## Contributing
 
-Please share bug reports and feature requests through [GitHub issues](https://github.com/openai/openai-agents-python/issues).
-Pull requests are limited to repository collaborators; we do not accept pull requests from non-collaborators.
-See [CONTRIBUTING.md](https://github.com/openai/openai-agents-python/blob/main/CONTRIBUTING.md) for the contribution policy and development guide.
-For security vulnerabilities, follow [SECURITY.md](https://github.com/openai/openai-agents-python/blob/main/SECURITY.md).
+Follow [CONTRIBUTING.md](https://github.com/openai/openai-agents-python/blob/main/CONTRIBUTING.md) for development setup and contribution policy. Pull requests are limited to repository collaborators.
 
 ## Acknowledgements
 
-We'd like to acknowledge the excellent work of the open-source community, especially:
-
-- [Pydantic](https://docs.pydantic.dev/latest/)
-- [Requests](https://github.com/psf/requests)
-- [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
-- [Griffe](https://github.com/mkdocstrings/griffe)
-
-This library has these optional dependencies:
-
-- [websockets](https://github.com/python-websockets/websockets)
-- [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy)
-- [any-llm](https://github.com/mozilla-ai/any-llm) and [LiteLLM](https://github.com/BerriAI/litellm)
-
-We also rely on the following tools to manage the project:
-
-- [uv](https://github.com/astral-sh/uv) and [ruff](https://github.com/astral-sh/ruff)
-- [mypy](https://github.com/python/mypy) and [Pyright](https://github.com/microsoft/pyright)
-- [pytest](https://github.com/pytest-dev/pytest) and [Coverage.py](https://github.com/coveragepy/coveragepy)
-- [MkDocs](https://github.com/squidfunk/mkdocs-material)
-
-We're committed to continuing to build the Agents SDK as an open source framework so others in the community can expand on our approach.
+The SDK uses open-source libraries including [Pydantic](https://docs.pydantic.dev/latest/), [Requests](https://github.com/psf/requests), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk), and [Griffe](https://github.com/mkdocstrings/griffe).

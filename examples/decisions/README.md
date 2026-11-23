@@ -64,9 +64,19 @@ If a handoff fails during approval resume, retain the updated `RunState`. It con
 
 ## Ask for a value without transferring
 
-Call `await decide(question, provider=provider, input=evidence)` from `agents.decisions`. Supply nonempty text or a nonempty sequence of finite JSON objects. The call copies them before the first await. It never reads run history. The default result is a boolean. Use `choices` for distinct finite JSON scalars or `output_type` for a Pydantic-compatible type. The SDK validates the returned JSON against the schema and the application parser.
+Call `await decide(question, provider=provider, input=evidence)` from `agents.decisions`. Supply nonempty text or a nonempty sequence of finite JSON objects. The call copies them before the first await. It never reads run history. The call returns a `DecisionResult`. By default, `result.value` is a boolean. Testing the wrapper itself with `if result` or `bool(result)` raises `TypeError`.
 
-A trusted `DecisionProvider` implements `async get_decision(request)` and returns `DecisionResult(value, request_id, model, usage)`. Read the validated answer from `result.value`. Both the result and `DecisionError` expose observed metadata. Missing metadata is `None`. Error reasons are `refusal` and `invalid_response`. The handoff adds reported usage to the run. Standalone calls leave accounting to the application.
+```python
+from agents.decisions import decide
+
+result = await decide("Is the number even?", provider=provider, input="2")
+if result.value:
+    print("Even")
+```
+
+Use `choices` for distinct finite JSON scalars or `output_type` for a Pydantic-compatible type. The SDK validates the returned JSON against the schema and the application parser.
+
+A trusted `DecisionProvider` implements `async get_decision(request)` and returns `DecisionResult(value, request_id, model, usage)`. Both the result and `DecisionError` expose observed metadata. Missing metadata is `None`. Error reasons are `refusal` and `invalid_response`. The handoff adds reported usage to the run. Standalone calls leave accounting to the application.
 
 `OpenAIDecisions` requires `openai>=3.26.0` with the Decisions resource. It uses a predicate threshold of 0.5 or 2 to 255 string or boolean choices. Standalone calls reject other schemas before inference. Use a custom provider for other contracts. The adapter disables client retries and leaves the client open.
 

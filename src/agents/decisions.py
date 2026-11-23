@@ -61,6 +61,9 @@ class DecisionResult(Generic[_T]):
     model: str | None = None
     usage: Usage | None = None
 
+    def __bool__(self) -> bool:
+        raise TypeError("Read DecisionResult.value to test the answer.")
+
 
 class DecisionError(ValueError):
     """A refused or invalid response. Only metadata is retained."""
