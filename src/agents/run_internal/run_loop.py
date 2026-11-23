@@ -48,6 +48,7 @@ from ..exceptions import (
     _is_tool_local_cancellation,
     _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
+    _prepare_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -2386,7 +2387,9 @@ async def start_streaming(
         if _is_tool_local_cancellation(error) and streamed_result._tool_error_selected:
             # Task.exception() cannot report cancellation. Keep the selected
             # tool failure observable instead of ending the stream successfully.
-            streamed_result._stored_exception = error
+            streamed_result._stored_exception = (
+                _prepare_data_redacted_error(error) if current_redactor() is not None else error
+            )
         raise
     else:
         streamed_result.is_complete = True

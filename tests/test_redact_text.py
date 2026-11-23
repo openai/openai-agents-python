@@ -365,14 +365,18 @@ async def test_joined_refusals_are_checked_before_refusal_handling():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("source", ["prompt", "tool"])
+@pytest.mark.parametrize("source", ["prompt", "tool", "strings", "nested_strings"])
 async def test_split_structured_text_never_reaches_model_session_or_events(streamed, source):
     from agents import SQLiteSession, ToolOutputText
 
     parts = ["private-", "example"]
 
     @tool
-    async def lookup() -> list[ToolOutputText]:
+    async def lookup():
+        if source == "strings":
+            return parts
+        if source == "nested_strings":
+            return [[parts[0]], [parts[1]]]
         return [ToolOutputText(text=part) for part in parts]
 
     prompt = [{"role": "user", "content": [{"type": "input_text", "text": p} for p in parts]}]

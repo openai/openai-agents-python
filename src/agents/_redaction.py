@@ -44,6 +44,11 @@ def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
     token = _redactor.set(redactor)
     try:
         yield
+    except asyncio.CancelledError as error:
+        # Task can replace the sanitized cancellation on Python 3.10.
+        if redactor is None or _is_error_data_redacted(error):
+            raise
+        _raise_data_redacted_error(_prepare_data_redacted_error(error))
     finally:
         _redactor.reset(token)
 
@@ -95,6 +100,20 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _text_parts(value: Any) -> Iterator[str]:
+    """Read both structured content and sequences of text in publication order."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _text_parts(item)
+    else:
+        for key in ("text", "content", "refusal"):
+            part = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+            if isinstance(part, (str, list, tuple)):
+                yield from _text_parts(part)
+
+
 def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
     if isinstance(value, str):
         # Function arguments and serialized RunState can contain escaped JSON strings.
@@ -115,11 +134,7 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
         items = [_walk(item, redact, mode) for item in value]
         # Structured prompts and tool results can split a secret across text parts.
         if len(items) > 1:
-            parts = [
-                item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
-                for item in items
-            ]
-            texts = [part for part in parts if isinstance(part, str)]
+            texts = list(_text_parts(items))
             if len(texts) > 1:
                 _walk("".join(texts), redact, "check")
         if all(a is b for a, b in zip(items, value, strict=True)):
