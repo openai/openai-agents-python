@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing_extensions import Unpack
 
 from . import _debug
+from ._redaction import current_redactor, redact_items, redaction_scope, require_clean
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -27,6 +28,7 @@ from .exceptions import (
     _is_tool_local_cancellation,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
+    _sync_data_redacted_error_boundary,
 )
 from .guardrail import (
     InputGuardrailResult,
@@ -493,6 +495,7 @@ class Runner:
         _raise_data_redacted_error(redacted_error)
 
     @classmethod
+    @_sync_data_redacted_error_boundary
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
@@ -572,6 +575,20 @@ class Runner:
         )
 
 
+def _prepare_private_input(
+    input: str | list[TResponseInputItem] | RunState[TContext], config: RunConfig
+) -> str | list[TResponseInputItem] | RunState[TContext]:
+    if current_redactor() is None:
+        if isinstance(input, RunState) and input._requires_redaction:
+            raise UserError("Continuing this run requires RunConfig.redact_text.")
+        return input
+    require_clean((config.workflow_name, config.trace_id, config.group_id, config.trace_metadata))
+    if isinstance(input, RunState):
+        # Validate the effective snapshot after applying any context override.
+        return input
+    return redact_items(input)
+
+
 class AgentRunner:
     """
     WARNING: this class is experimental and not part of the public API
@@ -592,6 +609,7 @@ class AgentRunner:
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
+            trace_stack.enter_context(redaction_scope(run_config.redact_text))
             trace_stack.enter_context(
                 operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
             )
@@ -614,6 +632,7 @@ class AgentRunner:
                                 disabled=True,
                             )
                         )
+                    input = _prepare_private_input(input, run_config)
                     configuration_agent = (
                         input._current_agent
                         if isinstance(input, RunState) and input._current_agent is not None
@@ -2655,6 +2674,7 @@ class AgentRunner:
                 with contextlib.suppress(RuntimeError):
                     default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
+    @_sync_data_redacted_error_boundary
     def run_streamed(
         self,
         starting_agent: Agent[TContext],
@@ -2676,6 +2696,7 @@ class AgentRunner:
         # Synchronous setup can invoke application providers before the task starts.
         # Restore caller context before creating the independently masked background task.
         with (
+            redaction_scope(run_config.redact_text),
             operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data),
             TraceCtxManager(
                 workflow_name=run_config.workflow_name,
@@ -2688,6 +2709,7 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            input = _prepare_private_input(input, run_config)
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
             run_state: RunState[TContext] | None = None
@@ -2918,6 +2940,7 @@ class AgentRunner:
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
             with (
+                redaction_scope(run_config.redact_text),
                 operation_tracing_scope(
                     run_config.tracing, run_config.trace_include_sensitive_data
                 ),

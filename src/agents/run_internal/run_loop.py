@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from copy import deepcopy
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -22,6 +22,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
+from .._redaction import current_redactor, redact_response, require_clean
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
@@ -73,7 +74,7 @@ from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
-from ..models._run_context import ModelToolHooks, model_run_context, model_run_context_stream
+from ..models._run_context import ModelToolHooks, model_run_context
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -2575,6 +2576,7 @@ async def run_single_turn_streamed(
         input_items=input,
         system_instructions=system_prompt,
     )
+    require_clean(filtered.input)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     if server_conversation_tracker is not None:
@@ -2686,21 +2688,21 @@ async def run_single_turn_streamed(
     stream_response_id: str | None = None
     stream_request_id: str | None = None
 
-    # Raising out of this loop leaves the model stream suspended at its yield, so close it
-    # explicitly instead of waiting for garbage collection to finalize the generator chain.
-    async with aclosing(
-        model_run_context_stream(
-            retry_stream,
-            tool_use_tracker,
-            ModelToolHooks(
-                public_agent,
-                context_wrapper,
-                hooks,
-                run_config.tool_execution,
-                resumable=isinstance(session, ResumableRun),
-            ),
+    # Keep interpretation of error events, EOF and stream cleanup inside the model boundary.
+    async with AsyncExitStack() as stack:
+        stack.enter_context(
+            model_run_context(
+                tool_use_tracker,
+                ModelToolHooks(
+                    public_agent,
+                    context_wrapper,
+                    hooks,
+                    run_config.tool_execution,
+                    resumable=isinstance(session, ResumableRun),
+                ),
+            )
         )
-    ) as model_events:
+        model_events = await stack.enter_async_context(aclosing(retry_stream))
         async for event in model_events:
             stream_event_count += 1
             last_stream_event_type = getattr(event, "type", None)
@@ -2708,7 +2710,9 @@ async def run_single_turn_streamed(
             if isinstance(event_response, Response):
                 stream_response_id = event_response.id
                 stream_request_id = getattr(event_response, "_request_id", None)
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            # A secret can span any number of deltas. Only publish completed, scrubbed items.
+            if current_redactor() is None:
+                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
             terminal_response: Response | None = None
             is_completed_event = False
@@ -2763,15 +2767,17 @@ async def run_single_turn_streamed(
             if isinstance(event, ResponseOutputItemDoneEvent):
                 streamed_response_output.append(event.item)
 
-    if final_response is None:
-        raise ModelBehaviorError(
-            "Model did not produce a final response! The stream ended before a "
-            "response.completed event was received. "
-            f"event_count={stream_event_count}, last_event_type={last_stream_event_type!r}, "
-            f"response_id={stream_response_id!r}, request_id={stream_request_id!r}. "
-            "Share these IDs when reporting this issue; None means no value was observed."
-        )
+        if final_response is None:
+            raise ModelBehaviorError(
+                "Model did not produce a final response! The stream ended before a "
+                "response.completed event was received. "
+                f"event_count={stream_event_count}, last_event_type={last_stream_event_type!r}, "
+                f"response_id={stream_response_id!r}, request_id={stream_request_id!r}. "
+                "Share these IDs when reporting this issue; None means no value was observed."
+            )
 
+    assert final_response is not None
+    final_response = redact_response(final_response)
     record_compaction_model_response(
         session,
         context_wrapper,
@@ -3038,6 +3044,7 @@ async def get_new_response(
         input_items=input,
         system_instructions=system_prompt,
     )
+    require_clean(filtered.input)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
@@ -3159,6 +3166,7 @@ async def get_new_response(
                 isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
             ),
         )
+    new_response = redact_response(new_response)
     if server_conversation_tracker is not None:
         # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
         # filtered input as delivered again once a retry succeeds so subsequent turns only send

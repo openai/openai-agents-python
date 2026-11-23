@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
+from ._redaction import current_redactor, redaction_scope
 from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -123,6 +124,7 @@ def _populate_state_from_result(
 ) -> RunState[Any]:
     """Populate a RunState with common fields from a RunResult."""
     state._resumable_binding = result._resumable_binding
+    state._requires_redaction = result._requires_redaction
     state._current_agent = result.last_agent
     model_input_items = getattr(result, "_model_input_items", None)
     if isinstance(model_input_items, list):
@@ -399,6 +401,11 @@ class RunResultBase(abc.ABC):
 
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
+
+    _requires_redaction: bool = field(
+        default_factory=lambda: current_redactor() is not None, init=False, repr=False
+    )
+    """Whether this result requires caller-supplied redaction when resumed."""
 
     _trace_state: TraceState | None = field(default=None, init=False, repr=False)
     """Serialized trace metadata captured during the run."""
@@ -786,6 +793,8 @@ class RunResultStreaming(RunResultBase):
     )
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
+        # The consumer can start cleanup outside the run task before its done callbacks run.
+        self._cleanup_redactor = current_redactor()
         self._current_agent_ref = weakref.ref(self.current_agent)
         # Store the original input at creation time (it will be set via input field)
         if self._original_input is None:
@@ -834,7 +843,8 @@ class RunResultStreaming(RunResultBase):
                         error,
                     )
 
-            task = asyncio.create_task(_cleanup_once())
+            with redaction_scope(self._cleanup_redactor):
+                task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
         await task
@@ -911,7 +921,8 @@ class RunResultStreaming(RunResultBase):
         async def run_cleanup() -> None:
             await cleanup()
 
-        task = asyncio.create_task(run_cleanup())
+        with redaction_scope(self._cleanup_redactor):
+            task = asyncio.create_task(run_cleanup())
         self._model_provider_cleanup_task = task
         return task
 
@@ -1137,6 +1148,7 @@ class RunResultStreaming(RunResultBase):
                     if not cancelled:
                         await self._await_model_provider_cleanup()
                         await self._run_sandbox_cleanup()
+                        self._cleanup_redactor = None
             finally:
                 # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
                 # completion sentinels before we clear the queues for observability.

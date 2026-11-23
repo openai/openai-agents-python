@@ -8,6 +8,7 @@ from typing import Any, cast
 
 from openai.types.responses.response_usage import OutputTokensDetails
 
+from .._redaction import current_redactor, require_clean
 from ..agent import Agent
 from ..agent_tool_state import set_agent_tool_state_scope
 from ..exceptions import UserError
@@ -352,25 +353,17 @@ def resolve_resumed_context(
     context into ``Runner.run`` / ``Runner.run_streamed`` so this same path
     applies there.
     """
-    if context is not None:
-        existing_context = run_state._context
-        if existing_context is not None:
-            application_context = (
-                context.context if isinstance(context, RunContextWrapper) else context
-            )
-            if existing_context is not context:
-                existing_context.context = application_context
-            set_agent_tool_state_scope(existing_context, run_state._agent_tool_state_scope_id)
-            run_state._context = existing_context
-            return existing_context
-
-        context_wrapper = ensure_context_wrapper(context)
-        set_agent_tool_state_scope(context_wrapper, run_state._agent_tool_state_scope_id)
-        run_state._context = context_wrapper
-        return context_wrapper
     if run_state._context is None:
         run_state._context = ensure_context_wrapper(context)
+    elif context is not None and run_state._context is not context:
+        run_state._context.context = (
+            context.context if isinstance(context, RunContextWrapper) else context
+        )
     set_agent_tool_state_scope(run_state._context, run_state._agent_tool_state_scope_id)
+    if current_redactor() is not None:
+        # Check exactly what can be saved, without rewriting an approved action.
+        require_clean(run_state.to_json())
+        run_state._requires_redaction = True
     return run_state._context
 
 

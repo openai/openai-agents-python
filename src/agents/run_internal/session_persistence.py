@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
+from .._redaction import require_clean
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from .._tool_invocation import tool_output_identity
 from ..agent import Agent
@@ -318,6 +319,7 @@ async def _session_add_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape."""
+    require_clean(items)
     session_wrapper = _get_session_wrapper(session, wrapper)
 
     async def write_items() -> None:

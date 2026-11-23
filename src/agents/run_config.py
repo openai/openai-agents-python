@@ -589,6 +589,23 @@ class RunConfig:
     output and guardrail ``output_info`` are never passed to the formatter.
     """
 
+    redact_text: Callable[[str], str] | None = field(default=None, repr=False)
+    """Optional text scrubber for Runner inputs, model items and SDK tool payloads.
+
+    Supply a synchronous, deterministic function that leaves already sanitized text unchanged.
+    For example, use ``lambda text: text.replace(secret, "[redacted]")``. Replacements affect
+    the inputs seen by models and Python tools. Unsupported values, unsafe approvals and
+    checkpoints that still need redaction fail closed. Supply the policy again when resuming.
+
+    Protected runs withhold raw stream events, mute the ``openai.agents`` and
+    ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when
+    content tracing is requested. Semantic events remain available. Tool errors and
+    provider failures after retries can lose their original exception type. Application and
+    provider logs, opaque media and work inside Codex are outside this policy. Keep
+    secrets out of configuration, identifiers and application metadata. No redactor
+    is active by default.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -620,9 +637,14 @@ class RunConfig:
             output_guardrail_blocked_message: (
                 str | OutputGuardrailBlockedMessageFormatter | None
             ) = None,
+            redact_text: Callable[[str], str] | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.redact_text is not None and (
+            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
+        ):
+            raise TypeError("redact_text must be a synchronous callable or None")
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message

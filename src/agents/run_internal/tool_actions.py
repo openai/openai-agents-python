@@ -19,6 +19,7 @@ from openai.types.responses.response_input_item_param import (
 )
 from openai.types.responses.response_input_param import ComputerCallOutput
 
+from .._redaction import hook_payload_diagnostics
 from .._tool_identity import get_mapping_or_attr, get_tool_trace_name_for_tool
 from ..agent import Agent
 from ..exceptions import ModelBehaviorError, UserError
@@ -148,7 +149,8 @@ class ComputerAction:
             )
 
             try:
-                output = await cls._execute_action_and_capture(computer, action.tool_call)
+                with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
+                    output = await cls._execute_action_and_capture(computer, action.tool_call)
             except Exception as exc:
                 error_text = format_shell_error(exc)
                 trace_error = get_trace_tool_error(
@@ -435,8 +437,9 @@ class LocalShellAction:
             span.start(mark_as_current=True)
             if span.span_data.operation.detail == "content":
                 span.span_data.input = _serialize_trace_payload(call.tool_call.action)
-            output = call.local_shell_tool.executor(request)
-            raw_result = await output if inspect.isawaitable(output) else output
+            with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
+                output = call.local_shell_tool.executor(request)
+                raw_result = await output if inspect.isawaitable(output) else output
 
             async def finalize_output() -> ToolCallOutputItem:
                 result = await transform_tool_output(

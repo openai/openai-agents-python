@@ -195,6 +195,26 @@ _RedactedParams = ParamSpec("_RedactedParams")
 _RedactedResult = TypeVar("_RedactedResult")
 
 
+def _sync_data_redacted_error_boundary(
+    method: Callable[_RedactedParams, _RedactedResult],
+) -> Callable[_RedactedParams, _RedactedResult]:
+    """Release streamed-call arguments on synchronous startup failures."""
+
+    @wraps(method)
+    def wrapped(*args: _RedactedParams.args, **kwargs: _RedactedParams.kwargs) -> _RedactedResult:
+        try:
+            return method(*args, **kwargs)
+        except BaseException as error:
+            if not _is_error_data_redacted(error):
+                raise
+            _detach_data_redacted_error_traceback(error)
+            redacted_error = error
+        del args, kwargs
+        _raise_data_redacted_error(redacted_error)
+
+    return wrapped
+
+
 def _data_redacted_error_boundary(
     method: Callable[_RedactedParams, Awaitable[_RedactedResult]],
 ) -> Callable[_RedactedParams, Coroutine[Any, Any, _RedactedResult]]:

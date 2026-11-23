@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from .._redaction import redact_payload
 from ..exceptions import UserError
 from ..items import ToolCallOutputItem, ToolCallOutputTypes
 from ..memory.resumable_session import _ResumableSessionBinding
@@ -207,6 +208,7 @@ async def resolve_native_approval_step(
                 tool_lookup_key=pending.tool_lookup_key,
                 tool_namespace=pending.tool_namespace,
             )
+    output = redact_payload(output)
     result_item = ToolCallOutputItem(
         agent=bindings.public_agent,
         raw_item=cast(

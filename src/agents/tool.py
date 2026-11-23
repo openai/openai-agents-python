@@ -64,6 +64,7 @@ from ._function_tool_arguments import (
     arguments_unchanged,
     can_prepare_without_user_code,
 )
+from ._redaction import current_redactor
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -2850,7 +2851,7 @@ def function_tool(
                 result = None
                 raise
 
-            if _debug.DONT_LOG_TOOL_DATA:
+            if _debug.DONT_LOG_TOOL_DATA or current_redactor() is not None:
                 logger.debug("Tool %s completed.", tool_name)
             else:
                 logger.debug("Tool %s returned %s", tool_name, result)
