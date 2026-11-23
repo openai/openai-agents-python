@@ -65,6 +65,7 @@ from .run_config import (
     RunConfig,
     RunOptions,
     ToolCallHookContext,
+    ToolDeclaration,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
     ToolExecutionConfig,
@@ -177,6 +178,7 @@ from .run_internal.session_persistence import (
     take_held_session_write,
     update_run_state_after_resume,
 )
+from .run_internal.tool_declarations import validate_resume_policy
 from .run_internal.tool_use_tracker import (
     AgentToolUseTracker,
     hydrate_tool_use_tracker,
@@ -221,6 +223,7 @@ __all__ = [
     "ReasoningItemIdPolicy",
     "ToolExecutionConfig",
     "ToolCallHookContext",
+    "ToolDeclaration",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
@@ -758,6 +761,7 @@ class AgentRunner:
                 context=context,
             )
             context_wrapper._resolve_function_approval_owners(starting_agent)
+            validate_resume_policy(run_state, context_wrapper, run_config)
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -2813,6 +2817,7 @@ class AgentRunner:
                     context=context,
                 )
                 context_wrapper._resolve_function_approval_owners(starting_agent)
+                validate_resume_policy(run_state, context_wrapper, run_config)
 
                 # Override max_turns with the state's max_turns to preserve it across resumption
                 max_turns = run_state._max_turns
