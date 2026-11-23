@@ -231,6 +231,97 @@ def _data_redacted_error_boundary(
     return wrapped
 
 
+def _safe_data_redacted_leaf_error(error: BaseException) -> BaseException:
+    """Snapshot a payload-free non-group replacement without mutating the source."""
+    safe_error = _copy_data_redacted_process_control_error(error)
+    if isinstance(safe_error, asyncio.CancelledError):
+        safe_error.args = (_DATA_REDACTED_ERROR_MESSAGE,)
+        _mark_error_data_redacted(safe_error)
+        return safe_error
+    if isinstance(safe_error, GeneratorExit | KeyboardInterrupt | SystemExit):
+        return safe_error
+
+    if issubclass(type(error), Exception):
+        safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
+        _mark_error_data_redacted(safe_error)
+        return safe_error
+
+    safe_error = BaseException()
+    _mark_error_data_redacted(safe_error)
+    return safe_error
+
+
+class _RedactedBaseExceptionGroup(BaseExceptionGroup):
+    """Payload-free group that remains outside the Exception hierarchy."""
+
+
+def _safe_data_redacted_error(error: BaseException) -> BaseException:
+    """Return a payload-free failure without swallowing control flow."""
+    if _base_exception_group_exceptions(error) is None:
+        safe_error = _safe_data_redacted_leaf_error(error)
+        _detach_source_exception_traceback(error)
+        return safe_error
+
+    group_children: dict[int, tuple[BaseException, ...]] = {}
+    group_is_exception: dict[int, bool] = {}
+    leaf_errors: dict[int, BaseException] = {}
+    safe_errors: dict[int, BaseException] = {}
+    group_postorder: list[BaseException] = []
+    pending: list[tuple[BaseException, bool]] = [(error, False)]
+    try:
+        while pending:
+            current, expanded = pending.pop()
+            current_id = id(current)
+            children = _base_exception_group_exceptions(current)
+            if children is None:
+                leaf_errors.setdefault(current_id, current)
+                continue
+            if expanded:
+                group_postorder.append(current)
+                continue
+            if current_id in group_children:
+                continue
+            group_children[current_id] = children
+            group_is_exception[current_id] = issubclass(type(current), Exception)
+            pending.append((current, True))
+            pending.extend((child, False) for child in reversed(children))
+
+        # Snapshot leaf replacements before rebuilding the group topology. Source exceptions
+        # and the exceptiongroup backport's instance state remain caller-owned.
+        for current_id, current in leaf_errors.items():
+            safe_errors[current_id] = _safe_data_redacted_leaf_error(current)
+
+        # Detach the source root's retry traceback before constructing replacement groups.
+        # Its fields and linked exceptions remain intact and never cross the public boundary.
+        _detach_source_exception_traceback(error)
+
+        for group in group_postorder:
+            children = group_children[id(group)]
+            safe_children = [safe_errors[id(child)] for child in children]
+            if not safe_children:
+                safe_children = [BaseException()]
+            if group_is_exception[id(group)]:
+                safe_group: BaseException = BaseExceptionGroup(
+                    _DATA_REDACTED_ERROR_MESSAGE,
+                    safe_children,
+                )
+            else:
+                safe_group = _RedactedBaseExceptionGroup(
+                    _DATA_REDACTED_ERROR_MESSAGE,
+                    safe_children,
+                )
+            _mark_error_data_redacted(safe_group)
+            safe_errors[id(group)] = safe_group
+        return safe_errors[id(error)]
+    except BaseException as conversion_error:
+        # Fail closed if traversal or reconstruction itself fails. Detach the caught roots'
+        # tracebacks without clearing caller frames or mutating linked exceptions.
+        _detach_source_exception_traceback(error)
+        safe_error = _safe_data_redacted_leaf_error(conversion_error)
+        _detach_source_exception_traceback(conversion_error)
+        return safe_error
+
+
 def _prepare_data_redacted_error(
     error: BaseException,
     *,

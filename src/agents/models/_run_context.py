@@ -6,12 +6,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .._redaction import current_redactor
-from ..exceptions import (
-    _is_error_data_redacted,
-    _prepare_data_redacted_error,
-    _raise_data_redacted_error,
-)
+from .._redaction import current_redactor, raise_protected_error
+from ..exceptions import _is_error_data_redacted
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -44,7 +40,7 @@ def model_run_context(owner: object, hooks: ModelToolHooks | None = None) -> Ite
             raise
         # Retry decisions need the original provider error. Once they finish,
         # discard any reflected request, response body and exception chain.
-        _raise_data_redacted_error(_prepare_data_redacted_error(error))
+        raise_protected_error(error)
     finally:
         _MODEL_RUN_CONTEXT.reset(token)
 

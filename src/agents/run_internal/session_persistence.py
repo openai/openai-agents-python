@@ -203,6 +203,7 @@ async def admit_pending_input(
     admission_items: list[RunItem] = [
         InputItem(agent=agent, raw_item=item) for item in pending_input
     ]
+    require_clean_run_items(run_state._original_input, run_state._session_items, admission_items)
 
     if session is not None and server_conversation_tracker is None:
         await save_result_to_session(
@@ -646,6 +647,23 @@ async def persist_session_items_for_guardrail_trip(
     return updated_session_input_items
 
 
+def require_clean_run_items(
+    original: str | list[TResponseInputItem], prior: Sequence[RunItem], items: Sequence[RunItem]
+) -> None:
+    """Check locally accumulated items even when the next request sends only a delta."""
+    if not items or current_redactor() is None:
+        return
+    # Some resume and guardrail paths have already appended this batch.
+    batch = {id(item) for item in items}
+    require_clean_history(
+        [
+            *ItemHelpers.input_to_new_input_list(original),
+            *(item.raw_item for item in prior if id(item) not in batch),
+            *(item.raw_item for item in items),
+        ]
+    )
+
+
 def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
     """Return the items to persist for a turn, preferring session_step_items when set."""
     items = (
@@ -709,6 +727,7 @@ def resumed_turn_items(
     turn_session_items = order_current_turn_tool_outputs(
         session_items_for_turn(turn_result), start=0, call_positions=call_positions
     )
+    require_clean_run_items(turn_result.original_input, session_items, turn_session_items)
     session_items = [*session_items, *turn_session_items]
     return generated_items, session_items, turn_session_items
 

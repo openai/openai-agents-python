@@ -10,18 +10,20 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import fields, is_dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 
 from pydantic import BaseModel
 
 from . import _debug
 from .exceptions import (
+    BaseExceptionGroup,
     ModelBehaviorError,
     UserError,
     _is_error_data_redacted,
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
+    _safe_data_redacted_error,
 )
 
 if TYPE_CHECKING:
@@ -40,16 +42,23 @@ def current_redactor() -> _Redactor | None:
     return _redactor.get()
 
 
+def raise_protected_error(error: BaseException) -> NoReturn:
+    """Remove diagnostics while preserving grouped interruptions in a protected run."""
+    if issubclass(type(error), BaseExceptionGroup):
+        _raise_data_redacted_error(_safe_data_redacted_error(error))
+    _raise_data_redacted_error(_prepare_data_redacted_error(error))
+
+
 @contextmanager
 def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
     token = _redactor.set(redactor)
     try:
         yield
-    except asyncio.CancelledError as error:
+    except (asyncio.CancelledError, BaseExceptionGroup) as error:
         # Task can replace the sanitized cancellation on Python 3.10.
         if redactor is None or _is_error_data_redacted(error):
             raise
-        _raise_data_redacted_error(_prepare_data_redacted_error(error))
+        raise_protected_error(error)
     finally:
         _redactor.reset(token)
 
@@ -74,6 +83,10 @@ def hook_payload_diagnostics(
             raise
         if current_redactor() is None and not (redact_by_default and _debug.DONT_LOG_TOOL_DATA):
             raise
+    except BaseException as error:
+        if current_redactor() is None:
+            raise
+        _raise_data_redacted_error(_safe_data_redacted_error(error))
     safe_error = error_type(message)
     _mark_error_data_redacted(safe_error)
     _raise_data_redacted_error(safe_error)
@@ -221,6 +234,8 @@ def _apply(value: _T, mode: _Mode) -> _T:
     except Exception:
         # Neither callback exceptions nor validation errors are safe diagnostics.
         pass
+    except BaseException as failure:
+        _raise_data_redacted_error(_safe_data_redacted_error(failure))
 
     error = UserError("RunConfig.redact_text could not safely redact this data.")
     _mark_error_data_redacted(error)

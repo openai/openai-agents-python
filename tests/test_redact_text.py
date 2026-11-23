@@ -15,6 +15,108 @@ from .memory.test_native_approval_recovery import setup_native
 SECRET = "private-example"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("source", ["executor", "redactor", "provider", "instructions"])
+async def test_grouped_failures_preserve_control_flow_without_private_diagnostics(streamed, source):
+    from agents.exceptions import BaseExceptionGroup
+    from agents.testing import ModelStep
+
+    original = BaseExceptionGroup(
+        SECRET,
+        [
+            RuntimeError(SECRET),
+            BaseExceptionGroup(
+                SECRET,
+                [
+                    asyncio.CancelledError(SECRET),
+                    SystemExit(SECRET),
+                    KeyboardInterrupt(SECRET),
+                    GeneratorExit(SECRET),
+                    BaseException(SECRET),
+                ],
+            ),
+        ],
+    )
+    original.__cause__ = ValueError(SECRET)
+
+    @tool(failure_error_function=None)
+    async def lookup() -> str:
+        raise original
+
+    def grouped_policy(value):
+        if value == "trigger" and source == "redactor":
+            raise original
+        return scrub(value)
+
+    def fail(_context, _agent=None):
+        raise original
+
+    step = (
+        ModelStep.respond(fail)
+        if source == "provider"
+        else [function_call("lookup", {}, call_id="call")]
+    )
+    agent = Agent(
+        name="worker",
+        instructions=fail if source == "instructions" else None,
+        tools=[lookup],
+        model=ScriptedModel([step]),
+    )
+    with pytest.raises(BaseExceptionGroup) as caught:
+        config = RunConfig(redact_text=grouped_policy)
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "trigger", run_config=config).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "trigger", run_config=config)
+
+    safe = caught.value
+    assert not isinstance(safe, Exception)
+    assert safe is not original
+    assert isinstance(safe.exceptions[0], Exception)
+    nested = safe.exceptions[1]
+    assert isinstance(nested, BaseExceptionGroup)
+    assert isinstance(nested.exceptions[0], asyncio.CancelledError)
+    assert isinstance(nested.exceptions[1], SystemExit)
+    assert nested.exceptions[1].code == 1
+    assert isinstance(nested.exceptions[2], KeyboardInterrupt)
+    assert isinstance(nested.exceptions[3], GeneratorExit)
+    assert not isinstance(nested.exceptions[4], Exception)
+    pending = [safe]
+    while pending:
+        error = pending.pop()
+        assert SECRET not in str(error)
+        assert error.__cause__ is error.__context__ is None
+        assert SECRET not in repr(vars(error))
+        if isinstance(error, BaseExceptionGroup):
+            pending.extend(error.exceptions)
+        if error is not safe:
+            assert error.__traceback__ is None
+    assert original.__cause__.args == (SECRET,)
+    assert original.exceptions[0].args == (SECRET,)
+
+
+@pytest.mark.asyncio
+async def test_grouped_tool_failure_without_redaction_retains_original_diagnostics():
+    from agents.exceptions import BaseExceptionGroup
+
+    original = BaseExceptionGroup(SECRET, [RuntimeError(SECRET), asyncio.CancelledError(SECRET)])
+
+    @tool(failure_error_function=None)
+    async def lookup() -> str:
+        raise original
+
+    agent = Agent(
+        name="worker",
+        tools=[lookup],
+        model=ScriptedModel([[function_call("lookup", {}, call_id="call")]]),
+    )
+    with pytest.raises(BaseExceptionGroup) as caught:
+        await Runner.run(agent, "go")
+    assert caught.value is original
+
+
 def scrub(value: str) -> str:
     return value.replace(SECRET, "[removed]")
 
@@ -537,12 +639,23 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("source", ["model", "tool", "resume", "mixed", "next_prompt"])
-async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, source):
+@pytest.mark.parametrize(
+    ("source", "history"),
+    [
+        (source, history)
+        for source in ("model", "tool", "resume", "mixed")
+        for history in ("session", "conversation_id", "previous_response_id")
+    ]
+    + [("next_prompt", "session")],
+)
+async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, source, history):
     from agents import RunState, SQLiteSession
+
+    executed = []
 
     @tool(needs_approval=source == "resume")
     def lookup(i: int) -> str:
+        executed.append(i)
         if source == "tool":
             return "private-" if not i else "example"
         if source == "mixed":
@@ -560,22 +673,28 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
         script = [[assistant_message("private-")], [assistant_message("example")]]
     elif source == "mixed":
         script = [[assistant_message("private-"), first], [assistant_message("ok")]]
+    elif source == "model":
+        script = [
+            [assistant_message("private-"), first],
+            [assistant_message("example"), function_call("lookup", {"i": 1}, call_id="two")],
+        ]
     else:
         script = [[assistant_message("private-"), first], [assistant_message("example")]]
     model = ScriptedModel(script)
     agent = Agent(name="worker", model=model, tools=[lookup])
-    session = SQLiteSession("test")
+    session = SQLiteSession("test") if history == "session" else None
+    options = {history: session or "prior"}
     config = RunConfig(redact_text=scrub)
     published = []
 
     async def invoke(value):
         if streamed:
-            result = Runner.run_streamed(agent, value, session=session, run_config=config)
+            result = Runner.run_streamed(agent, value, run_config=config, **options)
             async for event in result.stream_events():
                 if event.type == "run_item_stream_event":
                     published.append(str(event.item.raw_item))
             return result
-        return await Runner.run(agent, value, session=session, run_config=config)
+        return await Runner.run(agent, value, run_config=config, **options)
 
     try:
         value: str | RunState = "go"
@@ -589,10 +708,14 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
         with pytest.raises(UserError, match="redact_text"):
             await invoke(value)
         assert len(model.calls) == (1 if source == "mixed" else 2)
+        if source == "model":
+            assert executed == [0]
         assert "example" not in str(published)
-        assert "example" not in str(await session.get_items())
+        if session is not None:
+            assert "example" not in str(await session.get_items())
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 @pytest.mark.asyncio

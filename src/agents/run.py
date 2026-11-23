@@ -167,6 +167,7 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    require_clean_run_items,
     resume_pending_session_write,
     resumed_failure_items,
     resumed_response_store,
@@ -1686,11 +1687,13 @@ class AgentRunner:
 
                         async def _save_max_turns_handler_output(
                             items: list[RunItem],
+                            original_input: str | list[TResponseInputItem] = original_input,
                             store_setting: bool | None = store_setting,
                             generated_items: list[RunItem] = generated_items,
                             session_items: list[RunItem] = session_items,
                         ) -> None:
                             nonlocal handler_output_recorded, handler_persisted_item_count
+                            require_clean_run_items(original_input, session_items, items)
                             handler_persisted_item_count = (
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
@@ -1862,6 +1865,7 @@ class AgentRunner:
                                         bindings=current_bindings,
                                         original_input=original_input,
                                         generated_items=items_for_model,
+                                        session_items=session_items,
                                         hooks=hooks,
                                         context_wrapper=context_wrapper,
                                         run_config=run_config,
@@ -1969,6 +1973,7 @@ class AgentRunner:
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 generated_items=items_for_model,
+                                session_items=session_items,
                                 hooks=hooks,
                                 context_wrapper=context_wrapper,
                                 run_config=run_config,
@@ -2004,6 +2009,9 @@ class AgentRunner:
                         ) and not input_guardrails_triggered(_attempt_input_guardrail_results())
                         if partial_tool_results and input_accepted:
                             partial_result = partial_tool_results[0]
+                            require_clean_run_items(
+                                original_input, session_items, partial_result.new_step_items
+                            )
                             generated_items.extend(partial_result.new_step_items)
                             session_items.extend(partial_result.new_step_items)
                             model_responses.append(partial_result.model_response)
@@ -2063,6 +2071,7 @@ class AgentRunner:
                     generated_items = turn_result.pre_step_items + turn_result.new_step_items
                     # Accumulate unfiltered items for observability.
                     turn_session_items = session_items_for_turn(turn_result)
+                    require_clean_run_items(original_input, session_items, turn_session_items)
                     session_items.extend(turn_session_items)
                     if pending_input_admission_items and run_state is not None:
                         run_state._generated_items = list(generated_items)

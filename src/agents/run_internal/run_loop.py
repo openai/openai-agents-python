@@ -26,7 +26,6 @@ from .._redaction import (
     current_redactor,
     redact_model_input,
     redact_response,
-    require_clean_history,
 )
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
@@ -35,25 +34,20 @@ from .._tool_identity import (
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
-    _DATA_REDACTED_ERROR_MESSAGE,
     AgentsException,
-    BaseExceptionGroup,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
-    _base_exception_group_exceptions,
     _clear_data_redacted_error_traceback,
-    _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
-    _detach_source_exception_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
-    _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
     _prepare_data_redacted_error,
+    _safe_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -201,6 +195,7 @@ from .session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     record_compaction_model_response,
+    require_clean_run_items,
     resume_pending_session_write,
     resumed_failure_items,
     resumed_response_store,
@@ -318,23 +313,14 @@ __all__ = [
 ]
 
 _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+_safe_redacted_persistence_error = _safe_data_redacted_error
 _STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
 
 
 def _publish_stream_items(
     items: list[RunItem], result: RunResultStreaming, emitted: set[str] | None = None
 ) -> None:
-    if items and current_redactor() is not None:
-        # Some resume and guardrail paths already included this batch in new_items.
-        batch = {id(item) for item in items}
-        prior = [item.raw_item for item in result.new_items if id(item) not in batch]
-        require_clean_history(
-            [
-                *ItemHelpers.input_to_new_input_list(result.input),
-                *prior,
-                *(i.raw_item for i in items),
-            ]
-        )
+    require_clean_run_items(result.input, result.new_items, items)
     if emitted:
         items = [item for item in items if _stream_event_item_occurrence_key(item) not in emitted]
     stream_step_items_to_queue(items, result._event_queue)
@@ -768,97 +754,6 @@ async def _finalize_streamed_final_output(
     streamed_result.is_complete = True
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-
-
-def _safe_redacted_persistence_leaf_error(error: BaseException) -> BaseException:
-    """Snapshot a payload-free non-group replacement without mutating the source."""
-    safe_error = _copy_data_redacted_process_control_error(error)
-    if isinstance(safe_error, asyncio.CancelledError):
-        safe_error.args = (_DATA_REDACTED_ERROR_MESSAGE,)
-        _mark_error_data_redacted(safe_error)
-        return safe_error
-    if isinstance(safe_error, GeneratorExit | KeyboardInterrupt | SystemExit):
-        return safe_error
-
-    if issubclass(type(error), Exception):
-        safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
-        _mark_error_data_redacted(safe_error)
-        return safe_error
-
-    safe_error = BaseException()
-    _mark_error_data_redacted(safe_error)
-    return safe_error
-
-
-class _RedactedBaseExceptionGroup(BaseExceptionGroup):
-    """Payload-free group that remains outside the Exception hierarchy."""
-
-
-def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
-    """Return a payload-free persistence failure without swallowing control flow."""
-    if _base_exception_group_exceptions(error) is None:
-        safe_error = _safe_redacted_persistence_leaf_error(error)
-        _detach_source_exception_traceback(error)
-        return safe_error
-
-    group_children: dict[int, tuple[BaseException, ...]] = {}
-    group_is_exception: dict[int, bool] = {}
-    leaf_errors: dict[int, BaseException] = {}
-    safe_errors: dict[int, BaseException] = {}
-    group_postorder: list[BaseException] = []
-    pending: list[tuple[BaseException, bool]] = [(error, False)]
-    try:
-        while pending:
-            current, expanded = pending.pop()
-            current_id = id(current)
-            children = _base_exception_group_exceptions(current)
-            if children is None:
-                leaf_errors.setdefault(current_id, current)
-                continue
-            if expanded:
-                group_postorder.append(current)
-                continue
-            if current_id in group_children:
-                continue
-            group_children[current_id] = children
-            group_is_exception[current_id] = issubclass(type(current), Exception)
-            pending.append((current, True))
-            pending.extend((child, False) for child in reversed(children))
-
-        # Snapshot leaf replacements before rebuilding the group topology. Source exceptions
-        # and the exceptiongroup backport's instance state remain caller-owned.
-        for current_id, current in leaf_errors.items():
-            safe_errors[current_id] = _safe_redacted_persistence_leaf_error(current)
-
-        # Detach the source root's retry traceback before constructing replacement groups.
-        # Its fields and linked exceptions remain intact and never cross the public boundary.
-        _detach_source_exception_traceback(error)
-
-        for group in group_postorder:
-            children = group_children[id(group)]
-            safe_children = [safe_errors[id(child)] for child in children]
-            if not safe_children:
-                safe_children = [BaseException()]
-            if group_is_exception[id(group)]:
-                safe_group: BaseException = BaseExceptionGroup(
-                    _DATA_REDACTED_ERROR_MESSAGE,
-                    safe_children,
-                )
-            else:
-                safe_group = _RedactedBaseExceptionGroup(
-                    _DATA_REDACTED_ERROR_MESSAGE,
-                    safe_children,
-                )
-            _mark_error_data_redacted(safe_group)
-            safe_errors[id(group)] = safe_group
-        return safe_errors[id(error)]
-    except BaseException as conversion_error:
-        # Fail closed if traversal or reconstruction itself fails. Detach the caught roots'
-        # tracebacks without clearing caller frames or mutating linked exceptions.
-        _detach_source_exception_traceback(error)
-        safe_error = _safe_redacted_persistence_leaf_error(conversion_error)
-        _detach_source_exception_traceback(conversion_error)
-        return safe_error
 
 
 async def finalize_max_turns_handler_output(
@@ -1861,6 +1756,9 @@ async def start_streaming(
                 )
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
+                require_clean_run_items(
+                    streamed_result.input, streamed_result.new_items, [synthesized_item]
+                )
                 include_in_history = handler_result.include_in_history
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
@@ -2085,6 +1983,11 @@ async def start_streaming(
                         )
                     ):
                         partial_result = partial_tool_results[0]
+                        require_clean_run_items(
+                            streamed_result.input,
+                            streamed_result.new_items,
+                            partial_result.new_step_items,
+                        )
                         streamed_result._model_input_items.extend(partial_result.new_step_items)
                         streamed_result.new_items.extend(partial_result.new_step_items)
                         streamed_result.raw_responses.append(partial_result.model_response)
@@ -2900,6 +2803,7 @@ async def run_single_turn(
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
+    session_items: list[RunItem],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -3000,6 +2904,8 @@ async def run_single_turn(
     async def after_invocation_validation(
         _processed_response: ProcessedResponse | None,
     ) -> bool:
+        if _processed_response is not None:
+            require_clean_run_items(original_input, session_items, _processed_response.new_items)
         if response_accepted and on_response_accepted is not None:
             on_response_accepted(new_response, _processed_response)
         if response_accepted and on_response_hooks_started is not None:
