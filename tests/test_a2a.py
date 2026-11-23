@@ -19,7 +19,7 @@ from tests.test_responses import get_function_tool_call, get_text_message
 
 pytest.importorskip("a2a")
 
-from agents.extensions.a2a import A2AError, A2ASpecialist
+from agents.extensions.a2a import A2AError, A2ATaskClient
 from examples.a2a.manager import Receipt, Registry, UnresolvedCall, ask_specialist, find_specialists
 
 
@@ -123,8 +123,8 @@ class Receiver:
         )
 
 
-def stored(url: str) -> A2ASpecialist:
-    return A2ASpecialist(
+def stored(url: str) -> A2ATaskClient:
+    return A2ATaskClient(
         rpc_url=url, card=json.dumps(card(url)).encode(), rpc_token=lambda: "synthetic-rpc"
     )
 
@@ -164,7 +164,7 @@ async def test_manager_filters_500_names_and_calls_two_hosts(tmp_path: Path):
         async with TestServer(east.app) as a, TestServer(west.app) as b:
             names = {f"other-{i}": stored(f"http://127.0.0.1:1/{i}") for i in range(498)}
             names["weather-east"] = stored(str(a.make_url("/rpc")))
-            names["weather-west"] = A2ASpecialist(
+            names["weather-west"] = A2ATaskClient(
                 card_url=str(b.make_url("/card")),
                 card_token=lambda: "synthetic-card",
                 rpc_url=str(b.make_url("/rpc")),
@@ -260,7 +260,7 @@ async def test_lost_ack_restart_verifies_receipt_and_projects_original_result(tm
                     restored, lookup_receipt=lambda *_: replace(receipt, verdict="no")
                 ).recover(call_id)
             with pytest.raises(A2AError, match="protocol"):
-                await stored(url).get(task_id=receipt.task_id, context_id="wrong")
+                await stored(url).get_task(task_id=receipt.task_id, context_id="wrong")
 
 
 @pytest.mark.asyncio
@@ -301,14 +301,14 @@ async def test_untrusted_responses_never_reroute_or_expose_credentials(fault):
     app.router.add_route("*", "/{path:.*}", handle)
     async with TestServer(app) as server:
         url = str(server.make_url("/rpc"))
-        client = A2ASpecialist(
+        client = A2ATaskClient(
             rpc_url=url,
             card_url=str(server.make_url("/card")),
             card_token=lambda: "synthetic-card",
             rpc_token=rpc_token,
         )
         with pytest.raises(A2AError) as err:
-            await client.send("Ready?", message_id="request")
+            await client.send_message("Ready?", message_id="request")
         assert err.value.kind == (
             "remote" if fault.startswith("redirect") or fault == "private-error" else "protocol"
         )
@@ -351,7 +351,9 @@ async def test_timeout_and_local_cancellation_do_not_replay_or_cancel_remote_wor
                     await registry.ask("call", "east", "Ready?")
                 assert methods == ["SendMessage"]
                 with pytest.raises(A2AError, match="timeout"):
-                    await replace(endpoint, timeout=0.05).get(task_id="task", context_id="context")
+                    await replace(endpoint, timeout=0.05).get_task(
+                        task_id="task", context_id="context"
+                    )
                 assert "CancelTask" not in methods
             finally:
                 release.set()
@@ -362,10 +364,10 @@ async def test_timeout_and_local_cancellation_do_not_replay_or_cancel_remote_wor
 @pytest.mark.asyncio
 async def test_invalid_endpoint_and_oversize_request_fail_locally():
     with pytest.raises(ValueError):
-        stored("http://specialist.example/rpc")
-    endpoint = stored("https://specialist.example/rpc")
+        stored("http://service.example/rpc")
+    endpoint = stored("https://service.example/rpc")
     with pytest.raises(A2AError, match="request"):
-        await endpoint.send("é" * 40000, message_id="message")
+        await endpoint.send_message("é" * 40000, message_id="message")
 
 
 @pytest.mark.asyncio
@@ -373,8 +375,8 @@ async def test_unavailable_grant_fails_without_retaining_supplier_error():
     def deny():
         raise PermissionError("synthetic-private-detail")
 
-    specialist = replace(stored("http://127.0.0.1:1/rpc"), rpc_token=deny)
+    client = replace(stored("http://127.0.0.1:1/rpc"), rpc_token=deny)
     with pytest.raises(A2AError) as err:
-        await specialist.send("Ready?", message_id="one")
+        await client.send_message("Ready?", message_id="one")
     assert err.value.kind == "authorization"
     assert err.value.__context__ is None and err.value.__cause__ is None

@@ -10,7 +10,7 @@ from uuid import uuid4
 from a2a.types import a2a_pb2 as a2a
 
 from agents.decorators import tool
-from agents.extensions.a2a import A2ASpecialist
+from agents.extensions.a2a import A2ATaskClient
 from agents.tool_context import ToolContext
 
 
@@ -37,7 +37,7 @@ class Registry:
 
     owner: str
     run_id: str
-    specialists: Mapping[str, A2ASpecialist]
+    specialists: Mapping[str, A2ATaskClient]
     db: sqlite3.Connection
     lookup_receipt: Callable[[str, str, str], Receipt | None]
 
@@ -64,7 +64,7 @@ class Registry:
                 "ON CONFLICT(owner, run_id, call_id) DO NOTHING",
                 (*key, *binding, message_id),
             ).rowcount
-        task = await specialist.send(question, message_id=message_id) if created else None
+        task = await specialist.send_message(question, message_id=message_id) if created else None
         return await self._result(call_id, expected=binding, task=task)
 
     async def recover(self, call_id: str) -> str:
@@ -101,7 +101,7 @@ class Registry:
         ) != (self.owner, specialist.rpc_url, message_id, digest):
             raise UnresolvedCall("No matching receipt")
         if task is None:
-            task = await specialist.get(task_id=receipt.task_id, context_id=receipt.context_id)
+            task = await specialist.get_task(task_id=receipt.task_id, context_id=receipt.context_id)
         if task.id != receipt.task_id or task.context_id != receipt.context_id:
             raise UnresolvedCall("Task does not match the receipt")
         if task.status.state != a2a.TASK_STATE_COMPLETED:

@@ -14,7 +14,7 @@ import httpx2
 from a2a.types import a2a_pb2 as a2a
 from google.protobuf.json_format import MessageToDict, ParseDict
 
-__all__ = ["A2AError", "A2ASpecialist"]
+__all__ = ["A2AError", "A2ATaskClient"]
 
 _REQUEST_BYTES = 65_536
 _RESPONSE_BYTES = 1_048_576
@@ -80,7 +80,7 @@ async def _fetch(url: str, token: Callable[[], str] | None, body: bytes | None =
 
 
 @dataclass(frozen=True, kw_only=True)
-class A2ASpecialist:
+class A2ATaskClient:
     """One trusted RPC URL and either stored card JSON or a trusted card URL.
 
     Token suppliers must be local, non-blocking and scoped to their respective URLs.
@@ -106,7 +106,7 @@ class A2ASpecialist:
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("timeout must be positive and finite")
 
-    async def send(self, text: str, *, message_id: str) -> a2a.Task:
+    async def send_message(self, text: str, *, message_id: str) -> a2a.Task:
         """Send one user message. The caller owns the unique ID and any replay policy."""
         if not text or not message_id or len(text) + len(message_id) > _REQUEST_BYTES:
             raise A2AError("request")
@@ -120,7 +120,7 @@ class A2ASpecialist:
         )
         return await self._call(request)
 
-    async def get(self, *, task_id: str, context_id: str) -> a2a.Task:
+    async def get_task(self, *, task_id: str, context_id: str) -> a2a.Task:
         """Read an existing task and require both identifiers to match."""
         if not task_id or not context_id or len(task_id) > _REQUEST_BYTES:
             raise A2AError("request")

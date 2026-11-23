@@ -1,4 +1,4 @@
-# Call a registered remote specialist
+# Call an A2A service
 
 [manager.py](manager.py) defines two ordinary function tools. The manager looks up names with `find_specialists`. It asks a yes/no question with `ask_specialist`. The verdict returns to the manager under the original tool call ID. Neither tool hands off control of the run.
 
@@ -17,16 +17,29 @@ The scripted manager filters 500 names and calls two services on separate ports.
 
 Install the `a2a` extra from this checkout with `pip install '.[a2a]'`. The adapter uses the official Python SDK's [A2A 1.0](https://a2a-protocol.org/v1.0.0/specification/) message types.
 
-1. Load approved names and URLs from application configuration for the authenticated owner. Construct an `agents.extensions.a2a.A2ASpecialist` for each name. Supply `rpc_url` and either UTF-8 Agent Card JSON as `card` bytes or an exact `card_url`. Keep names and URLs free of secrets.
+1. Load approved names and URLs from application configuration for the authenticated owner. Construct an `agents.extensions.a2a.A2ATaskClient` for each name. Supply `rpc_url` and either UTF-8 Agent Card JSON as `card` bytes or an exact `card_url`. Keep names and URLs free of secrets.
 2. For bearer authentication, supply separate zero-argument `card_token` and `rpc_token` functions. Omit a supplier only for an anonymous route. Each function must check the current grant and return a token for its URL. Both must be non-blocking. The receiver must authenticate the caller and enforce ownership on every task read.
 3. Construct a `Registry` with the owner, a stable run ID, the authorized name mapping, a dedicated SQLite connection and a trusted `lookup_receipt` function. Keep the grants fixed during each invocation. Reload them after restart. Protect both databases, including question digests and receipts.
 4. Add both tools to the manager's `Agent.tools`. Pass the registry as `context` to `Runner.run`. The model sees only the prefix, name and question arguments. Search returns at most ten names. Every registered name is callable, including names outside the search results.
 
 Only use application-approved destinations. Both URLs require HTTPS and the same origin. HTTP is available on `127.0.0.1` and `::1` for development. The card must list the exact RPC URL with binding `JSONRPC`, version `1.0` and no tenant. Each operation checks this before requesting RPC credentials. Card metadata cannot select endpoints or credentials. The adapter follows no redirects and uses no environment proxies or shared cookies. The application owns DNS and network access policy.
 
-## Requests, results and failures
+## Call the task client directly
 
-`await specialist.send(text, message_id=unique_id)` makes one non-streaming `SendMessage` request with one user text part. `await specialist.get(task_id=..., context_id=...)` makes one `GetTask` request and checks both IDs. Both methods check the JSON-RPC response ID and return a private `a2a.types.Task`. Direct message responses are unsupported. Inspect the task state before using an artifact. Treat all peer fields as untrusted, including text that might repeat credentials. Avoid logging raw tasks, HTTP traffic or exception locals.
+Configure the client as in steps 1 and 2 above. Choose a unique message ID for each new message. This example sends one question and reads the task once.
+
+```python
+from agents.extensions.a2a import A2ATaskClient
+
+
+async def send_and_read(client: A2ATaskClient, message_id: str):
+    task = await client.send_message("Ready?", message_id=message_id)
+    return await client.get_task(task_id=task.id, context_id=task.context_id)
+```
+
+The [A2A Python client](https://a2a-protocol.org/latest/sdk/python/api/a2a.client.base_client.html) uses the same operation names. Its `send_message` returns an async iterator. Here, each method returns one `a2a.types.Task`. `send_message` makes one non-streaming `SendMessage` request with one user text part. `get_task` makes one `GetTask` request and requires the task and context IDs to match. Both methods check the JSON-RPC response ID. Direct message responses are unsupported.
+
+Inspect the task state before using an artifact. Treat all peer fields as private and untrusted, including text that might repeat credentials. Avoid logging raw tasks, HTTP traffic or exception locals.
 
 The maximum encoded request is 64 KiB. Each card and RPC response has a 1 MiB limit. Compressed responses are unsupported. The default `timeout` is ten seconds across discovery and RPC. `A2AError.kind` distinguishes request, authorization, timeout, transport, protocol and remote errors. Local cancellation propagates as `asyncio.CancelledError`. A timeout, disconnect or cancellation may leave remote work running. The adapter never retries, polls or sends `CancelTask`. Remote cancellation requires separate authorization and cannot guarantee rollback.
 
