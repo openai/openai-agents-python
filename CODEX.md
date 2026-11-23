@@ -27,7 +27,7 @@ shasum -a 256 "WHEEL_FILE"   # macOS
 Get-FileHash -Algorithm SHA256 "WHEEL_FILE"
 ```
 
-Open `SHA256SUMS` and compare the computed digest with the entry for that exact filename. Install only if both the filename and digest match. In the activated virtual environment, run:
+Open `SHA256SUMS` and compare the computed digest with the entry for that exact filename. Uppercase and lowercase digest letters represent the same value. Install only if both the filename and digest match. In the activated virtual environment, run:
 
 ```sh
 python -m pip install --only-binary=:all: "./WHEEL_FILE"
