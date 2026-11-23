@@ -50,6 +50,7 @@ from ..agent_tool_state import (
 from ..editor import ApplyPatchOperation, ApplyPatchResult
 from ..exceptions import (
     AgentsException,
+    InputGuardrailTripwireTriggered,
     ModelBehaviorError,
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
@@ -108,6 +109,10 @@ from ..util._types import MaybeAwaitable
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
 from .approvals import append_approval_error_output
+from .guardrails import (
+    cancel_tools_on_input_guardrail_rejection,
+    raise_if_input_guardrail_rejected,
+)
 from .items import (
     REJECTION_MESSAGE,
     extract_mcp_request_id,
@@ -308,12 +313,6 @@ def _merge_late_function_tool_failure(
     if late_failure.source == "post_invoke" and current_failure.source != "post_invoke":
         return late_failure
     return current_failure
-
-
-def _cancel_function_tool_tasks(tasks: set[asyncio.Task[Any]]) -> None:
-    """Cancel sibling function-tool tasks."""
-    for task in tasks:
-        task.cancel()
 
 
 def _attach_function_tool_task_result_callbacks(
@@ -1602,6 +1601,25 @@ class _FunctionToolBatchExecutor:
     ) -> tuple[
         list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
     ]:
+        with cancel_tools_on_input_guardrail_rejection(self._cancel_tools_for_input_rejection):
+            return await self._execute()
+
+    def _cancel_tools_for_input_rejection(self) -> None:
+        cancellable_tasks, _ = self._partition_pending_tasks()
+        self._cancel_tasks_once(cancellable_tasks)
+
+    def _cancel_tasks_once(self, tasks: set[asyncio.Task[Any]]) -> None:
+        """Keep overlapping teardown paths from interrupting a tool's cleanup."""
+        for task in tasks:
+            if not task.done() and task not in self.teardown_cancelled_tasks:
+                self.teardown_cancelled_tasks.add(task)
+                task.cancel()
+
+    async def _execute(
+        self,
+    ) -> tuple[
+        list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
+    ]:
         self.available_function_tools = await resolve_enabled_function_tools(
             self.execution_agent,
             self.context_wrapper,
@@ -1629,8 +1647,8 @@ class _FunctionToolBatchExecutor:
 
         try:
             await self._drain_pending_tasks(pending_tool_runs)
-        except asyncio.CancelledError as exc:
-            if self.propagating_failure is exc:
+        except (InputGuardrailTripwireTriggered, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and self.propagating_failure is exc:
                 _mark_tool_local_cancellation(exc)
                 raise
             if self.sibling_category_failure is not None and self.sibling_category_failure.is_set():
@@ -1646,6 +1664,7 @@ class _FunctionToolBatchExecutor:
         )
 
     def _fill_tool_task_slots(self, pending_tool_runs: deque[tuple[int, ToolRunFunction]]) -> None:
+        raise_if_input_guardrail_rejected()
         max_concurrency = self.max_function_tool_concurrency
         available_slots = (
             len(pending_tool_runs)
@@ -1678,13 +1697,22 @@ class _FunctionToolBatchExecutor:
                 self.pending_tasks,
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            completed_tasks = list(done_tasks)
+            if self.teardown_cancelled_tasks:
+                rejected_tasks = self.teardown_cancelled_tasks.intersection(completed_tasks)
+                _attach_function_tool_task_result_callbacks(
+                    rejected_tasks,
+                    message_for_exception=_parent_cancelled_task_exception_message,
+                )
+                completed_tasks = [task for task in completed_tasks if task not in rejected_tasks]
             failure = _record_completed_function_tool_tasks(
-                completed_tasks=list(done_tasks),
+                completed_tasks=completed_tasks,
                 task_states=self.task_states,
                 results_by_tool_run=self.results_by_tool_run,
             )
             if failure is not None:
                 await self._raise_failure_after_draining_siblings(failure)
+            raise_if_input_guardrail_rejected()
             self._fill_tool_task_slots(pending_tool_runs)
 
     async def _raise_failure_after_draining_siblings(
@@ -1694,8 +1722,7 @@ class _FunctionToolBatchExecutor:
         if self.on_tool_error_selected is not None:
             self.on_tool_error_selected()
         cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
-        self.teardown_cancelled_tasks.update(cancellable_tasks)
-        _cancel_function_tool_tasks(cancellable_tasks)
+        self._cancel_tasks_once(cancellable_tasks)
 
         late_failure, remaining_cancelled_tasks = await self._drain_cancelled_tasks(
             cancellable_tasks
@@ -1760,8 +1787,7 @@ class _FunctionToolBatchExecutor:
     async def _drain_pending_tasks_for_sibling_category_failure(self) -> None:
         """Settle nested function tasks after another tool category fails."""
         cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
-        self.teardown_cancelled_tasks.update(cancellable_tasks)
-        _cancel_function_tool_tasks(cancellable_tasks)
+        self._cancel_tasks_once(cancellable_tasks)
 
         try:
             _, remaining_cancelled_tasks = await self._drain_cancelled_tasks(cancellable_tasks)
@@ -1782,8 +1808,7 @@ class _FunctionToolBatchExecutor:
         self.pending_tasks = set()
 
     def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
-        self.teardown_cancelled_tasks.update(self.pending_tasks)
-        _cancel_function_tool_tasks(self.pending_tasks)
+        self._cancel_tasks_once(self.pending_tasks)
         _attach_function_tool_task_result_callbacks(
             self.pending_tasks,
             message_for_exception=_parent_cancelled_task_exception_message,
@@ -2057,6 +2082,7 @@ class _FunctionToolBatchExecutor:
                 ),
             )
 
+        raise_if_input_guardrail_rejected()
         invoke_task = asyncio.create_task(
             self._invoke_tool_and_run_post_invoke(
                 outer_task=outer_task,
@@ -2087,6 +2113,7 @@ class _FunctionToolBatchExecutor:
         agent_hooks: Any,
     ) -> Any:
         bypass_output_schema = False
+        raise_if_input_guardrail_rejected()
         try:
             invocation_result = await _invoke_function_tool_with_metadata(
                 function_tool=func_tool,

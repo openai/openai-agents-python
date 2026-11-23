@@ -106,6 +106,7 @@ from .run_internal.error_handlers import (
     build_run_error_data,
     resolve_run_error_handler_result,
 )
+from .run_internal.guardrails import input_guardrail_tool_gate_scope
 from .run_internal.items import (
     copy_input_items,
     ensure_nested_history_run_item_occurrence_key,
@@ -606,7 +607,12 @@ class AgentRunner:
                         if isinstance(input, RunState) and input._current_agent is not None
                         else starting_agent
                     )
-                    with agent_tool_configuration_run(configuration_agent):
+                    with (
+                        agent_tool_configuration_run(configuration_agent),
+                        input_guardrail_tool_gate_scope(
+                            should_cancel_parallel_model_task_on_input_guardrail_trip
+                        ),
+                    ):
                         return await self._run_impl(starting_agent, input, **kwargs)
                 except BaseException as error:
                     if not _is_error_data_redacted(error):
@@ -1838,6 +1844,17 @@ class AgentRunner:
                                         raise
                                     _, turn_result = guardrail_model_future.result()
                                 except InputGuardrailTripwireTriggered:
+                                    # A nested run can trip while this run's checks are pending.
+                                    if not guardrail_task.done() and not input_guardrails_triggered(
+                                        _attempt_input_guardrail_results()
+                                    ):
+                                        guardrail_task.cancel()
+                                        await asyncio.gather(guardrail_task, return_exceptions=True)
+                                        raise
+
+                                    # Tool scheduling can now observe rejection before the
+                                    # guardrail task has finished draining its siblings.
+                                    await asyncio.gather(guardrail_task, return_exceptions=True)
                                     if tool_error_selected:
                                         # Finish the selected tool failure's bounded cleanup.
                                         # A late verdict still rejects admission, but cannot
@@ -2885,6 +2902,7 @@ class AgentRunner:
                 if run_config.tracing_disabled
                 else contextlib.nullcontext(),
                 agent_tool_configuration_run(configuration_agent),
+                input_guardrail_tool_gate_scope(),
             ):
                 await start_streaming(
                     starting_input=input_for_result,

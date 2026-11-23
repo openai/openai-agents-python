@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from ..agent import Agent
@@ -26,6 +30,59 @@ __all__ = [
     "run_output_guardrails",
     "input_guardrail_tripwire_triggered_for_stream",
 ]
+
+
+@dataclass
+class _InputGuardrailToolGate:
+    should_cancel: Callable[[], bool] | None = None
+    rejection: InputGuardrailResult | None = None
+    cancel_tools: set[Callable[[], None]] = field(default_factory=set)
+
+
+_input_guardrail_tool_gate: ContextVar[_InputGuardrailToolGate | None] = ContextVar(
+    "input_guardrail_tool_gate", default=None
+)
+
+
+@contextmanager
+def input_guardrail_tool_gate_scope(
+    should_cancel: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Keep rejection and tool cancellation local to one Runner invocation."""
+    token = _input_guardrail_tool_gate.set(_InputGuardrailToolGate(should_cancel=should_cancel))
+    try:
+        yield
+    finally:
+        _input_guardrail_tool_gate.reset(token)
+
+
+def _reject_input_guardrail_tools(result: InputGuardrailResult) -> None:
+    gate = _input_guardrail_tool_gate.get()
+    if gate is not None and gate.rejection is None:
+        if gate.should_cancel is not None and not gate.should_cancel():
+            return
+        gate.rejection = result
+        for cancel in tuple(gate.cancel_tools):
+            cancel()
+
+
+def raise_if_input_guardrail_rejected() -> None:
+    gate = _input_guardrail_tool_gate.get()
+    if gate is not None and gate.rejection is not None:
+        raise InputGuardrailTripwireTriggered(gate.rejection)
+
+
+@contextmanager
+def cancel_tools_on_input_guardrail_rejection(cancel: Callable[[], None]) -> Iterator[None]:
+    gate = _input_guardrail_tool_gate.get()
+    raise_if_input_guardrail_rejected()
+    if gate is not None:
+        gate.cancel_tools.add(cancel)
+    try:
+        yield
+    finally:
+        if gate is not None:
+            gate.cancel_tools.discard(cancel)
 
 
 async def run_single_input_guardrail(
@@ -101,6 +158,7 @@ async def run_input_guardrails_with_queue(
                     )
                 )
                 streamed_result._triggered_input_guardrail_result = result
+                _reject_input_guardrail_tools(result)
                 queue.put_nowait(result)
                 for t in guardrail_tasks:
                     t.cancel()
@@ -169,6 +227,7 @@ async def run_input_guardrails(
             result = await done
             if result.output.tripwire_triggered:
                 record(result)
+                _reject_input_guardrail_tools(result)
                 for sibling in _unreported_guardrail_results(guardrail_tasks, guardrail_results):
                     record(sibling)
                 for t in guardrail_tasks:
