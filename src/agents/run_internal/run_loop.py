@@ -2697,7 +2697,7 @@ async def run_single_turn_streamed(
                 context_wrapper,
                 hooks,
                 run_config.tool_execution,
-                checkpoint=session if isinstance(session, ResumableRun) else None,
+                resumable=session if isinstance(session, ResumableRun) else None,
             ),
         )
     ) as model_events:
@@ -3128,7 +3128,7 @@ async def get_new_response(
                 context_wrapper,
                 hooks,
                 run_config.tool_execution,
-                checkpoint=session if isinstance(session, ResumableRun) else None,
+                resumable=session if isinstance(session, ResumableRun) else None,
             ),
         ),
         record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,

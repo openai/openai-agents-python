@@ -20,7 +20,7 @@ class ModelToolHooks:
     context: RunContextWrapper[Any]
     lifecycle: RunHooks[Any]
     settings: ToolExecutionConfig | None
-    checkpoint: ResumableRun | None = None
+    resumable: ResumableRun | None = None
 
 
 _MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = ContextVar(

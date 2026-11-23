@@ -70,6 +70,8 @@ class CodexProvider(ModelProvider):
     Codex handles workspace tools and authentication. Each request uses a fresh
     Codex thread. Pass a ResumableSession to the Runner to save a pending local
     command or edit for approval. The SDK session ID stays the same across workers.
+    Supply the same SDK tool hooks on both workers. The user reviews the prepared
+    input. Output preparation runs after execution.
     """
 
     _supports_stored_response_id = False
@@ -119,27 +121,35 @@ class CodexProvider(ModelProvider):
         return _CodexModel(model_name, self)
 
     async def _run_approved_native_call(
-        self, checkpoint: dict[str, Any], tracing: ModelTracing
+        self, checkpoint: dict[str, Any], tracing: ModelTracing, hooks: CodexToolHooks | None
     ) -> str:
         """Run only the saved invocation, without a model turn or its old Codex home."""
-        if checkpoint.get("version") != 1 or checkpoint.get("cwd") != self._cwd:
+        if checkpoint.get("cwd") != self._cwd:
             raise UserError("This Codex approval belongs to a different workspace or SDK version.")
 
-        settings = {"model": checkpoint["model"]}
+        settings: dict[str, Any] = {"model": checkpoint["model"]}
         observations = CodexOperationTracing(set(), expect_model=False)
-        thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
+        resources = AsyncExitStack()
         watcher: asyncio.Task[None] | None = None
         failure: BaseException | None = None
         try:
-            observations.bind(thread, tracing)
+            if hooks is not None:
+                hooks.restore(checkpoint["call"])
+                settings["sdk_tool_hooks"] = await hooks.configure(resources)
+            thread = await self._native_manager().start_thread("[]", None, json.dumps(settings))
+            resources.push_async_callback(thread.close)
+            if hooks is not None:
+                hooks.verify(thread)
+            observations.bind(thread, _approval_tracing(tracing, hooks))
             watcher = asyncio.create_task(observations.watch())
-            return str(
+            output = str(
                 await thread.resolve_approval(
                     json.dumps(checkpoint["call"]),
                     json.dumps(checkpoint["request"]),
                     json.dumps(checkpoint["preconditions"]),
                 )
             )
+            return output if hooks is None else hooks.restored_output(output)
         except BaseException as error:
             failure = error
             raise
@@ -147,7 +157,7 @@ class CodexProvider(ModelProvider):
 
             async def close() -> None:
                 try:
-                    await thread.close()
+                    await resources.aclose()
                 finally:
                     if watcher is not None:
                         watcher.cancel()
@@ -166,9 +176,11 @@ class CodexProvider(ModelProvider):
 
 
 def _pending_native_call(
-    call: Any, event: dict[str, Any], cwd: str, model: str
+    call: Any, event: dict[str, Any], cwd: str, model: str, hooks: CodexToolHooks | None = None
 ) -> CodexPendingFunctionCall | CodexPendingCustomCall:
     request = event["msg"]
+    if hooks is not None:
+        hooks.prepare_pending(call, event.get("input_hash"))
     wire = call.model_dump(exclude_none=True)
     if event.get("preconditions") is None:
         raise UserError("Codex could not confirm that this tool is still waiting to run.")
@@ -180,6 +192,8 @@ def _pending_native_call(
         "request": request,
         "preconditions": event["preconditions"],
     }
+    if hooks is not None:
+        checkpoint.update(version=2, hooks=hooks.required)
     if getattr(call, "namespace", None) not in (None, "functions"):
         raise UserError("Only built-in Codex tools support native approval recovery.")
     if (
@@ -247,11 +261,29 @@ def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
     return (reasoning.effort if reasoning else None, reasoning.summary if reasoning else None)
 
 
-def _validate_native_restore(tools: list[Tool], bindings: ModelToolHooks | None) -> None:
-    if _uses_sdk_workspace(tools, bindings) or CodexToolHooks.for_run(bindings, set()):
-        raise UserError(
-            "The current workspace or native tool hooks do not allow restoring this call."
-        )
+def _validate_native_restore(
+    tools: list[Tool], bindings: ModelToolHooks | None, checkpoint: dict[str, Any]
+) -> CodexToolHooks | None:
+    hooks = CodexToolHooks.for_run(bindings, set())
+    if (
+        _uses_sdk_workspace(tools, bindings)
+        or checkpoint.get("version") != (2 if hooks else 1)
+        or checkpoint.get("hooks") != (hooks.required if hooks else None)
+    ):
+        raise UserError("Use the same native workspace and native tool hooks to restore this call.")
+    return hooks
+
+
+def _approval_tracing(tracing: ModelTracing, hooks: CodexToolHooks | None) -> ModelTracing:
+    # Native model and tool events can contain payloads from before preparation.
+    settings = hooks.settings if hooks is not None else None
+    if (
+        tracing.include_data()
+        and settings
+        and (settings.prepare_tool_input is not None or settings.prepare_tool_output is not None)
+    ):
+        return ModelTracing.ENABLED_WITHOUT_DATA
+    return tracing
 
 
 class _CodexModel(Model):
@@ -273,8 +305,8 @@ class _CodexModel(Model):
     async def _run_approved_native_call(
         self, checkpoint: dict[str, Any], *, tools: list[Tool], tracing: ModelTracing
     ) -> str:
-        _validate_native_restore(tools, get_model_tool_hooks())
-        return await self._provider._run_approved_native_call(checkpoint, tracing)
+        hooks = _validate_native_restore(tools, get_model_tool_hooks(), checkpoint)
+        return await self._provider._run_approved_native_call(checkpoint, tracing, hooks)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
         # Native Codex tools may have changed the workspace before a failed response.
@@ -445,6 +477,8 @@ class _CodexModel(Model):
         )
         observations = CodexOperationTracing(identities, input)
         completed: Response | None = None
+        checkpoint = bindings.resumable if bindings is not None else None
+        checklist = None
         resources = AsyncExitStack()
         output: dict[str, Any] = {}
         streamed: set[str] = set()
@@ -480,14 +514,11 @@ class _CodexModel(Model):
                 native_hooks.verify(thread)
             if history:
                 await thread.inject_items(json.dumps(history))
-            observations.bind(thread, tracing)
-            checkpoint = bindings.checkpoint if bindings is not None else None
-            checklist = None
-            recover = (
-                checkpoint is not None
-                and not native_hooks
-                and not sdk_sandbox
-                and not require_sdk_call
+            recover = bool(
+                bindings and bindings.resumable and not sdk_sandbox and not require_sdk_call
+            )
+            observations.bind(
+                thread, _approval_tracing(tracing, native_hooks) if recover else tracing
             )
             turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), recover)
             response = Response(
@@ -514,7 +545,7 @@ class _CodexModel(Model):
                         raise UserError("Codex can only pause one outstanding native call.")
                     item_id, _ = native_pending.pop(call_id)
                     output[item_id] = _pending_native_call(
-                        output[item_id], pending_approval, provider._cwd, thread.model
+                        output[item_id], pending_approval, provider._cwd, thread.model, native_hooks
                     )
                     # Close the waiting thread before handing the pause to the Runner.
                     break
@@ -542,13 +573,13 @@ class _CodexModel(Model):
                     if (
                         message.get("turn_id") != turn_id
                         or pending_approval is not None
-                        or native_hooks is not None
+                        or (native_hooks is not None and not recover)
                         or sdk_sandbox
                         or require_sdk_call
                     ):
                         raise UserError(
                             "Codex can only pause a single built-in tool call before execution, "
-                            "with native workspace tools enabled and without custom tool hooks."
+                            "with native workspace tools enabled."
                         )
                     pending_approval = event
                     continue
