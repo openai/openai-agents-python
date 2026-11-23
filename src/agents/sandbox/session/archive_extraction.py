@@ -390,8 +390,11 @@ def validate_tar_archive_for_extraction(
     *,
     archive_limits: SandboxArchiveLimits | None = None,
 ) -> None:
-    members_by_rel_path: dict[Path, tarfile.TarInfo] = {}
-    descendant_by_parent_path: dict[Path, tarfile.TarInfo] = {}
+    # Index components by parent ID so each lookup hashes only one component,
+    # preserving Path equality without repeatedly constructing full ancestors.
+    path_id_by_component: dict[tuple[int, Path], int] = {}
+    members_by_path_id: dict[int, tarfile.TarInfo] = {}
+    descendant_by_parent_id: dict[int, tarfile.TarInfo] = {}
     member_count = 0
     extracted_bytes = 0
 
@@ -414,36 +417,41 @@ def validate_tar_archive_for_extraction(
                 archive_limits=archive_limits,
             )
 
-        previous = members_by_rel_path.get(rel_path)
+        path_id = 0
+        path_ids: list[int] = []
+        for part in rel_path.parts:
+            path_id = path_id_by_component.setdefault(
+                (path_id, Path(part)), len(path_id_by_component) + 1
+            )
+            path_ids.append(path_id)
+
+        previous = members_by_path_id.get(path_id)
         if previous is not None and not (previous.isdir() and member.isdir()):
             raise UnsafeTarMemberError(
                 member=member.name,
                 reason=f"duplicate archive path: {rel_path.as_posix()}",
             )
 
-        for parent in rel_path.parents:
-            if parent == Path():
-                break
-            parent_member = members_by_rel_path.get(parent)
+        for offset, parent_id in enumerate(reversed(path_ids[:-1])):
+            parent_member = members_by_path_id.get(parent_id)
             if parent_member is not None and not parent_member.isdir():
+                parent = rel_path.parents[offset]
                 raise UnsafeTarMemberError(
                     member=member.name,
                     reason=f"archive path descends through non-directory: {parent.as_posix()}",
                 )
 
         if not member.isdir():
-            descendant = descendant_by_parent_path.get(rel_path)
+            descendant = descendant_by_parent_id.get(path_id)
             if descendant is not None:
                 raise UnsafeTarMemberError(
                     member=descendant.name,
                     reason=f"archive path descends through non-directory: {rel_path.as_posix()}",
                 )
 
-        members_by_rel_path[rel_path] = member
-        for parent in rel_path.parents:
-            if parent == Path():
-                break
-            descendant_by_parent_path.setdefault(parent, member)
+        members_by_path_id[path_id] = member
+        for parent_id in path_ids[:-1]:
+            descendant_by_parent_id.setdefault(parent_id, member)
 
 
 def validate_zipfile(
