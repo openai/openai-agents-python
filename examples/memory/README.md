@@ -30,5 +30,6 @@ For SQLAlchemy's SQLite example, use `uv run --extra sqlalchemy --with aiosqlite
 - [SQLite approvals](memory_session_hitl_example.py) and [OpenAI Conversations approvals](openai_session_hitl_example.py) combine history with approval decisions.
 - [File approvals](file_hitl_example.py) and [approval scenarios](hitl_session_scenario.py) use the supporting [file store](file_session.py).
 - Development-only [SQLite recovery](resumable_sqlite_session.py) and [Redis recovery](resumable_redis_session.py) demonstrate persisted approval recovery.
+- In a development checkout, run `uv run python -m examples.memory.resumable_jobs` to [track a job across worker restarts](resumable_jobs.py) offline. The [session guide](../../docs/sessions/index.md#track-a-job-across-pod-restarts) covers live Python and Codex runs.
 
 File-backed examples write local session data. The Redis example clears its fixed demo session; use dedicated test data. The encryption example generates a fresh key and uses an in-memory store. A persistent application must retain its key and session ID securely across restarts.
