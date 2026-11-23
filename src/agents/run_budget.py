@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from .exceptions import AgentsException, UserError, _mark_error_to_drain_stream_events
@@ -25,7 +25,7 @@ def _valid_limit(value: object) -> bool:
     return type(value) is int and 0 <= value <= 2**53 - 1
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class RunBudget:
     """Limits for one Python Runner root, including handoffs and approval resumes.
 
@@ -45,8 +45,19 @@ class RunBudget:
     make those totals indistinguishable from measured zero. Before the next
     admission, the synchronous estimator receives each completion's Usage and returns
     millionths of a US dollar in the same integer range, or None for an unknown estimate.
-    Missing or negative totals, a missing estimator or unknown cost block the next admission
-    when needed by a limit. Set missing_usage="continue" to use only known values.
+    A positive cost limit requires an estimator. Providing an estimator without a
+    cost limit raises ValueError. Missing or negative totals and unknown estimates
+    block the next admission by default. Set missing_usage="continue" to use only known values.
+
+    For a $0.01 limit, assuming $2 per million tokens across all models and
+    token types, use the following budget. Usage does not identify the model.
+
+    .. code-block:: python
+
+        budget = RunBudget(
+            max_estimated_cost_micros=10_000,
+            estimate_cost_micros=lambda usage: 2 * usage.total_tokens,
+        )
 
     Pass the budget to RunConfig(budget=...) on each call, including resume. RunBudgetError
     identifies a blocked admission. Estimated-cost budgets support in-memory
@@ -71,6 +82,14 @@ class RunBudget:
             raise ValueError("RunBudget limits must be integers from zero through 2**53 - 1.")
         if self.missing_usage not in ("stop", "continue"):
             raise ValueError("RunBudget.missing_usage must be 'stop' or 'continue'.")
+        if self.max_estimated_cost_micros is None and self.estimate_cost_micros is not None:
+            raise ValueError("RunBudget.estimate_cost_micros requires max_estimated_cost_micros.")
+        if (
+            self.max_estimated_cost_micros is not None
+            and self.max_estimated_cost_micros > 0
+            and self.estimate_cost_micros is None
+        ):
+            raise ValueError("A positive max_estimated_cost_micros requires estimate_cost_micros.")
         if self.estimate_cost_micros is not None and (
             not callable(self.estimate_cost_micros)
             or inspect.iscoroutinefunction(self.estimate_cost_micros)
@@ -83,14 +102,22 @@ class _BudgetCheckpointError(UserError):
 
 
 class RunBudgetError(AgentsException):
-    """A blocked admission. The code identifies the reason."""
+    """A blocked admission. The code identifies the reason.
+
+    For run_budget_exceeded, limit identifies the first reached ceiling.
+    The Runner checks "requests", then "tokens", then "estimated_cost".
+    For other codes, limit is None.
+    """
 
     def __init__(
         self,
         code: Literal[
             "run_budget_exceeded", "run_budget_usage_unavailable", "run_budget_invalid_estimate"
         ],
+        *,
+        limit: Literal["requests", "tokens", "estimated_cost"] | None = None,
     ):
+        self.limit = limit
         self.code = code
         super().__init__(code)
 
@@ -128,21 +155,20 @@ class _BudgetState:
             self.unavailable = True
             return
         self.tokens += usage.total_tokens
-        if limits.max_estimated_cost_micros is not None:
-            if limits.estimate_cost_micros is None:
-                self.unavailable = True
-            else:
-                self.pending.append(copy.deepcopy(usage))
+        if limits.estimate_cost_micros is not None:
+            self.pending.append(copy.deepcopy(usage))
 
     def check(self) -> None:
         limits = self.limits
-        for count, ceiling in (
-            (self.requests, limits.max_requests),
-            (self.tokens, limits.max_tokens),
-            (self.cost, limits.max_estimated_cost_micros),
+        if limits.max_requests is not None and self.requests >= limits.max_requests:
+            raise RunBudgetError("run_budget_exceeded", limit="requests")
+        if limits.max_tokens is not None and self.tokens >= limits.max_tokens:
+            raise RunBudgetError("run_budget_exceeded", limit="tokens")
+        if (
+            limits.max_estimated_cost_micros is not None
+            and self.cost >= limits.max_estimated_cost_micros
         ):
-            if ceiling is not None and count >= ceiling:
-                raise RunBudgetError("run_budget_exceeded")
+            raise RunBudgetError("run_budget_exceeded", limit="estimated_cost")
         if self.unavailable and limits.missing_usage == "stop":
             raise RunBudgetError("run_budget_usage_unavailable")
         while self.pending:
@@ -157,7 +183,7 @@ class _BudgetState:
             else:
                 self.cost += estimate
                 if self.cost >= limits.max_estimated_cost_micros:
-                    raise RunBudgetError("run_budget_exceeded")
+                    raise RunBudgetError("run_budget_exceeded", limit="estimated_cost")
 
     def checkpoint(self) -> dict[str, Any]:
         if self.limits.max_estimated_cost_micros is not None:
@@ -208,10 +234,11 @@ def _check_model(model: object) -> None:
         raise UserError("RunBudget cannot enforce native sampling limits with CodexProvider.")
 
 
-def _tool_config(tool: Tool) -> RunConfig | None:
+def _tool_budget(tool: Tool) -> RunBudget | None:
     invoker = getattr(tool, "on_invoke_tool", None)
     impl = getattr(invoker, "_invoke_tool_impl", None)
-    return getattr(impl, "__agents_run_config__", None)
+    config = getattr(impl, "__agents_run_config__", None)
+    return config.budget if config is not None else None
 
 
 def _check_portable(limits: RunBudget | None) -> None:
@@ -221,9 +248,7 @@ def _check_portable(limits: RunBudget | None) -> None:
 
 def _check_tools(tools: Iterable[Tool]) -> None:
     for tool in tools:
-        config = _tool_config(tool)
-        if config is not None:
-            _check_portable(config.budget)
+        _check_portable(_tool_budget(tool))
 
 
 async def _admit(
@@ -252,17 +277,6 @@ async def _admit(
                 await checkpoint_streamed_result(streamed_result, interruptions=[])
                 _mark_error_to_drain_stream_events(error)
         raise
-
-
-def _effective_limits(config: RunConfig | None) -> RunBudget | None:
-    limits = config.budget if config is not None else None
-    if (
-        limits is not None
-        and limits.max_estimated_cost_micros is None
-        and limits.estimate_cost_micros is not None
-    ):
-        return replace(limits, estimate_cost_micros=None)
-    return limits
 
 
 def _check_resume(state: RunState[Any], limits: RunBudget | None) -> bool:
@@ -295,7 +309,7 @@ def _check_resume(state: RunState[Any], limits: RunBudget | None) -> bool:
             for tool in tools
             if isinstance(tool, FunctionTool) and key in get_function_tool_lookup_keys(tool)
         ]
-        policies = (_effective_limits(_tool_config(tool)) for tool in bindings)
+        policies = (_tool_budget(tool) for tool in bindings)
         policy = next((value for value in policies if value is not None), None)
         if _check_resume(child, policy):
             if (
@@ -314,7 +328,7 @@ def _prepare_budget(
     from .models.interface import Model
     from .run_internal.resumable_session import ResumableRun
 
-    limits = _effective_limits(config)
+    limits = config.budget
     if state is not None:
         _check_resume(state, limits)
     current = (

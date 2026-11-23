@@ -62,11 +62,42 @@ def test_invalid_limits(value):
         RunConfig(budget={"max_tokens": value})
 
 
-@pytest.mark.parametrize("limit", ["max_requests", "max_tokens", "max_estimated_cost_micros"])
-def test_zero_blocks_sync_dispatch(limit):
+@pytest.mark.parametrize("policy", ["stop", "continue"])
+def test_cost_limit_and_estimator_must_be_paired(policy):
+    with pytest.raises(ValueError, match="requires estimate_cost_micros"):
+        RunBudget(max_estimated_cost_micros=1, missing_usage=policy)
+    with pytest.raises(ValueError, match="requires max_estimated_cost_micros"):
+        RunBudget(max_requests=2, estimate_cost_micros=lambda _: 1, missing_usage=policy)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_missing_estimator_rejects_dict_before_dispatch(streamed):
     model = ScriptedModel()
-    with pytest.raises(RunBudgetError, match="run_budget_exceeded"):
-        Runner.run_sync(Agent(name="root", model=model), "begin", run_config={"budget": {limit: 0}})
+    agent = Agent(name="root", model=model)
+    config = {"budget": {"max_estimated_cost_micros": 1, "missing_usage": "continue"}}
+    with pytest.raises(ValueError, match="requires estimate_cost_micros"):
+        if streamed:
+            Runner.run_streamed(agent, "begin", run_config=config)
+        else:
+            await Runner.run(agent, "begin", run_config=config)
+    assert not model.calls
+
+
+@pytest.mark.parametrize(
+    "limits,blocked",
+    [
+        ({"max_requests": 0}, "requests"),
+        ({"max_tokens": 0}, "tokens"),
+        ({"max_estimated_cost_micros": 0}, "estimated_cost"),
+        ({"max_requests": 0, "max_tokens": 0}, "requests"),
+    ],
+)
+def test_zero_blocks_sync_dispatch(limits, blocked):
+    model = ScriptedModel()
+    with pytest.raises(RunBudgetError, match="run_budget_exceeded") as error:
+        Runner.run_sync(Agent(name="root", model=model), "begin", run_config={"budget": limits})
+    assert error.value.limit == blocked
     assert not model.calls
 
 
@@ -108,8 +139,9 @@ async def test_correction_uses_observed_totals(streamed, total, policy, code):
     agent = Agent(name="root", model=model)
     budget = RunBudget(max_tokens=5, missing_usage=policy)
     if code:
-        with pytest.raises(RunBudgetError, match=code):
+        with pytest.raises(RunBudgetError, match=code) as error:
             await run(agent, budget, streamed)
+        assert error.value.limit == ("tokens" if code == "run_budget_exceeded" else None)
         assert len(model.calls) == 1
     else:
         assert (await run(agent, budget, streamed)).final_output == "done"
@@ -123,7 +155,6 @@ def failing_estimate(usage):
 @pytest.mark.parametrize(
     "estimator,code",
     [
-        (None, "run_budget_usage_unavailable"),
         (lambda u: None, "run_budget_usage_unavailable"),
         (lambda u: u.total_tokens * 2, "run_budget_exceeded"),
         (lambda u: True, "run_budget_invalid_estimate"),
@@ -131,12 +162,14 @@ def failing_estimate(usage):
         (failing_estimate, "run_budget_invalid_estimate"),
     ],
 )
-async def test_estimates_fail_distinctly_without_callback_details(estimator, code):
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_estimates_fail_distinctly_without_callback_details(estimator, code, streamed):
     model = ScriptedModel([step(get_function_tool_call("unknown"), 3)])
     budget = RunBudget(max_estimated_cost_micros=6, estimate_cost_micros=estimator)
     with pytest.raises(RunBudgetError) as error:
-        await run(Agent(name="root", model=model), budget)
-    assert error.value.code == code
+        await run(Agent(name="root", model=model), budget, streamed)
+    assert error.value.limit == ("estimated_cost" if code == "run_budget_exceeded" else None)
+    assert str(error.value) == error.value.code == code
     assert error.value.__context__ is None
     assert len(model.calls) == 1
 
@@ -202,7 +235,7 @@ async def test_durable_approval_stop_preserves_effect_and_idle_budget(streamed):
     budget = RunBudget(max_requests=1)
     for invalid, error in [
         (RunBudget(max_requests=0), RunBudgetError),
-        (RunBudget(max_estimated_cost_micros=1), UserError),
+        (RunBudget(max_estimated_cost_micros=1, estimate_cost_micros=lambda _: 1), UserError),
     ]:
         with pytest.raises(error):
             await run(root, invalid, streamed, session=session)
@@ -228,7 +261,9 @@ async def test_live_cost_approval_rejects_portable_capture():
     def record() -> str:
         return "saved"
 
-    budget = RunBudget(max_estimated_cost_micros=1, missing_usage="continue")
+    budget = RunBudget(
+        max_estimated_cost_micros=1, estimate_cost_micros=lambda _: None, missing_usage="continue"
+    )
     model = ScriptedModel([step(get_function_tool_call("record"), 1), [get_text_message("done")]])
     root = Agent(name="root", model=model, tools=[record])
     state = (await run(root, budget)).to_state()
@@ -435,7 +470,10 @@ async def test_durable_child_policy_checked_before_claim(streamed):
         ]
     )
     child = Agent(name="child", model=inner, tools=[record])
-    config = RunConfig(budget=RunBudget(max_estimated_cost_micros=8), tracing_disabled=True)
+    config = RunConfig(
+        budget=RunBudget(max_estimated_cost_micros=8, estimate_cost_micros=lambda _: 1),
+        tracing_disabled=True,
+    )
     nested = child.as_tool("ask", "Ask", run_config=config, failure_error_function=None)
     outer = ScriptedModel(
         [
