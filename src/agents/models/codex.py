@@ -36,6 +36,7 @@ from openai.types.responses import (
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_summary_part_added_event import Part as SummaryPart
 
+from .._redaction import hook_payload_diagnostics, redact_payload
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -44,7 +45,7 @@ from ..memory.session import await_session_mutation as _join_close
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..run_config import ToolCallHookContext
-from ..run_internal.tool_hooks import _await_hook, hook_payload_diagnostics
+from ..run_internal.tool_hooks import _await_hook
 from ..tool import ApplyPatchTool, NativeTool, ShellTool, Tool, WebSearchTool
 from ..usage import (
     Usage,
@@ -587,7 +588,7 @@ class _CodexModel(Model):
                             )
                             encoded.respond(
                                 json.dumps(
-                                    replacement,
+                                    redact_payload(replacement),
                                     allow_nan=False,
                                     ensure_ascii=False,
                                     separators=(",", ":"),

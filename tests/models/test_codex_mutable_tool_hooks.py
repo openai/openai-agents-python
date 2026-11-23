@@ -516,6 +516,8 @@ def test_native_mcp_result_registrations():
     "mode",
     [
         "replace",
+        "protected",
+        "protected_stream",
         "media",
         "peer_error",
         "force_error",
@@ -576,6 +578,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         ],
     )
     changed_input = mode in ("peer_error", "force_error")
+    protected = mode in ("protected", "protected_stream")
     argument = {"peer_error": "fail", "media": "media"}.get(mode, "search")
 
     def proposed(request):
@@ -636,6 +639,13 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         if mode == "media":
             result["content"][0]["text"] = "published"
             return result
+        if protected:
+            assert "PEER_ONLY" in json.dumps(result)
+            return {
+                "content": [{"type": "text", "text": "PEER_ONLY"}],
+                "structuredContent": {"summary": "PEER_ONLY"},
+                "_meta": {"origin": "fixture", "label": "PEER_ONLY"},
+            }
         if mode == "replace":
             return {
                 "content": [{"type": "text", "text": "published"}],
@@ -660,6 +670,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     }.get(mode, ("raw-peer", "lookup"))
     config = RunConfig(
         model_provider=provider,
+        redact_text=(lambda text: text.replace("PEER_ONLY", "published")) if protected else None,
         tracing={"operation_detail": "content"},
         trace_include_sensitive_data=True,
         tool_execution=ToolExecutionConfig(
@@ -670,11 +681,13 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     )
 
     async def execute():
-        if mode in ("media", "surrogate"):
+        if mode in ("media", "surrogate", "protected_stream"):
             streamed = Runner.run_streamed(
                 agent, "Look up a value", context=context, run_config=config
             )
             async for event in streamed.stream_events():
+                if protected:
+                    assert event.type != "raw_response_event"
                 assert "PEER_ONLY" not in repr(event)
             return streamed
         return await Runner.run(agent, "Look up a value", context=context, run_config=config)
@@ -724,6 +737,11 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
             assert expected in json.dumps(requests[1]["input"])
             completed = next(event for event in events if event["type"] == "mcp_tool_call_end")
             assert expected in json.dumps(completed)
+            if protected:
+                edited = completed["result"]["Ok"]
+                assert edited["content"][0]["text"] == "published"
+                assert edited["structuredContent"] == {"summary": "published"}
+                assert edited["_meta"] == {"origin": "fixture", "label": "published"}
             if mode == "replace":
                 assert completed["result"]["Ok"]["_meta"] == {"origin": "fixture"}
                 assert "summary" in json.dumps(requests[1]["input"])

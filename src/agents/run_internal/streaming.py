@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from .._redaction import current_redactor, require_clean
 from ..items import (
     CompactionItem,
     HandoffCallItem,
@@ -62,6 +63,10 @@ def stream_step_items_to_queue(
             event = None
 
         if event:
+            if current_redactor() is not None:
+                require_clean(item.raw_item)
+                if isinstance(item, ToolCallOutputItem):
+                    require_clean((item.output, item.custom_data))
             queue.put_nowait(event)
 
 
