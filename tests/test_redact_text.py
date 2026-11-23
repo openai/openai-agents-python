@@ -454,6 +454,7 @@ async def test_joined_refusals_are_checked_before_refusal_handling():
     "source",
     [
         "prompt",
+        "prompt_json",
         "tool",
         "mixed",
         "strings",
@@ -464,6 +465,8 @@ async def test_joined_refusals_are_checked_before_refusal_handling():
         "key_value",
         "tagged",
         "column",
+        "encoded_column",
+        "encoded_keys",
     ],
 )
 async def test_split_structured_text_never_reaches_model_session_or_events(streamed, source):
@@ -489,6 +492,10 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
             return [{"type": "row", "value": part} for part in parts]
         if source == "column":
             return [{"label": "chunk", "value": part} for part in parts]
+        if source == "encoded_column":
+            return [json.dumps({"value": json.dumps(part)}) for part in parts]
+        if source == "encoded_keys":
+            return [json.dumps({part: None}) for part in parts]
         if source == "mixed":
             return [
                 ToolOutputText(text=parts[0]),
@@ -497,7 +504,9 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
             ]
         return [ToolOutputText(text=part) for part in parts]
 
-    prompt = [{"role": "user", "content": [{"type": "input_text", "text": p} for p in parts]}]
+    text = [json.dumps({"v": p}) for p in parts] if source == "prompt_json" else parts
+    prompt = [{"role": "user", "content": [{"type": "input_text", "text": p} for p in text]}]
+    is_prompt = source in ("prompt", "prompt_json")
     model = ScriptedModel([[function_call("lookup", {}, call_id="id")], [assistant_message("ok")]])
     agent = Agent(name="worker", model=model, tools=[lookup])
     session = SQLiteSession("test")
@@ -507,7 +516,7 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
             if streamed:
                 result = Runner.run_streamed(
                     agent,
-                    prompt if source == "prompt" else "go",
+                    prompt if is_prompt else "go",
                     run_config=config,
                     session=session,
                 )
@@ -516,11 +525,11 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
             else:
                 await Runner.run(
                     agent,
-                    prompt if source == "prompt" else "go",
+                    prompt if is_prompt else "go",
                     run_config=config,
                     session=session,
                 )
-        assert len(model.calls) == (0 if source == "prompt" else 1)
+        assert len(model.calls) == (0 if is_prompt else 1)
         assert parts[0] not in repr(await session.get_items())
     finally:
         session.close()

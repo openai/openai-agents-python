@@ -101,6 +101,15 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _decode_json(value: str) -> Any:
+    if value.lstrip().startswith(("{", "[", '"')):
+        try:
+            return json.loads(value, object_pairs_hook=_unique_keys)
+        except json.JSONDecodeError:
+            pass
+    return value
+
+
 def _entries(value: Any) -> dict[str, Any]:
     if isinstance(value, BaseModel):
         return {**vars(value), **(value.model_extra or {})}
@@ -112,26 +121,32 @@ def _entries(value: Any) -> dict[str, Any]:
     raise ValueError
 
 
-def _text_parts(value: Any, field: str = "") -> Iterator[tuple[str, str]]:
+def _text_parts(value: Any, field: str = "") -> Iterator[tuple[str | None, str]]:
     if isinstance(value, str):
-        yield field, value
+        decoded = _decode_json(value)
+        if decoded is value:
+            yield field, value
+        else:
+            yield from _text_parts(decoded, field)
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _text_parts(item, field)
     elif value is not None and not isinstance(value, (int, float, bool)):
         for key, item in _entries(value).items():
+            yield None, key
             # Text parts, messages and refusals can all contribute to the visible text.
             name = "" if key in ("text", "content", "refusal") else key
             yield from _text_parts(item, name)
 
 
 def _check_joined(value: Any, redact: _Redactor) -> None:
-    # A consumer can concatenate values or read one column across a list of records.
-    fields: dict[str, list[str]] = {}
+    # Check ordered values, keys and individual columns of decoded records.
+    fields: dict[str | None, list[str]] = {}
     ordered = []
     for field, text in _text_parts(value):
         fields.setdefault(field, []).append(text)
-        ordered.append(text)
+        if field is not None:
+            ordered.append(text)
     if len(ordered) > 1:
         _walk("".join(ordered), redact, "check")
     for parts in fields.values():
@@ -142,16 +157,12 @@ def _check_joined(value: Any, redact: _Redactor) -> None:
 def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
     if isinstance(value, str):
         # Function arguments and serialized RunState can contain escaped JSON strings.
-        if value.lstrip().startswith(("{", "[", '"')):
-            try:
-                decoded = json.loads(value, object_pairs_hook=_unique_keys)
-            except json.JSONDecodeError:
-                pass
-            else:
-                clean = _walk(decoded, redact, "check" if mode == "check" else "payload")
-                if clean is not decoded:
-                    value = json.dumps(clean, ensure_ascii=False, allow_nan=False)
-                return _text(value, redact, check=True)
+        decoded = _decode_json(value)
+        if decoded is not value:
+            clean = _walk(decoded, redact, "check" if mode == "check" else "payload")
+            if clean is not decoded:
+                value = json.dumps(clean, ensure_ascii=False, allow_nan=False)
+            return _text(value, redact, check=True)
         return _text(value, redact, check=mode == "check")
     if value is None or isinstance(value, (int, float, bool)):
         return value
