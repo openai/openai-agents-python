@@ -4,7 +4,7 @@ Choose an example for your task. The live examples below are available in the al
 
 ## Set up
 
-For the released live examples, open the [alpha.1 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v1.0.0-alpha.1.zip) or check out the preview tag. Download and verify the matching [preview wheel](../../CODEX.md#install-the-preview). From the release source root, replace `WHEEL_FILE` with the path to that verified local wheel:
+For the released live examples, open the [alpha.1 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v1.0.0-alpha.1.zip) or check out the preview tag. Download and verify the matching [preview wheel](../../README.md#install-the-codex-preview). From the release source root, replace `WHEEL_FILE` with the path to that verified local wheel:
 
 ```sh
 uv sync
@@ -56,4 +56,4 @@ This route requires the default provider's OpenAI credentials, a separately inst
 | --- | --- | --- |
 | Delegate to Codex CLI: [Codex tool](../tools/codex.py) | `uv run --no-sync python examples/tools/codex.py` | Prints summaries of `pyproject.toml` and `AGENTS.md`, plus Codex turn events. Starts CLI subprocesses, reads repository files, and sends outer-agent and Codex model requests. |
 
-The [repository quickstart](../../CODEX.md) gives a complete first agent. The [Codex provider guide](../../docs/models/codex.md) describes native execution, approvals, history, compaction, and unsupported hosted features.
+The [repository quickstart](../../README.md#run-a-codex-agent) gives a complete first agent. The [Codex provider guide](../../docs/models/codex.md) describes native execution, approvals, history, compaction, and unsupported hosted features.
