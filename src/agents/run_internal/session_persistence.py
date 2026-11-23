@@ -1067,10 +1067,22 @@ async def persist_resumed_turn(
         current_keys = {
             nested_history_run_item_occurrence_key(item) for item in current_response_items
         } - {None}
+        current_requests = {
+            key
+            for item in current_response_items
+            if (key := _held_pair_identity(run_item_to_input_item(item, reasoning_item_id_policy)))
+            is not None
+        }
         filtered_context_items = [
             item
             for item in filtered_context_items or ()
             if nested_history_run_item_occurrence_key(item) in current_keys
+            # Public RunItem replacements can lose private occurrence metadata.
+            or (
+                nested_history_run_item_occurrence_key(item) is None
+                and _held_pair_identity(run_item_to_input_item(item, reasoning_item_id_policy))
+                in current_requests
+            )
         ]
     if session is None:
         extend_held_session_write(
@@ -1260,11 +1272,15 @@ def held_session_items_for_save(
                 if (value := run_item_to_input_item(item, policy)) is not None
             ],
         ]
+        filtered_requests = {
+            key: item for item in view if (key := _held_pair_identity(item)) is not None
+        }
         retained = Counter(_held_view_fingerprint(item) for item in view)
         kept = []
         for item in current:
-            if _held_pair_identity(item) is not None:
-                kept.append(item)
+            if (key := _held_pair_identity(item)) is not None:
+                # Keep the filtered payload when a call retains its pairing identity.
+                kept.append(filtered_requests.get(key, item))
                 continue
             fingerprint = _held_view_fingerprint(item)
             if retained[fingerprint]:
