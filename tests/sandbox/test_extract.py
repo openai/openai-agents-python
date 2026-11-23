@@ -21,7 +21,10 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
 )
-from agents.sandbox.session.archive_extraction import zipfile_compatible_stream
+from agents.sandbox.session.archive_extraction import (
+    validate_tar_archive_for_extraction,
+    zipfile_compatible_stream,
+)
 from agents.sandbox.session.archive_ops import extract_archive
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
@@ -140,6 +143,36 @@ def _zip_bytes(*, members: dict[str, bytes]) -> io.BytesIO:
     return buf
 
 
+@pytest.mark.parametrize("tar_format", [tarfile.PAX_FORMAT, tarfile.GNU_FORMAT])
+def test_tar_validation_hashes_path_components_linearly(
+    monkeypatch: pytest.MonkeyPatch, tar_format: int
+) -> None:
+    depth = 128
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w", format=tar_format) as archive:
+        archive.addfile(tarfile.TarInfo(name="/".join(["dir"] * depth + ["empty.txt"])))
+    data.seek(0)
+
+    # Count hashed components instead of relying on timing or stressing the host.
+    hashed_components = 0
+    original_hash = Path.__hash__
+
+    def counting_hash(path: Path) -> int:
+        nonlocal hashed_components
+        hashed_components += len(path.parts)
+        return original_hash(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "__hash__", counting_hash)
+        with tarfile.open(fileobj=data, mode="r|*") as archive:
+            validate_tar_archive_for_extraction(
+                archive,
+                archive_limits=SandboxArchiveLimits(max_members=1, max_extracted_bytes=1),
+            )
+
+    assert hashed_components <= 8 * (depth + 1)
+
+
 async def _assert_extract_rejects_member(
     tmp_path: Path,
     archive_name: str,
@@ -177,6 +210,98 @@ async def test_extract_tar_writes_archive_and_unpacks_contents(tmp_path: Path) -
     workspace = Path(session.state.manifest.root)
     assert (workspace / "bundle.tar").is_file()
     assert (workspace / "nested" / "hello.txt").read_text(encoding="utf-8") == "hello from tar"
+
+
+@pytest.mark.asyncio
+async def test_extract_tar_accepts_repeated_and_late_directory_entries(tmp_path: Path) -> None:
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w") as archive:
+        for name, payload in [
+            ("nested/first.txt", b"first"),
+            ("nested", None),
+            ("./nested/", None),
+            ("nested/second.txt", b"second"),
+            ("other/first.txt", b"other"),
+        ]:
+            member = tarfile.TarInfo(name=name)
+            if payload is None:
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
+            else:
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+    data.seek(0)
+    session = _build_session(tmp_path)
+    await session.start()
+    try:
+        await session.extract("bundle.tar", data)
+    finally:
+        await session.shutdown()
+
+    workspace = Path(session.state.manifest.root)
+    assert (workspace / "nested/first.txt").read_bytes() == b"first"
+    assert (workspace / "nested/second.txt").read_bytes() == b"second"
+    assert (workspace / "other/first.txt").read_bytes() == b"other"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entries", "expected_member", "expected_reason"),
+    [
+        (
+            [("file.txt", tarfile.REGTYPE), ("./file.txt", tarfile.REGTYPE)],
+            "./file.txt",
+            "duplicate archive path: file.txt",
+        ),
+        (
+            [("nested", tarfile.DIRTYPE), ("nested", tarfile.REGTYPE)],
+            "nested",
+            "duplicate archive path: nested",
+        ),
+        (
+            [("nested", tarfile.REGTYPE), ("nested", tarfile.DIRTYPE)],
+            "nested",
+            "duplicate archive path: nested",
+        ),
+        (
+            [("nested", tarfile.REGTYPE), ("nested/child.txt", tarfile.REGTYPE)],
+            "nested/child.txt",
+            "archive path descends through non-directory: nested",
+        ),
+        (
+            [
+                ("nested/first.txt", tarfile.REGTYPE),
+                ("nested/second.txt", tarfile.REGTYPE),
+                ("nested", tarfile.REGTYPE),
+            ],
+            "nested/first.txt",
+            "archive path descends through non-directory: nested",
+        ),
+    ],
+)
+async def test_extract_tar_preserves_path_collision_errors(
+    tmp_path: Path,
+    entries: list[tuple[str, bytes]],
+    expected_member: str,
+    expected_reason: str,
+) -> None:
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w") as archive:
+        for name, member_type in entries:
+            member = tarfile.TarInfo(name=name)
+            member.type = member_type
+            archive.addfile(member)
+    data.seek(0)
+
+    workspace = await _assert_extract_rejects_member(
+        tmp_path,
+        "bundle.tar",
+        data,
+        expected_member=expected_member,
+        expected_reason=expected_reason,
+    )
+    assert not (workspace / "nested").exists()
+    assert not (workspace / "file.txt").exists()
 
 
 @pytest.mark.asyncio
