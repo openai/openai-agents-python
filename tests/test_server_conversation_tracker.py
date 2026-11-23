@@ -357,6 +357,36 @@ def test_mark_input_as_sent_and_rewind_input_respects_remaining_initial_input() 
     assert tracker.remaining_initial_input == [pending_1]
 
 
+def test_mark_input_as_sent_preserves_source_identity_and_delivery_order() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv")
+    first: TResponseInputItem = {"role": "user", "content": "same"}
+    second: TResponseInputItem = {"role": "user", "content": "same"}
+    prepared = [first, first, second]
+    tracker.remaining_initial_input = prepared
+
+    tracker.mark_input_as_sent([prepared[2], prepared[0], prepared[1], prepared[2]])
+
+    assert len(tracker.sent_items) == 2
+    assert tracker.sent_items[0] is second
+    assert tracker.sent_items[1] is first
+    assert tracker.remaining_initial_input is None
+
+    tracker.rewind_input([prepared[0]])
+
+    assert len(tracker.sent_items) == 1
+    assert tracker.sent_items[0] is second
+    assert tracker.remaining_initial_input is not None
+    assert len(tracker.remaining_initial_input) == 1
+    assert tracker.remaining_initial_input[0] is first
+
+    tracker.mark_input_as_sent([prepared[0], prepared[0]])
+
+    assert len(tracker.sent_items) == 2
+    assert tracker.sent_items[0] is second
+    assert tracker.sent_items[1] is first
+    assert tracker.remaining_initial_input is None
+
+
 def test_mark_input_as_sent_ignores_stale_id_for_rebuilt_filtered_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
