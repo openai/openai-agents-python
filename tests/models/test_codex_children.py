@@ -24,6 +24,12 @@ def test_invalid_child_role(name):
         CodexRole(name, "description", "instructions")
 
 
+@pytest.mark.parametrize("roles", [[], (), "editor", [None], [ROLE, ROLE]])
+def test_invalid_roles(roles):
+    with pytest.raises(ValueError):
+        CodexChildren(roles=roles, max_delegations=1)
+
+
 def test_invalid_child_declarations():
     with pytest.raises(ValueError, match="nonblank"):
         CodexRole("editor", "description", " ")
@@ -64,7 +70,7 @@ async def test_native_children_reject_saved_workspace_approval_before_start(tmp_
     checkpoint = (await response(tmp_path)).output[0].checkpoint
     provider = CodexProvider(cwd=tmp_path, children=PROFILE)
     with pytest.raises(UserError, match="cannot resume workspace approvals"):
-        await provider._run_approved_native_call(checkpoint, ModelTracing.DISABLED)
+        await provider._run_approved_native_call(checkpoint, ModelTracing.DISABLED, hooks=None)
     assert provider._manager is None
 
 
@@ -186,7 +192,10 @@ async def test_unsupported_children_before_generation(
 @pytest.mark.allow_call_model_methods
 async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpoint, catalog):
     port, requests, items = model_endpoint
-    children = CodexChildren(roles=(ROLE,), max_delegations=2)
+    roles = [ROLE]
+    children = CodexChildren(roles=roles, max_delegations=2)
+    roles.clear()
+    assert children.roles == (ROLE,)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
 
     def step(request):
@@ -530,3 +539,33 @@ async def test_native_child_uses_the_same_wait_and_close_allowance(
         assert "done" in outputs(requests[-1])["wait"]
     finally:
         await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_bounded_override_leaves_saved_approval_paused(tmp_path, monkeypatch, streamed):
+    from agents.memory.resumable_session import ResumableSession
+    from tests.memory.test_native_approval_recovery import setup_native
+
+    agent, store, session, config, pending, calls, _ = await setup_native(tmp_path, monkeypatch)
+    first = await Runner.run(agent, "draft", session=session, run_config=config)
+    saved = store.records[session.session_id]
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    provider = CodexProvider(cwd=tmp_path, children=PROFILE)
+    bounded = RunConfig(model=provider.get_model(None), tracing_disabled=True)
+    with pytest.raises(UserError, match="cannot resume workspace approvals"):
+        if streamed:
+            stream = Runner.run_streamed(agent, state, run_config=bounded)
+            async for _ in stream.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state, run_config=bounded)
+    assert provider._manager is None and not calls
+    assert store.records[session.session_id] == saved
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    result = await Runner.run(agent, state, run_config=config)
+    assert result.final_output == "finished"
+    assert calls == [pending.checkpoint]

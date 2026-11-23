@@ -711,6 +711,7 @@ class AgentRunner:
                         context_wrapper,
                         hooks,
                         run_config.tool_execution,
+                        restore_config=run_config,
                     ),
                 )
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
@@ -2931,7 +2932,11 @@ class AgentRunner:
                         await session.begin(
                             input,
                             ModelToolHooks(
-                                schema_agent, context_wrapper, hooks, run_config.tool_execution
+                                schema_agent,
+                                context_wrapper,
+                                hooks,
+                                run_config.tool_execution,
+                                restore_config=run_config,
                             ),
                         )
                         session.bind_state(run_state)

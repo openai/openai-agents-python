@@ -28,6 +28,7 @@ class CodexRole:
 class CodexChildren:
     """Allow native V1 delegation within one ephemeral model request.
 
+    The SDK stores a tuple snapshot of the supplied list or tuple.
     Roles supplement Core's default, explorer and worker roles. The model chooses
     whether to delegate. A non-leaf can spawn, message, wait for, close
     and resume agents within this tree. Closed ephemeral threads have no
@@ -49,17 +50,19 @@ class CodexChildren:
     limits and shared application admission before each send and retry.
     """
 
-    roles: tuple[CodexRole, ...]
+    roles: tuple[CodexRole, ...] | list[CodexRole]
     max_delegations: int
     max_depth: int = 1
 
     def __post_init__(self) -> None:
+        if isinstance(self.roles, list):
+            object.__setattr__(self, "roles", tuple(self.roles))
         if (
             not isinstance(self.roles, tuple)
             or not self.roles
             or any(not isinstance(role, CodexRole) for role in self.roles)
         ):
-            raise ValueError("Provide a nonempty tuple of CodexRole declarations.")
+            raise ValueError("Provide a nonempty list or tuple of CodexRole declarations.")
         if len({role.name.lower() for role in self.roles}) != len(self.roles):
             raise ValueError("Duplicate Codex role name.")
         for value in (self.max_delegations, self.max_depth):

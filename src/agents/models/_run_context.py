@@ -3,18 +3,19 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from ..agent import Agent
     from ..lifecycle import RunHooks
-    from ..run_config import ToolExecutionConfig
+    from ..run_config import RunConfig, ToolExecutionConfig
     from ..run_context import RunContextWrapper
 
 
 @dataclass(frozen=True)
 class ModelToolHooks:
+    restore_config: RunConfig | None = field(default=None, kw_only=True, repr=False)
     agent: Agent[Any]
     context: RunContextWrapper[Any]
     lifecycle: RunHooks[Any]
