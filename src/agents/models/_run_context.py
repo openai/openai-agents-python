@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Iterator
-from contextlib import aclosing, contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
-from ..request_capture import _model_capture_scope
+from .._redaction import current_redactor, redaction_scope
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -28,14 +28,15 @@ _MODEL_RUN_CONTEXT: ContextVar[tuple[object | None, ModelToolHooks | None]] = Co
     "model_run_context", default=(None, None)
 )
 
-T = TypeVar("T")
-
 
 @contextmanager
 def model_run_context(owner: object, hooks: ModelToolHooks | None = None) -> Iterator[None]:
     token = _MODEL_RUN_CONTEXT.set((owner, hooks))
     try:
-        yield
+        # Retry decisions need the original provider error. Once they finish,
+        # discard any reflected request, response body and exception chain.
+        with redaction_scope(current_redactor()):
+            yield
     finally:
         _MODEL_RUN_CONTEXT.reset(token)
 
@@ -47,16 +48,3 @@ def get_model_run_owner() -> object | None:
 
 def get_model_tool_hooks() -> ModelToolHooks | None:
     return _MODEL_RUN_CONTEXT.get()[1]
-
-
-async def model_run_context_stream(
-    stream: AsyncGenerator[T, None],
-    owner: object,
-    hooks: ModelToolHooks | None = None,
-) -> AsyncGenerator[T, None]:
-    # `aclosing` forwards an early `aclose()` on this generator to the delegate, so the
-    # delegate's cleanup runs deterministically instead of waiting for garbage collection.
-    with model_run_context(owner, hooks), _model_capture_scope():
-        async with aclosing(stream):
-            async for item in stream:
-                yield item

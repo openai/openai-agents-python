@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
+from .._redaction import current_redactor, hook_payload_diagnostics, redact_items, require_clean
 from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
@@ -361,6 +362,9 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             if snapshot is not None:
                 session_items = _normalize_compaction_session_items(snapshot.items)
                 complete = snapshot.complete
+                if not complete and current_redactor() is not None:
+                    # A summary could complete a match in the unread prefix.
+                    return
             else:
                 # Backends without atomic suffix replacement still require complete
                 # coverage, established by a finite read after the hook approves.
@@ -479,19 +483,25 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 if (cleaned := clean_responses_input_item(item)) is not None
             ]
 
-        client = self.client
-        with _http_exchange(_compact_submission(client) if is_automatic else None):
-            compacted = await client.responses.compact(**compact_kwargs)
+        require_clean(compact_kwargs)
+        with hook_payload_diagnostics("Session compaction failed.", redact_by_default=False):
+            client = self.client
+            with _http_exchange(_compact_submission(client) if is_automatic else None):
+                compacted = await client.responses.compact(**compact_kwargs)
 
         compacted_usage = getattr(compacted, "usage", None)
         if wrapper is not None and compacted_usage is not None:
             wrapper.usage.add(_response_usage_to_usage(compacted_usage))
 
-        output_items = _strip_orphaned_assistant_ids(
-            _normalize_compaction_output_items(compacted.output or [])
+        output_items = redact_items(
+            _strip_orphaned_assistant_ids(
+                _normalize_compaction_output_items(compacted.output or [])
+            )
         )
 
         if snapshot is not None:
+            if suffix_start and current_redactor() is not None:
+                require_clean([*snapshot.items[:suffix_start], *output_items])
 
             async def replace_snapshot(snapshot: _CompactionSnapshot) -> bool:
                 replaced = await snapshot.replace_suffix(suffix_start, output_items)
@@ -525,6 +535,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             # Refresh after the API request so rollback cannot revive items that
             # expired while awaiting compaction. This read still honors the budget.
             previous_items = await self._get_all_underlying_session_items()
+            # Both replacement and rollback bypass the Runner's normal session append.
+            require_clean((stored_output_items, previous_items))
             try:
                 await self._replace_underlying_session_items(
                     output_items=stored_output_items, previous_items=previous_items, wrapper=wrapper
