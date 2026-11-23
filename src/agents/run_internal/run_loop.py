@@ -27,6 +27,7 @@ from .._redaction import (
     redact_model_input,
     redact_response,
     require_clean_final_output,
+    set_final_output_item,
 )
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
@@ -786,6 +787,7 @@ async def finalize_max_turns_handler_output(
     require_clean_final_output(validated_output, history or [])
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
+    set_final_output_item(synthesized_item if include_in_history else None)
 
     await run_final_output_hooks(agent, hooks, context_wrapper, validated_output)
 
@@ -1765,6 +1767,7 @@ async def start_streaming(
                     streamed_result.input, streamed_result.new_items, [synthesized_item]
                 )
                 include_in_history = handler_result.include_in_history
+                set_final_output_item(synthesized_item if include_in_history else None)
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store

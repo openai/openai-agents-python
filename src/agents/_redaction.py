@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import copy
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel
@@ -35,11 +35,26 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _Redactor = Callable[[str], str]
 _Mode = Literal["payload", "item", "check"]
-_redactor: ContextVar[_Redactor | None] = ContextVar("agents_redact_text", default=None)
+
+
+@dataclass(repr=False)
+class _RunRedaction:
+    redact: _Redactor
+    final_item: RunItem | None = None
+
+
+_redaction: ContextVar[_RunRedaction | None] = ContextVar("agents_redact_text", default=None)
 
 
 def current_redactor() -> _Redactor | None:
-    return _redactor.get()
+    scope = _redaction.get()
+    return scope.redact if scope is not None else None
+
+
+def set_final_output_item(item: RunItem | None) -> None:
+    """Remember the source across hooks and guardrails, only in this invocation."""
+    if (scope := _redaction.get()) is not None:
+        scope.final_item = item
 
 
 def protected_error(error: BaseException) -> BaseException:
@@ -55,7 +70,7 @@ def protected_error(error: BaseException) -> BaseException:
 
 @contextmanager
 def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
-    token = _redactor.set(redactor)
+    token = _redaction.set(_RunRedaction(redactor) if redactor is not None else None)
     try:
         yield
     except BaseException as error:
@@ -63,7 +78,7 @@ def redaction_scope(redactor: _Redactor | None) -> Iterator[None]:
             raise
         _raise_data_redacted_error(protected_error(error))
     finally:
-        _redactor.reset(token)
+        _redaction.reset(token)
 
 
 @contextmanager
@@ -289,19 +304,34 @@ def require_clean_final_output(
     value: object, original: str | list[TResponseInputItem], *batches: list[RunItem]
 ) -> None:
     """Check the returned reply, even when history omits it or stores another form."""
-    if value is None or current_redactor() is None:
+    scope = _redaction.get()
+    if value is None or scope is None:
         return
+    from .agent_output import _WRAPPER_DICT_KEY
     from .items import ItemHelpers, MessageOutputItem
 
-    items = [item for batch in batches for item in batch]
-    history = [*ItemHelpers.input_to_new_input_list(original), *(i.raw_item for i in items)]
+    history: list[Any] = ItemHelpers.input_to_new_input_list(original)
+    source = scope.final_item
+    index = None
+    for batch in batches:
+        for item in batch:
+            if item is source:
+                index = len(history)
+            history.append(item.raw_item)
     reply = {"role": "assistant", "content": value}
-    if items and isinstance(items[-1], MessageOutputItem):
-        # A validator or guardrail can change the terminal message. Check the
-        # returned form in its place, without counting identical replies twice.
-        require_clean([*history[:-1], reply])
-        rendered = ItemHelpers.extract_text(items[-1].raw_item)
-        if list(_text_parts(value)) == list(_text_parts(rendered)):
+    if index is not None:
+        # Check the returned form in place. A transformed or independently
+        # synthesized reply also needs checking alongside the original.
+        require_clean([*history[:index], reply, *history[index + 1 :]])
+        parts = list(_text_parts(value))
+        if isinstance(source, MessageOutputItem):
+            rendered = _decode_json(ItemHelpers.extract_text(source.raw_item) or "")
+            if isinstance(rendered, dict) and rendered.keys() == {_WRAPPER_DICT_KEY}:
+                if parts == list(_text_parts(rendered[_WRAPPER_DICT_KEY])):
+                    return
+        else:
+            rendered = _entries(history[index]).get("output")
+        if parts == list(_text_parts(rendered)):
             return
     require_clean([*history, reply])
 

@@ -219,16 +219,68 @@ async def test_custom_tool_final_output_is_scrubbed(streamed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_parsed_final_output_does_not_duplicate_a_message(streamed):
+@pytest.mark.parametrize("policy", ["first", "named", "custom"])
+async def test_final_reply_counts_only_actual_tool_outputs(streamed, policy):
+    from agents import ToolsToFinalOutputResult
+
+    @tool
+    def selected() -> str:
+        return "half"
+
+    @tool
+    def other() -> str:
+        return ""
+
+    def finish(context, results):
+        return ToolsToFinalOutputResult(is_final_output=True, final_output="end")
+
+    calls = [function_call("selected", {}, call_id="one")]
+    if policy == "named":
+        calls.append(function_call("other", {}, call_id="two"))
+    agent = Agent(
+        name="worker",
+        tools=[selected, other],
+        tool_use_behavior={
+            "first": "stop_on_first_tool",
+            "named": {"stop_at_tool_names": ["selected"]},
+            "custom": finish,
+        }[policy],
+        model=ScriptedModel([calls]),
+    )
+    config = RunConfig(
+        redact_text=lambda text: text.replace("halfhalf", "-").replace("halfend", "-")
+    )
+
+    async def run():
+        if streamed:
+            result = Runner.run_streamed(agent, "go", run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "go", run_config=config)
+        return result.final_output
+
+    if policy == "custom":
+        with pytest.raises(UserError, match="redact_text"):
+            await run()
+    else:
+        assert await run() == "half"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped):
     from pydantic import BaseModel
 
     class Reply(BaseModel):
         text: str
 
+    payload = '{"response":[{"text":"half"}]}' if wrapped else '{"text":"half"}'
     agent = Agent(
         name="worker",
-        model=ScriptedModel([[assistant_message('{"text":"half"}')]]),
-        output_type=Reply,
+        model=ScriptedModel([[assistant_message(payload)]]),
+        output_type=list[Reply] if wrapped else Reply,
     )
     config = RunConfig(redact_text=lambda text: text.replace("halfhalf", "[removed]"))
     if streamed:
@@ -237,7 +289,35 @@ async def test_parsed_final_output_does_not_duplicate_a_message(streamed):
             pass
     else:
         result = await Runner.run(agent, "go", run_config=config)
-    assert result.final_output == Reply(text="half")
+    assert result.final_output == ([Reply(text="half")] if wrapped else Reply(text="half"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("kind", ["model_refusal", "invalid_final_output"])
+async def test_identical_omitted_handler_reply_is_still_a_separate_reply(streamed, kind):
+    from .test_responses import get_refusal_message
+
+    if kind == "model_refusal":
+        message = get_refusal_message("no")
+        assert message.content is not None
+        message.content.extend(assistant_message("half").content)
+        output_type, fallback = str, "half"
+    else:
+        message = assistant_message('["half"]')  # Missing the SDK's response wrapper.
+        output_type, fallback = list[str], ["half"]
+
+    agent = Agent(name="worker", model=ScriptedModel([[message]]), output_type=output_type)
+    options = {
+        "run_config": RunConfig(redact_text=lambda s: s.replace("halfhalf", "[removed]")),
+        "error_handlers": {kind: lambda _: {"final_output": fallback, "include_in_history": False}},
+    }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "go", **options).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", **options)
 
 
 @pytest.mark.asyncio
