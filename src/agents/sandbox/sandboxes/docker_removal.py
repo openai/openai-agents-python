@@ -397,6 +397,7 @@ class DockerRemovalService:
                     try:
                         inspection = binding.worker.request(
                             operation="inspect",
+                            max_cpu_seconds=self._max_cpu_seconds,
                             path=original.as_posix(),
                             workspace_root=manifest.root
                             if not coerce_posix_path(path).is_absolute()
