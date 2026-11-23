@@ -53,11 +53,24 @@ def bind_text_transform(
         binding = tool._mcp_tool_binding
         for index, (target, _) in enumerate(settings.tool_text_transforms):
             if isinstance(target, tuple):
-                if binding is None or binding[1] != target[1]:
+                if binding is None:
                     continue
                 server = tool._mcp_server_ref() if tool._mcp_server_ref else None
+                if server is not None and server is not target[0] and server.name != target[0].name:
+                    continue
+                if target[1] != binding[1]:
+                    from ..mcp.util import MCPUtil
+
+                    # A filtered catalog cannot prove absence. A visible alias can
+                    # signal a mistake, but only the exact raw name can select.
+                    ambiguous |= target[1] in (
+                        tool.name,
+                        MCPUtil._safe_tool_name_part(binding[1], "tool"),
+                        MCPUtil._build_prefixed_tool_base_name(binding[0], binding[1]),
+                    )
+                    continue
                 if server is not target[0]:
-                    ambiguous |= server is None or server.name == target[0].name
+                    ambiguous = True
                     continue
             elif target is not tool:
                 if binding is None and not tool._is_agent_tool and not tool._is_codex_tool:
@@ -104,7 +117,9 @@ def validate_pending_text_transforms(
     for item in state._current_step.interruptions:
         call_id = item.call_id
         record = context._tool_invocations.get(call_id) if call_id else None
-        if not call_id or record is None or record.completed or not record.requires_text_transform:
+        if not call_id or record is None or record.completed:
+            continue
+        if not record.requires_text_transform and not (settings and settings.tool_text_transforms):
             continue
         if (
             context.get_approval_status(
@@ -121,6 +136,12 @@ def validate_pending_text_transforms(
             (run.function_tool for run in processed.functions if run.tool_call.call_id == call_id),
             None,
         )
+        if not record.requires_text_transform:
+            # An editor added on resume can also name an alias. Check before
+            # claiming the session, without changing the saved requirement.
+            if tool is not None and tool._mcp_tool_binding is not None:
+                bind_text_transform(settings, tool, None)
+            continue
         if tool is not None:
             if tool._mcp_tool_binding is None:
                 configured = any(candidate is tool for candidate in agent.tools)

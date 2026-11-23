@@ -149,7 +149,7 @@ pub(crate) fn add_overrides(
     Ok(())
 }
 
-pub(crate) fn registered(thread: &CodexThread, server: &str) -> Vec<(&'static str, i64)> {
+pub(crate) fn trusted(thread: &CodexThread, server: &str) -> Vec<HookListEntry> {
     thread
         .list_hooks()
         .hooks
@@ -158,7 +158,17 @@ pub(crate) fn registered(thread: &CodexThread, server: &str) -> Vec<(&'static st
             is_sdk_hook(hook, server)
                 && hook.enabled
                 && hook.trust_status == HookTrustStatus::Trusted
+                && matches!(
+                    hook.event_name,
+                    HookEventName::PreToolUse | HookEventName::PostToolUse
+                )
         })
+        .collect()
+}
+
+pub(crate) fn registered(thread: &CodexThread, server: &str) -> Vec<(&'static str, i64)> {
+    trusted(thread, server)
+        .into_iter()
         .filter_map(|hook| {
             let event = match hook.event_name {
                 HookEventName::PreToolUse => "pre_tool_use",

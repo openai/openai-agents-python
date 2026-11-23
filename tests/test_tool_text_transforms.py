@@ -1005,3 +1005,89 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
     result = await resume(correct)
     assert result.final_output == "done" and RAW not in result.to_state().to_string()
     assert bool(peer.tool_calls) == mcp and bool(effects) != mcp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("selector", ["read_report", "mcp_Reports__read_report"])
+async def test_mcp_alias_cannot_silently_skip_an_editor(streamed, selector):
+    peer = Source()
+    prefixed = selector.startswith("mcp_")
+    model = model_for(selector if prefixed else "read.report")
+    agent = Agent(
+        name="reports",
+        model=model,
+        mcp_servers=[peer],
+        mcp_config={"include_server_in_tool_names": prefixed},
+    )
+
+    async def forbidden(call, texts):
+        pytest.fail("An alias must never bind an editor")
+
+    config = RunConfig(
+        tool_execution=ToolExecutionConfig(tool_text_transforms=[((peer, selector), forbidden)])
+    )
+    with pytest.raises(UserError, match="original tool name"):
+        if streamed:
+            result = Runner.run_streamed(agent, "go", run_config=config)
+            async for event in result.stream_events():
+                assert RAW not in repr(event)
+        else:
+            await Runner.run(agent, "go", run_config=config)
+    assert not peer.tool_calls and len(model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_alias_added_on_resume_leaves_approval_retryable():
+    from agents import ResumableSession
+
+    from .memory.test_resumable_session import MemoryStore
+
+    peer = Source(require_approval="always")
+    model = model_for("read.report")
+    agent = Agent(name="reports", model=model, mcp_servers=[peer])
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    await Runner.run(agent, "go", session=session)
+    saved = store.records[session.session_id]
+    resumed = await ResumableSession.resume(store, session.session_id)
+    state = await resumed.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+
+    async def edit(call, texts):
+        return tuple(SAFE for _ in texts)
+
+    def config(name):
+        return RunConfig(
+            tool_execution=ToolExecutionConfig(tool_text_transforms=[((peer, name), edit)])
+        )
+
+    with pytest.raises(UserError, match="original tool name"):
+        await Runner.run(agent, state, run_config=config("read_report"))
+    assert store.records[session.session_id] == saved and not peer.tool_calls
+    result = await Runner.run(agent, state, run_config=config("read.report"))
+    assert peer.tool_calls == ["read.report"] and result.final_output == "done"
+    assert RAW not in store.records[session.session_id] + repr(model.calls[-1].input)
+
+
+@pytest.mark.asyncio
+async def test_mcp_raw_names_win_over_alias_collisions():
+    peer = Source()
+    peer.add_tool("read_report", {})
+
+    async def edit(call, texts):
+        return tuple("edited " + call.mcp_target[1] for _ in texts)
+
+    names = ("read_report", "read.report")
+    config = RunConfig(
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[((peer, name), edit) for name in names]
+        )
+    )
+    for name in names:
+        model = model_for(name)
+        agent = Agent(name="reports", model=model, mcp_servers=[peer])
+        result = await Runner.run(agent, "go", run_config=config)
+        assert RAW not in repr(model.calls[-1].input)
+        assert "edited " + name in repr(result.to_input_list())
+    assert peer.tool_calls == list(names)
