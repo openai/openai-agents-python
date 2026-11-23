@@ -34,6 +34,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
 from .._mcp_tool_metadata import collect_mcp_list_tools_metadata
+from .._redaction import require_clean_agent
 from .._tool_identity import (
     FunctionToolLookupKey,
     build_function_tool_lookup_map,
@@ -96,6 +97,7 @@ from ..items import (
     ToolSearchCallItem,
     ToolSearchOutputItem,
     TResponseInputItem,
+    TResponseOutputItem,
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
@@ -178,6 +180,12 @@ from .run_steps import (
 )
 from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
+from .tool_declarations import (
+    PreparedTool,
+    bind_declarations,
+    resume_declaration,
+    validate_prepared_inventory,
+)
 from .tool_execution import (
     build_litellm_json_tool_call,
     coerce_apply_patch_operations,
@@ -640,6 +648,7 @@ async def execute_handoffs(
                 tool_input_guardrail_results=list(tool_input_guardrail_results or []),
                 tool_output_guardrail_results=list(tool_output_guardrail_results or []),
             )
+        require_clean_agent(new_agent)
         register_agent_tool_configuration(new_agent)
         span_handoff.span_data.to_agent = new_agent.name
         if multiple_handoffs:
@@ -2530,6 +2539,14 @@ async def resolve_interrupted_turn(
         stale_function = stale_functions.get(call_id)
         original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
+        if approval_status is not False:
+            await resume_declaration(
+                current_function.function_tool if current_function else None,
+                call_id,
+                bindings,
+                context_wrapper,
+                run_config,
+            )
         if current_function is not None:
             current_binding = current_function.function_tool._mcp_tool_binding
             missing_mcp_binding = (
@@ -4135,6 +4152,14 @@ def _preflight_response_invocations(
     }
 
 
+def _snapshot_function_calls(items: list[TResponseOutputItem]) -> list[TResponseOutputItem]:
+    if not any(isinstance(item, ResponseFunctionToolCall) for item in items):
+        return items
+    return [
+        deepcopy(item) if isinstance(item, ResponseFunctionToolCall) else item for item in items
+    ]
+
+
 async def get_single_step_result_from_response(
     *,
     bindings: AgentBindings[TContext],
@@ -4150,6 +4175,7 @@ async def get_single_step_result_from_response(
     tool_use_tracker,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     server_manages_conversation: bool = False,
+    prepared_tools: dict[int, PreparedTool] | None = None,
     after_invocation_validation: Callable[[ProcessedResponse | None], Awaitable[bool]]
     | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
@@ -4160,6 +4186,8 @@ async def get_single_step_result_from_response(
     item_agent = bindings.public_agent
 
     def classify() -> ProcessedResponse:
+        if prepared_tools is not None:
+            validate_prepared_inventory(all_tools, prepared_tools)
         return process_model_response(
             agent=item_agent,
             all_tools=all_tools,
@@ -4182,6 +4210,9 @@ async def get_single_step_result_from_response(
     ):
         # Keep the tool and its callbacks on the same arguments if a consumer edits a raw event.
         new_response.output = deepcopy(new_response.output)
+    elif settings is not None:
+        # A model adapter can retain the items it returned.
+        new_response.output = _snapshot_function_calls(new_response.output)
     new_bindings: dict[str, tuple[str, dict[str, Any]]] = {}
     try:
         processed_response = classify()
@@ -4229,6 +4260,8 @@ async def get_single_step_result_from_response(
         existing_items=pre_step_items,
     )
 
+    if prepared_tools:
+        bind_declarations(prepared_tools, processed_response, context_wrapper, run_config)
     for call_id, rewrite in new_bindings.items():
         context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
 

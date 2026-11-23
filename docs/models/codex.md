@@ -13,11 +13,12 @@ Use standard CPython 3.10 through 3.14. The preview wheel includes the Python SD
 
 !!! warning "Choose a build that supports the features you need"
 
-    The [`v1.0.0-alpha.1` release](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1) includes the provider but predates operation tracing and native approval recovery. Both features require a newer build with the SDK's [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches). The build applies them for you.
+    The [`v1.0.0-alpha.1` release](https://github.com/openai/openai-agents-python/releases/tag/v1.0.0-alpha.1) includes the provider but predates operation tracing, native approval recovery, and Runner text redaction. The preview build applies two [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) to the embedded Core for tracing and recovery. Runner redaction runs in Python. Installing the wheel leaves any separate Codex CLI unchanged.
 
 1. Look for the features you need in the [GitHub prerelease notes](https://github.com/openai/openai-agents-python/releases). Download the wheel for your platform and `SHA256SUMS` from **Assets**.
-2. If no release includes those features, sign in to GitHub and select a successful [Codex preview wheels run on `feat/simple-codex`](https://github.com/openai/openai-agents-python/actions/workflows/codex-preview.yml?query=branch%3Afeat%2Fsimple-codex+event%3Apush). For tracing and native approval recovery, use [commit `3837c6cc`](https://github.com/openai/openai-agents-python/commit/3837c6cc12bb2744d2763cc5073895f2f544830e) or a later build that includes it. Download and unzip the `codex-preview-*` artifact within 14 days of the run. Check `source_commit` in `BUILD.json`. Development builds can reuse a release's wheel filename and version.
-3. Select the file for your platform and compare its SHA-256 digest with the entry in `SHA256SUMS`.
+2. If no release includes those features, sign in to GitHub and select a successful [Codex preview wheels run on `feat/simple-codex`](https://github.com/openai/openai-agents-python/actions/workflows/codex-preview.yml?query=branch%3Afeat%2Fsimple-codex+event%3Apush). Download and unzip the `codex-preview-*` artifact within 14 days of the run.
+3. For an artifact, check `source_commit` in `BUILD.json`. For the examples in this guide, use [`ed728b68`](https://github.com/openai/openai-agents-python/commit/ed728b68ba8b8cf68b7a2bd27446c3328cf223dd) or a descendant. If you use error handlers or custom tool callbacks to produce final answers, also check that the build includes the [fallback redaction fix](https://github.com/openai/openai-agents-python/pull/6158). Development builds can share a wheel filename and version.
+4. Select the file for your platform and compare its SHA-256 digest with the entry in `SHA256SUMS`.
 
 | Platform | Wheel filename ending |
 | --- | --- |
@@ -144,7 +145,9 @@ On Windows, the preview rejects a local Codex executor configured with the legac
 
 To pause a direct built-in `exec_command` or `apply_patch` for human approval, start the run with a [`ResumableSession`](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/sessions/index.md#use-your-own-storage-for-resumable-sessions). On the replacement worker, load the saved state, approve or reject the original request, and pass the Codex run configuration again. Protect the session store. It can contain the submitted command or patch even with tracing disabled.
 
-Recovery requires a single pending native call, one local environment, the same workspace path and permissions, and no native tool hooks. For edits, the affected files must still match the saved state. If the replacement worker's SDK tool hooks would intercept the approved call, the SDK leaves the approval pending. Keep required security hooks enabled. Reject the request or use an SDK-managed tool for that workflow. Other types of native approval requests fail the model call.
+Recovery requires a single pending native call, one local environment, and the same workspace path and permissions. For edits, the affected files must still match the saved state. Other types of native approval requests fail the model call.
+
+Keep required security hooks enabled. Configure the same SDK `prepare_tool_input`, `prepare_tool_output`, and lifecycle hooks on both workers. A missing required hook leaves approval pending. Other native hooks or hook warnings stop recovery. See the [recovery requirements for tool hooks](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/02-approval-recovery.md#use-a-scrubber-with-approvals).
 
 Codex selects the sandbox for the first attempt. After a sandbox denial, Codex can retry an edit outside the sandbox only if the policy permits it without another approval and no edits have been committed. A partial edit stops recovery and leaves earlier writes on disk. After a partial edit or worker crash, inspect the workspace and reconcile any effects before retrying. See the [recovery limits](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/02-approval-recovery.md#safety-limits).
 
@@ -208,6 +211,8 @@ With `trace_include_sensitive_data=True`, SDK processors receive the following f
 | `"content"` | Bounded submitted messages (`.input`) and completed visible output items (`.output`) per call, without a raw `.response` | Bounded arguments and available results |
 
 With detail omitted, native tool results such as file contents can reach SDK processors through the returned response or replayed history. OpenTelemetry exports payloads only in `"content"` mode. Set `trace_include_sensitive_data=False` to suppress payloads in all three modes.
+
+`RunConfig.redact_text` restricts automatic traces to metadata even in content mode. Work inside Codex and native logs are outside its scope. See **Runner text redaction** in the English [tracing guide](../tracing.md).
 
 In content mode, model spans include completed output items and omit deltas from unfinished items. Native tool spans use the result Codex accepts after output hooks. The SDK excludes paused approval responses and their private recovery checkpoints from model spans.
 

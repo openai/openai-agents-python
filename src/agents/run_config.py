@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal
 from pydantic import TypeAdapter
 from typing_extensions import NotRequired, TypedDict
 
+from . import run_context
 from ._config_coercion import (
     _declared_dataclass_type,
     coerce_dataclass_config,
@@ -158,11 +159,22 @@ class ToolCallHookContext(Generic[TContext]):
     """
 
 
+@dataclass(frozen=True)
+class ToolDeclaration:
+    """Resolved function name, original description and optional namespace and raw MCP names."""
+
+    name: str
+    description: str
+    namespace: str | None = None
+    mcp_server_name: str | None = None
+    mcp_tool_name: str | None = None
+
+
 @dataclass
 class ToolExecutionConfig:
     """Configure tool execution and run-wide preparation callbacks.
 
-    Callbacks cover SDK-executed tools and native tools for which Codex emits tool hooks.
+    Input and output callbacks cover SDK-executed tools and native tools with Codex hooks.
     Codex reports native shell and patch inputs as `{"command": ...}`. A native output hook can
     return the original result or replacement text for the model. API-hosted tools execute
     outside the client hook lifecycle.
@@ -181,6 +193,48 @@ class ToolExecutionConfig:
     """Run function tool input guardrails before emitting a pending approval interruption.
 
     The same guardrails still run again immediately before tool execution after approval.
+    """
+
+    prepare_tool_declaration: (
+        Callable[[run_context.RunContextWrapper[Any], ToolDeclaration], Awaitable[str | None]]
+        | None
+    ) = field(default=None, kw_only=True)
+    """Experimental. Describe an enabled function tool or return None to withhold it.
+
+    Return declaration.description to keep the description. The Runner applies the decision
+    after name resolution, to both the model request and the tools available for that turn.
+    It checks the decision and current eligibility again before execution, including after
+    queueing or approval. Keep the callback free of side effects. Only the request uses the
+    returned description.
+
+    For example, wait for an inspection to succeed before offering a publish tool.
+
+    ```python
+    async def prepare(ctx, declaration):
+        if declaration.name == "publish":
+            return "Publish the inspected report" if ctx.context.inspected else None
+        return declaration.description
+
+    config = ToolExecutionConfig(prepare_tool_declaration=prepare)
+    ```
+
+    Set `inspected` only after success. The Runner refreshes the catalog on the next
+    request. This does not force a selection or order calls in a batch. Withholding
+    the named choice or emptying a required catalog raises UserError before sampling.
+
+    Covers direct functions, sandbox capability functions and MCP tools discovered through
+    agent.mcp_servers. Keep the same sandbox capabilities during a run. On in-memory
+    resume a fresh capability tool or the SDK sandbox patch adapter may rebind to
+    the current session if the tool type, method, schema and approval policy still match.
+    A pending capability call requires the same capability type, position and tool key
+    after restore. An approval cannot move between a direct tool and a capability.
+    During selection, functions allowing both direct and programmatic callers raise UserError.
+    A function cannot gain direct access after selection for the same request.
+    Preconverted MCP functions in agent.tools raise UserError. Handoffs, deferred tools,
+    programmatic callers, agents as tools and provider-managed tools are outside this policy.
+    Use the same policy on resume. A serialized run trusts the application's current tool
+    implementation and authorization policy. Enforce atomic authorization at the service
+    that owns the operation.
     """
 
     prepare_tool_input: Callable[[ToolCallHookContext[Any]], Awaitable[dict[str, Any]]] | None = (
@@ -219,7 +273,7 @@ class ToolExecutionConfig:
     sdk_only_tool_hooks: bool = False
     """Run hooks only for SDK-executed tools, preserving classic behavior.
 
-    When either preparation callback is set, the Codex provider disables native workspace tools.
+    With input or output preparation, the Codex provider disables native workspace tools.
     """
 
     def __post_init__(self) -> None:
@@ -589,6 +643,34 @@ class RunConfig:
     output and guardrail ``output_info`` are never passed to the formatter.
     """
 
+    redact_text: Callable[[str], str] | None = field(default=None, repr=False)
+    """Optional text scrubber for Runner inputs, model items and SDK tool payloads.
+
+    Supply a synchronous, deterministic function that leaves already sanitized text unchanged.
+    For example, use ``lambda text: text.replace(secret, "[redacted]")``. Replacements affect
+    dynamic instructions and the inputs seen by models and Python tools. Static instructions
+    are checked without changing the agent attached to stream events. Unsupported values,
+    unsafe approvals and checkpoints that still need redaction fail closed. Results keep the
+    callback in memory to check each snapshot export. Supply it again when resuming.
+    A restored protected state must resume before it can be serialized again.
+
+    A protected session append reads the available history to check for text split across
+    turns. This adds a read per append. Serialize writers to the same session.
+    Automatic compaction skips a replacement if the retained prefix is unavailable.
+    The Runner rejects caller-supplied ``conversation_id`` and ``previous_response_id``
+    because it cannot inspect earlier messages. Use a session or replay the history.
+    Automatic response chaining can start in a protected run and resume from its state.
+
+    Protected runs withhold raw stream events, mute the ``openai.agents`` and
+    ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when
+    content tracing is requested. Semantic events remain available. To avoid exposing
+    private context, the Runner can replace failures, including guardrail and callback
+    errors, with a generic exception. Provider retries run before this replacement.
+    Application and provider logs, opaque media and work inside Codex are outside
+    this policy. Keep secrets out of configuration, identifiers and application
+    metadata. No redactor is active by default.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -620,9 +702,14 @@ class RunConfig:
             output_guardrail_blocked_message: (
                 str | OutputGuardrailBlockedMessageFormatter | None
             ) = None,
+            redact_text: Callable[[str], str] | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.redact_text is not None and (
+            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
+        ):
+            raise TypeError("redact_text must be a synchronous callable or None")
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message
@@ -718,6 +805,7 @@ __all__ = [
     "SandboxRunConfig",
     "ToolExecutionConfig",
     "ToolCallHookContext",
+    "ToolDeclaration",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "_default_trace_include_sensitive_data",

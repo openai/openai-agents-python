@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import aclosing
+from contextlib import AsyncExitStack, aclosing
 from copy import deepcopy
 from functools import partial
 from typing import Any, TypeVar, cast
@@ -17,11 +17,17 @@ from uuid import uuid4
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseFunctionToolCall,
     ResponseOutputItemDoneEvent,
 )
 from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
+from .._redaction import (
+    current_redactor,
+    redact_model_input,
+    redact_response,
+)
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
@@ -29,24 +35,20 @@ from .._tool_identity import (
 from ..agent import Agent
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import (
-    _DATA_REDACTED_ERROR_MESSAGE,
     AgentsException,
-    BaseExceptionGroup,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
     OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
-    _base_exception_group_exceptions,
     _clear_data_redacted_error_traceback,
-    _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
-    _detach_source_exception_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
-    _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
+    _prepare_data_redacted_error,
+    _safe_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -73,7 +75,7 @@ from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
 )
-from ..models._run_context import ModelToolHooks, model_run_context, model_run_context_stream
+from ..models._run_context import ModelToolHooks, model_run_context
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -194,6 +196,7 @@ from .session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     record_compaction_model_response,
+    require_clean_run_items,
     resume_pending_session_write,
     resumed_failure_items,
     resumed_response_store,
@@ -207,6 +210,7 @@ from .session_persistence import (
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
 from .tool_actions import ApplyPatchAction, ComputerAction, LocalShellAction, ShellAction
+from .tool_declarations import prepare_declarations, validate_prepared_choice
 from .tool_execution import (
     coerce_shell_call,
     execute_apply_patch_calls,
@@ -236,6 +240,7 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
+    _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
     execute_handoffs,
@@ -311,7 +316,17 @@ __all__ = [
 ]
 
 _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
+_safe_redacted_persistence_error = _safe_data_redacted_error
 _STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
+
+
+def _publish_stream_items(
+    items: list[RunItem], result: RunResultStreaming, emitted: set[str] | None = None
+) -> None:
+    require_clean_run_items(result.input, result.new_items, items)
+    if emitted:
+        items = [item for item in items if _stream_event_item_occurrence_key(item) not in emitted]
+    stream_step_items_to_queue(items, result._event_queue)
 
 
 def _stream_event_item_occurrence_key(item: RunItem) -> str | None:
@@ -734,7 +749,7 @@ async def _finalize_streamed_final_output(
         streamed_result._state._terminal_unrecoverable = False
 
     if stream_items_after_guardrails:
-        stream_step_items_to_queue(items, streamed_result._event_queue)
+        _publish_stream_items(items, streamed_result)
     await checkpoint_streamed_result(streamed_result)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -742,97 +757,6 @@ async def _finalize_streamed_final_output(
     streamed_result.is_complete = True
 
     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-
-
-def _safe_redacted_persistence_leaf_error(error: BaseException) -> BaseException:
-    """Snapshot a payload-free non-group replacement without mutating the source."""
-    safe_error = _copy_data_redacted_process_control_error(error)
-    if isinstance(safe_error, asyncio.CancelledError):
-        safe_error.args = (_DATA_REDACTED_ERROR_MESSAGE,)
-        _mark_error_data_redacted(safe_error)
-        return safe_error
-    if isinstance(safe_error, GeneratorExit | KeyboardInterrupt | SystemExit):
-        return safe_error
-
-    if issubclass(type(error), Exception):
-        safe_error = UserError(_DATA_REDACTED_ERROR_MESSAGE)
-        _mark_error_data_redacted(safe_error)
-        return safe_error
-
-    safe_error = BaseException()
-    _mark_error_data_redacted(safe_error)
-    return safe_error
-
-
-class _RedactedBaseExceptionGroup(BaseExceptionGroup):
-    """Payload-free group that remains outside the Exception hierarchy."""
-
-
-def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
-    """Return a payload-free persistence failure without swallowing control flow."""
-    if _base_exception_group_exceptions(error) is None:
-        safe_error = _safe_redacted_persistence_leaf_error(error)
-        _detach_source_exception_traceback(error)
-        return safe_error
-
-    group_children: dict[int, tuple[BaseException, ...]] = {}
-    group_is_exception: dict[int, bool] = {}
-    leaf_errors: dict[int, BaseException] = {}
-    safe_errors: dict[int, BaseException] = {}
-    group_postorder: list[BaseException] = []
-    pending: list[tuple[BaseException, bool]] = [(error, False)]
-    try:
-        while pending:
-            current, expanded = pending.pop()
-            current_id = id(current)
-            children = _base_exception_group_exceptions(current)
-            if children is None:
-                leaf_errors.setdefault(current_id, current)
-                continue
-            if expanded:
-                group_postorder.append(current)
-                continue
-            if current_id in group_children:
-                continue
-            group_children[current_id] = children
-            group_is_exception[current_id] = issubclass(type(current), Exception)
-            pending.append((current, True))
-            pending.extend((child, False) for child in reversed(children))
-
-        # Snapshot leaf replacements before rebuilding the group topology. Source exceptions
-        # and the exceptiongroup backport's instance state remain caller-owned.
-        for current_id, current in leaf_errors.items():
-            safe_errors[current_id] = _safe_redacted_persistence_leaf_error(current)
-
-        # Detach the source root's retry traceback before constructing replacement groups.
-        # Its fields and linked exceptions remain intact and never cross the public boundary.
-        _detach_source_exception_traceback(error)
-
-        for group in group_postorder:
-            children = group_children[id(group)]
-            safe_children = [safe_errors[id(child)] for child in children]
-            if not safe_children:
-                safe_children = [BaseException()]
-            if group_is_exception[id(group)]:
-                safe_group: BaseException = BaseExceptionGroup(
-                    _DATA_REDACTED_ERROR_MESSAGE,
-                    safe_children,
-                )
-            else:
-                safe_group = _RedactedBaseExceptionGroup(
-                    _DATA_REDACTED_ERROR_MESSAGE,
-                    safe_children,
-                )
-            _mark_error_data_redacted(safe_group)
-            safe_errors[id(group)] = safe_group
-        return safe_errors[id(error)]
-    except BaseException as conversion_error:
-        # Fail closed if traversal or reconstruction itself fails. Detach the caught roots'
-        # tracebacks without clearing caller frames or mutating linked exceptions.
-        _detach_source_exception_traceback(error)
-        safe_error = _safe_redacted_persistence_leaf_error(conversion_error)
-        _detach_source_exception_traceback(conversion_error)
-        return safe_error
 
 
 async def finalize_max_turns_handler_output(
@@ -1588,9 +1512,7 @@ async def start_streaming(
                             streamed_result.tool_output_guardrail_results.extend(
                                 accepted_tool_output_guardrail_results[guardrail_result_start:]
                             )
-                        stream_step_items_to_queue(
-                            list(turn_session_items), streamed_result._event_queue
-                        )
+                        _publish_stream_items(list(turn_session_items), streamed_result)
                     store_setting = resumed_response_store(
                         run_state,
                         turn_result.model_response.response_id,
@@ -1837,6 +1759,9 @@ async def start_streaming(
                 )
                 output_text = format_final_output_text(current_agent, validated_output)
                 synthesized_item = create_message_output_item(current_agent, output_text)
+                require_clean_run_items(
+                    streamed_result.input, streamed_result.new_items, [synthesized_item]
+                )
                 include_in_history = handler_result.include_in_history
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
@@ -1860,7 +1785,7 @@ async def start_streaming(
                         run_state._clear_generated_items_last_processed_marker()
                         run_state._session_items = list(streamed_result.new_items)
                     if publish_events:
-                        stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
+                        _publish_stream_items([synthesized_item], streamed_result)
 
                 await _finalize_streamed_final_output(
                     streamed_result=streamed_result,
@@ -2061,6 +1986,11 @@ async def start_streaming(
                         )
                     ):
                         partial_result = partial_tool_results[0]
+                        require_clean_run_items(
+                            streamed_result.input,
+                            streamed_result.new_items,
+                            partial_result.new_step_items,
+                        )
                         streamed_result._model_input_items.extend(partial_result.new_step_items)
                         streamed_result.new_items.extend(partial_result.new_step_items)
                         streamed_result.raw_responses.append(partial_result.model_response)
@@ -2096,7 +2026,7 @@ async def start_streaming(
                             run_state.set_tool_use_tracker_snapshot(
                                 streamed_result._tool_use_tracker_snapshot
                             )
-                        stream_step_items_to_queue(
+                        _publish_stream_items(
                             [
                                 item
                                 for item in partial_result.new_step_items
@@ -2104,7 +2034,7 @@ async def start_streaming(
                                 # Model-provided outputs were already emitted before execution.
                                 and _stream_event_item_occurrence_key(item) is None
                             ],
-                            streamed_result._event_queue,
+                            streamed_result,
                         )
                         _mark_error_to_drain_stream_events(tool_error)
                         try:
@@ -2385,7 +2315,9 @@ async def start_streaming(
         if _is_tool_local_cancellation(error) and streamed_result._tool_error_selected:
             # Task.exception() cannot report cancellation. Keep the selected
             # tool failure observable instead of ending the stream successfully.
-            streamed_result._stored_exception = error
+            streamed_result._stored_exception = (
+                _prepare_data_redacted_error(error) if current_redactor() is not None else error
+            )
         raise
     else:
         streamed_result.is_complete = True
@@ -2519,6 +2451,9 @@ async def run_single_turn_streamed(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, bindings, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2544,6 +2479,7 @@ async def run_single_turn_streamed(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     final_response: ModelResponse | None = None
     streamed_response_output: list[ResponseOutputItem] = []
@@ -2575,6 +2511,7 @@ async def run_single_turn_streamed(
         input_items=input,
         system_instructions=system_prompt,
     )
+    redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     if server_conversation_tracker is not None:
@@ -2656,7 +2593,7 @@ async def run_single_turn_streamed(
             filtered.instructions,
             filtered.input,
             model_settings,
-            all_tools,
+            model_tools,
             output_schema,
             handoffs,
             get_model_tracing_impl(
@@ -2686,21 +2623,21 @@ async def run_single_turn_streamed(
     stream_response_id: str | None = None
     stream_request_id: str | None = None
 
-    # Raising out of this loop leaves the model stream suspended at its yield, so close it
-    # explicitly instead of waiting for garbage collection to finalize the generator chain.
-    async with aclosing(
-        model_run_context_stream(
-            retry_stream,
-            tool_use_tracker,
-            ModelToolHooks(
-                public_agent,
-                context_wrapper,
-                hooks,
-                run_config.tool_execution,
-                resumable=isinstance(session, ResumableRun),
-            ),
+    # Keep interpretation of error events, EOF and stream cleanup inside the model boundary.
+    async with AsyncExitStack() as stack:
+        stack.enter_context(
+            model_run_context(
+                tool_use_tracker,
+                ModelToolHooks(
+                    public_agent,
+                    context_wrapper,
+                    hooks,
+                    run_config.tool_execution,
+                    resumable=isinstance(session, ResumableRun),
+                ),
+            )
         )
-    ) as model_events:
+        model_events = await stack.enter_async_context(aclosing(retry_stream))
         async for event in model_events:
             stream_event_count += 1
             last_stream_event_type = getattr(event, "type", None)
@@ -2708,12 +2645,30 @@ async def run_single_turn_streamed(
             if isinstance(event_response, Response):
                 stream_response_id = event_response.id
                 stream_request_id = getattr(event_response, "_request_id", None)
-            streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
+            if (
+                isinstance(event, ResponseCompletedEvent)
+                and not event.response.output
+                and streamed_response_output
+            ):
+                # Some backends leave completed output empty after item.done events.
+                event.response.output = list(streamed_response_output)
+
+            # A secret can span any number of deltas. Only publish completed, scrubbed items.
+            if current_redactor() is None:
+                raw_event = event
+                if run_config.tool_execution is not None:
+                    item = getattr(event, "item", None)
+                    if isinstance(item, ResponseFunctionToolCall):
+                        raw_event = event.model_copy(update={"item": deepcopy(item)})
+                    elif isinstance(event_response, Response) and event_response.output:
+                        output = _snapshot_function_calls(event_response.output)
+                        if output is not event_response.output:
+                            response_view = event_response.model_copy(update={"output": output})
+                            raw_event = event.model_copy(update={"response": response_view})
+                streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=raw_event))
 
             terminal_response: Response | None = None
-            is_completed_event = False
             if isinstance(event, ResponseCompletedEvent):
-                is_completed_event = True
                 terminal_response = event.response
             elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
                 event_type = cast(str, event.type)
@@ -2729,11 +2684,6 @@ async def run_single_turn_streamed(
                 raise response_error_event_failure_error(cast(str, event.type), event)
 
             if terminal_response is not None:
-                if is_completed_event and not terminal_response.output and streamed_response_output:
-                    # Some streaming backends emit output items during item.done events while
-                    # leaving the terminal response output empty. Preserve those items so the
-                    # runner can resolve the completed step correctly.
-                    terminal_response.output = list(streamed_response_output)
                 # Always fold retry attempts into usage, even when the terminal response omits
                 # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
                 # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
@@ -2763,15 +2713,17 @@ async def run_single_turn_streamed(
             if isinstance(event, ResponseOutputItemDoneEvent):
                 streamed_response_output.append(event.item)
 
-    if final_response is None:
-        raise ModelBehaviorError(
-            "Model did not produce a final response! The stream ended before a "
-            "response.completed event was received. "
-            f"event_count={stream_event_count}, last_event_type={last_stream_event_type!r}, "
-            f"response_id={stream_response_id!r}, request_id={stream_request_id!r}. "
-            "Share these IDs when reporting this issue; None means no value was observed."
-        )
+        if final_response is None:
+            raise ModelBehaviorError(
+                "Model did not produce a final response! The stream ended before a "
+                "response.completed event was received. "
+                f"event_count={stream_event_count}, last_event_type={last_stream_event_type!r}, "
+                f"response_id={stream_response_id!r}, request_id={stream_request_id!r}. "
+                "Share these IDs when reporting this issue; None means no value was observed."
+            )
 
+    assert final_response is not None
+    final_response = redact_response(final_response, input)
     record_compaction_model_response(
         session,
         context_wrapper,
@@ -2807,7 +2759,8 @@ async def run_single_turn_streamed(
             )
             tool_execution = run_config.tool_execution
             if tool_execution is not None and (
-                tool_execution.prepare_tool_input is not None
+                tool_execution.prepare_tool_declaration is not None
+                or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
@@ -2817,7 +2770,7 @@ async def run_single_turn_streamed(
                     else item
                     for item in model_items
                 ]
-            stream_step_items_to_queue(model_items, streamed_result._event_queue)
+            _publish_stream_items(model_items, streamed_result)
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
@@ -2842,6 +2795,7 @@ async def run_single_turn_streamed(
         new_response=final_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -2856,16 +2810,11 @@ async def run_single_turn_streamed(
         on_tool_error_selected=on_tool_error_selected,
     )
 
-    items_to_filter = session_items_for_turn(single_step_result)
-
-    items_to_filter = [
-        item
-        for item in items_to_filter
-        if _stream_event_item_occurrence_key(item) not in emitted_model_item_occurrence_keys
-    ]
-
-    filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
-    stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
+    _publish_stream_items(
+        session_items_for_turn(single_step_result),
+        streamed_result,
+        emitted_model_item_occurrence_keys,
+    )
     return single_step_result
 
 
@@ -2874,6 +2823,7 @@ async def run_single_turn(
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
+    session_items: list[RunItem],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -2933,6 +2883,9 @@ async def run_single_turn(
         handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
+        all_tools, bindings, context_wrapper, run_config
+    )
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -2952,7 +2905,7 @@ async def run_single_turn(
         system_prompt,
         input,
         output_schema,
-        all_tools,
+        model_tools,
         handoffs,
         hooks,
         context_wrapper,
@@ -2964,6 +2917,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        omitted=omitted,
         reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
@@ -2974,6 +2928,8 @@ async def run_single_turn(
     async def after_invocation_validation(
         _processed_response: ProcessedResponse | None,
     ) -> bool:
+        if _processed_response is not None:
+            require_clean_run_items(original_input, session_items, _processed_response.new_items)
         if response_accepted and on_response_accepted is not None:
             on_response_accepted(new_response, _processed_response)
         if response_accepted and on_response_hooks_started is not None:
@@ -2995,6 +2951,7 @@ async def run_single_turn(
         new_response=new_response,
         output_schema=output_schema,
         all_tools=all_tools,
+        prepared_tools=prepared_tools,
         handoffs=handoffs,
         hooks=hooks,
         context_wrapper=context_wrapper,
@@ -3027,6 +2984,8 @@ async def get_new_response(
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    *,
+    omitted: set[str] | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -3038,6 +2997,7 @@ async def get_new_response(
         input_items=input,
         system_instructions=system_prompt,
     )
+    redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
@@ -3058,6 +3018,7 @@ async def get_new_response(
         has_tools=bool(all_tools or handoffs),
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
+    validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)
@@ -3159,6 +3120,7 @@ async def get_new_response(
                 isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
             ),
         )
+    new_response = redact_response(new_response, input)
     if server_conversation_tracker is not None:
         # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
         # filtered input as delivered again once a retry succeeds so subsequent turns only send

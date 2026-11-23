@@ -152,6 +152,51 @@ By default, `trace_include_sensitive_data` is `True`. You can set the default wi
 
 When `trace_include_sensitive_data` is `False`, Responses model spans omit the request input and response output. For calls to an official OpenAI endpoint, the spans still include the Responses API `response_id` as correlation metadata. The SDK omits that identifier from redacted spans for custom endpoints.
 
+### Runner text redaction
+
+Use [`RunConfig.redact_text`][agents.run.RunConfig.redact_text] with either provider to remove known secrets from run inputs, model replies, and SDK tool arguments and results. Replacements change what the model and Python tools receive. Supply a synchronous function that returns the same string for the same input and leaves sanitized text unchanged. Never log its input.
+
+Install a [preview build with Runner text redaction](models/codex.md#install-a-github-prerelease-wheel). Run this example offline to check a sample policy. The scripted model deliberately returns the same test value that the caller supplied.
+
+```python
+import asyncio
+
+from agents import Agent, RunConfig, Runner
+from agents.testing import ScriptedModel, assistant_message
+
+
+async def main():
+    private_value = "example-private-ticket"
+
+    def redact(text: str) -> str:
+        return text.replace(private_value, "[redacted]")
+
+    agent = Agent(
+        name="Support",
+        model=ScriptedModel([[assistant_message(f"Ticket: {private_value}")]]),
+    )
+    result = await Runner.run(
+        agent,
+        f"Check ticket {private_value}",
+        run_config=RunConfig(redact_text=redact, tracing_disabled=True),
+    )
+    assert private_value not in result.final_output
+    print(result.final_output)  # Ticket: [redacted]
+
+
+asyncio.run(main())
+```
+
+With the callback active, the Runner limits automatic traces to metadata, even in content mode. It mutes the `openai.agents` and `openai.agents.tracing` loggers and withholds raw stream events, including text deltas. You can still consume completed run items. If the Runner can't safely inspect a value, validate a checkpoint, or preserve the action submitted for approval, it stops the run. Error messages may omit details.
+
+For a worker that saves or resumes runs, take these steps.
+
+1. Upgrade readers before writers. This preview writes `RunState` schema 1.24 even without redaction. Protected `ResumableSession` checkpoints use version 2. Older workers can't read these formats.
+2. Pass the same redaction policy to every nested and resumed run. The SDK records the requirement in the checkpoint and keeps the function in memory only. Resume a restored protected state with the callback before exporting it again.
+3. Use a session or replay the messages. Protected runs reject caller-supplied `conversation_id` and `previous_response_id` because the Runner can't inspect the remote history. Allow only one writer at a time per session. Each append checks available history for text split across turns.
+
+Test the policy against your own data. Keep secrets out of static instructions, identifiers, configuration, and application metadata. The callback covers only the text your function recognizes. It can't scrub existing records, binary media, application or provider logs, or operations inside Codex.
+
 ## Custom tracing processors
 
 The high level architecture for tracing is:
@@ -314,6 +359,8 @@ For Runner retries, the timestamp marks the start of the next attempt. If a tran
 ### Payload capture
 
 For Responses and Codex, `RunConfig.tracing["operation_detail"]` controls payload capture. The same calls, approvals, and retries appear in every mode. Set `trace_include_sensitive_data=False` to suppress model and tool payloads even with `"content"` selected.
+
+The table applies when `redact_text` is unset. With [Runner text redaction](#runner-text-redaction), automatic traces contain only metadata in every row.
 
 | `operation_detail` | `trace_include_sensitive_data` | SDK model and tool payload fields | OTel payload attributes |
 | --- | --- | --- | --- |
