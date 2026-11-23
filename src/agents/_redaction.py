@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from .agent import Agent
     from .items import ModelResponse
     from .run_config import ModelInputData
+    from .tool import FunctionTool
 
 _T = TypeVar("_T")
 _Redactor = Callable[[str], str]
@@ -228,10 +229,27 @@ def redact_items(value: _T) -> _T:
     return _apply(value, "item")
 
 
+def require_clean_function(tool: FunctionTool) -> None:
+    if current_redactor() is not None:
+        require_clean(
+            (
+                tool.name,
+                tool.description,
+                tool.params_json_schema,
+                tool._tool_namespace,
+                tool._tool_namespace_description,
+                tool._mcp_title,
+                tool._mcp_annotations,
+                tool._mcp_tool_binding,
+            )
+        )
+
+
 def require_clean_agent(agent: Agent[Any]) -> None:
     if current_redactor() is None:
         return
     from ._run_state_agent_identity import _iter_agent_graph
+    from .tool import FunctionTool
 
     # Events reference the public agents. Don't mutate shared configuration to hide secrets.
     for target in _iter_agent_graph(agent):
@@ -240,6 +258,9 @@ def require_clean_agent(agent: Agent[Any]) -> None:
             require_clean(target.instructions)
         if not callable(target.prompt):
             require_clean(target.prompt)
+        for tool in target.tools:
+            if isinstance(tool, FunctionTool):
+                require_clean_function(tool)
 
 
 def redact_model_input(data: ModelInputData, prompt: object) -> None:

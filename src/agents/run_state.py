@@ -3374,6 +3374,7 @@ async def _deserialize_processed_response(
     scope_id: str | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
+    defer_mcp_discovery: bool = False,
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
@@ -3397,7 +3398,13 @@ async def _deserialize_processed_response(
     )
 
     if hasattr(current_agent, "get_all_tools"):
-        all_tools = await current_agent.get_all_tools(context)
+        inventory_agent = current_agent
+        if defer_mcp_discovery and current_agent.mcp_servers:
+            from ._public_agent import set_public_agent
+
+            # The Runner rebinds pending MCP calls once the caller supplies its redactor.
+            inventory_agent = set_public_agent(current_agent.clone(mcp_servers=[]), current_agent)
+        all_tools = await inventory_agent.get_all_tools(context)
     else:
         all_tools = []
 
@@ -4610,6 +4617,7 @@ async def _build_run_state_from_json(
             scope_id=state._agent_tool_state_scope_id,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
+            defer_mcp_discovery=state._requires_redaction,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
             validation_error_factory=validation_error_factory,

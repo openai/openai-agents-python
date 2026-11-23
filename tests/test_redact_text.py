@@ -199,6 +199,91 @@ async def test_restored_native_output_is_scrubbed_without_changing_approval(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("field", ["name", "description", "schema", "preloaded", "error", "safe"])
+async def test_mcp_discovery_checks_definitions_before_export_or_dispatch(
+    streamed, field, monkeypatch
+):
+    from agents.mcp import MCPUtil
+    from tests.mcp.helpers import FakeMCPServer
+    from tests.mcp.model_compat import Tool
+    from tests.testing_processor import fetch_ordered_spans
+
+    definition = Tool(
+        name=SECRET if field == "name" else "lookup",
+        description=SECRET if field in ("description", "preloaded") else "Look up a record",
+        inputSchema={"type": "object", "properties": {SECRET: {"type": "string"}}}
+        if field == "schema"
+        else {"type": "object"},
+    )
+    model = ScriptedModel([[assistant_message("ok")]])
+    server = FakeMCPServer(tools=[definition])
+    if field == "error":
+
+        async def fail(*args):
+            raise RuntimeError(SECRET)
+
+        monkeypatch.setattr(server, "list_tools", fail)
+    agent = Agent(name="worker", model=model, mcp_servers=[server])
+    if field == "preloaded":
+        agent = agent.clone(
+            tools=[MCPUtil.to_function_tool(definition, server, False)], mcp_servers=[]
+        )
+    config = RunConfig(redact_text=scrub)
+
+    async def run():
+        if streamed:
+            result = Runner.run_streamed(agent, "go", run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", run_config=config)
+
+    if field == "safe":
+        await run()
+        assert len(model.calls) == 1
+    else:
+        with pytest.raises(UserError, match="redact_text") as caught:
+            await run()
+        assert SECRET not in str(caught.value)
+        assert caught.value.__context__ is None
+        assert not model.calls
+    spans = [span.export() for span in fetch_ordered_spans()]
+    assert spans or field == "preloaded"
+    assert SECRET not in repr(spans)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [False, True])
+async def test_protected_restore_defers_mcp_discovery_until_policy_is_available(changed):
+    from agents import RunState, trace
+    from tests.mcp.helpers import FakeMCPServer
+    from tests.testing_processor import fetch_ordered_spans
+
+    config = RunConfig(redact_text=scrub)
+    server = FakeMCPServer(require_approval="always")
+    server.add_tool("lookup", {})
+    model = ScriptedModel([[function_call("lookup", {}, call_id="id")], [assistant_message("ok")]])
+    agent = Agent(name="worker", model=model, mcp_servers=[server])
+    paused = await Runner.run(agent, "go", run_config=config)
+    saved = paused.to_state().to_json()
+    if changed:
+        server.add_tool(SECRET, {})
+    with trace("restore"):
+        restored = await RunState.from_json(agent, saved)
+    assert SECRET not in repr([span.export() for span in fetch_ordered_spans()])
+    restored.approve(restored.get_interruptions()[0])
+    if changed:
+        with pytest.raises(UserError, match="redact_text"):
+            await Runner.run(agent, restored, run_config=config)
+        assert not server.tool_calls
+    else:
+        result = await Runner.run(agent, restored, run_config=config)
+        assert result.final_output == "ok"
+        assert server.tool_calls == ["lookup"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
 @pytest.mark.parametrize("field", ["model", "usage"])
 async def test_untrusted_endpoint_metadata_stays_out_of_automatic_spans(field, monkeypatch):
