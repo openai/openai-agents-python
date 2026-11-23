@@ -20,6 +20,42 @@ def scrub(value: str) -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("filtered", [False, True])
+async def test_effective_instructions_are_scrubbed_before_model_call(streamed, filtered):
+    def update(call):
+        call.model_data.instructions += " " + SECRET
+        return call.model_data
+
+    model = ScriptedModel([[assistant_message("ok")]])
+    agent = Agent(name="worker", instructions=lambda ctx, agent: ctx.context, model=model)
+    config = RunConfig(redact_text=scrub, call_model_input_filter=update if filtered else None)
+    if streamed:
+        result = Runner.run_streamed(agent, "go", context=SECRET, run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        await Runner.run(agent, "go", context=SECRET, run_config=config)
+    assert model.calls[0].system_instructions == (
+        "[removed] [removed]" if filtered else "[removed]"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handoff", [False, True])
+async def test_static_private_instructions_never_reach_the_agent_on_a_stream_event(handoff):
+    model = ScriptedModel([[assistant_message("ok")]])
+    agent = Agent(name="worker", instructions=SECRET, model=model)
+    if handoff:
+        agent = Agent(name="coordinator", handoffs=[agent], model=model)
+    with pytest.raises(UserError, match="redact_text"):
+        result = Runner.run_streamed(agent, "go", run_config=RunConfig(redact_text=scrub))
+        async for event in result.stream_events():
+            assert SECRET not in repr(event)
+    assert not model.calls
+
+
+@pytest.mark.asyncio
 async def test_policy_follows_nested_runs_but_not_concurrent_callers(caplog):
     caplog.set_level(logging.DEBUG, logger="openai.agents")
 
@@ -270,6 +306,34 @@ async def test_policy_cancellation_does_not_disclose_private_input(streamed):
 
 
 @pytest.mark.asyncio
+async def test_context_serializer_cancellation_keeps_private_context_out_of_diagnostics():
+    def serialize(context):
+        raise asyncio.CancelledError(context) from ValueError(context)
+
+    agent = Agent(name="worker", model=ScriptedModel([[assistant_message("ok")]]))
+    result = await Runner.run(agent, "go", context=SECRET, run_config=RunConfig(redact_text=scrub))
+    with pytest.raises(asyncio.CancelledError) as caught:
+        result.to_state().to_json(context_serializer=serialize)
+    assert not caught.value.args
+    assert caught.value.__context__ is caught.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_provider_cancellation_keeps_response_diagnostics_private(monkeypatch):
+    async def cancel(*args, **kwargs):
+        raise asyncio.CancelledError(SECRET) from ValueError(SECRET)
+
+    model = ScriptedModel([])
+    monkeypatch.setattr(model, "get_response", cancel)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await Runner.run(
+            Agent(name="worker", model=model), "go", run_config=RunConfig(redact_text=scrub)
+        )
+    assert not caught.value.args
+    assert caught.value.__context__ is caught.value.__cause__ is None
+
+
+@pytest.mark.asyncio
 async def test_stream_start_failure_releases_rejected_prompt():
     import traceback
 
@@ -297,6 +361,47 @@ async def test_joined_refusals_are_checked_before_refusal_handling():
     agent = Agent(name="worker", model=ScriptedModel([[message]]))
     with pytest.raises(UserError, match="redact_text"):
         await Runner.run(agent, "go", run_config=RunConfig(redact_text=scrub))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("source", ["prompt", "tool"])
+async def test_split_structured_text_never_reaches_model_session_or_events(streamed, source):
+    from agents import SQLiteSession, ToolOutputText
+
+    parts = ["private-", "example"]
+
+    @tool
+    async def lookup() -> list[ToolOutputText]:
+        return [ToolOutputText(text=part) for part in parts]
+
+    prompt = [{"role": "user", "content": [{"type": "input_text", "text": p} for p in parts]}]
+    model = ScriptedModel([[function_call("lookup", {}, call_id="id")], [assistant_message("ok")]])
+    agent = Agent(name="worker", model=model, tools=[lookup])
+    session = SQLiteSession("test")
+    config = RunConfig(redact_text=scrub)
+    try:
+        with pytest.raises(UserError):
+            if streamed:
+                result = Runner.run_streamed(
+                    agent,
+                    prompt if source == "prompt" else "go",
+                    run_config=config,
+                    session=session,
+                )
+                async for event in result.stream_events():
+                    assert getattr(event, "name", None) != "tool_output"
+            else:
+                await Runner.run(
+                    agent,
+                    prompt if source == "prompt" else "go",
+                    run_config=config,
+                    session=session,
+                )
+        assert len(model.calls) == (0 if source == "prompt" else 1)
+        assert parts[0] not in repr(await session.get_items())
+    finally:
+        session.close()
 
 
 @pytest.mark.asyncio
@@ -362,27 +467,42 @@ async def test_tool_errors_do_not_disclose_rejected_payload(monkeypatch, failure
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_local_shell_failure_keeps_executor_diagnostics_private(streamed):
+@pytest.mark.parametrize("kind", ["local_shell_error", "local_shell_cancel", "custom_cancel"])
+async def test_executor_failures_keep_diagnostics_private(streamed, kind):
+    from openai.types.responses import ResponseCustomToolCall
     from openai.types.responses.response_output_item import LocalShellCall, LocalShellCallAction
 
-    from agents import LocalShellTool
+    from agents import CustomTool, LocalShellTool
 
     from .model_test_helpers import get_exact_output_stream_step
 
-    async def fail(request):
+    cancelled = kind.endswith("_cancel")
+
+    async def fail(*args):
+        if cancelled:
+            raise asyncio.CancelledError(SECRET) from ValueError(SECRET)
         raise RuntimeError(SECRET)
 
-    call = LocalShellCall(
-        id="shell",
-        action=LocalShellCallAction(command=["echo", "safe"], env={}, type="exec"),
-        call_id="call_shell",
-        status="completed",
-        type="local_shell_call",
-    )
+    if kind == "custom_cancel":
+        executor = CustomTool(
+            name="edit", description="Edit", on_invoke_tool=fail, format={"type": "text"}
+        )
+        call = ResponseCustomToolCall(
+            type="custom_tool_call", name="edit", call_id="c", input="safe"
+        )
+    else:
+        executor = LocalShellTool(executor=fail)
+        call = LocalShellCall(
+            id="shell",
+            action=LocalShellCallAction(command=["echo", "safe"], env={}, type="exec"),
+            call_id="call_shell",
+            status="completed",
+            type="local_shell_call",
+        )
     step = get_exact_output_stream_step([call]) if streamed else [call]
-    agent = Agent(name="worker", model=ScriptedModel([step]), tools=[LocalShellTool(executor=fail)])
+    agent = Agent(name="worker", model=ScriptedModel([step]), tools=[executor])
     config = RunConfig(redact_text=scrub)
-    with pytest.raises(UserError, match="Tool execution failed") as caught:
+    with pytest.raises(asyncio.CancelledError if cancelled else UserError) as caught:
         if streamed:
             async for _ in Runner.run_streamed(agent, "go", run_config=config).stream_events():
                 pass
@@ -390,6 +510,10 @@ async def test_local_shell_failure_keeps_executor_diagnostics_private(streamed):
             await Runner.run(agent, "go", run_config=config)
     assert SECRET not in str(caught.value)
     assert caught.value.__context__ is caught.value.__cause__ is None
+    if cancelled:
+        assert not caught.value.args
+    else:
+        assert "Tool execution failed" in str(caught.value)
 
 
 @pytest.mark.asyncio

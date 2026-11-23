@@ -454,7 +454,13 @@ async def test_text_redaction_survives_approval_recovery(
             writes.append(value)
             return True
 
-    canaries = ("prompt-canary", "argument-canary", "result-canary", "answer-canary")
+    canaries = (
+        "prompt-canary",
+        "argument-canary",
+        "result-canary",
+        "answer-canary",
+        "policy-canary",
+    )
 
     def redact_text(value: str) -> str:
         for canary in canaries:
@@ -484,7 +490,12 @@ async def test_text_redaction_survives_approval_recovery(
         return "result-canary"
 
     def agent() -> Agent[Any]:
-        return Agent(name="worker", model=MODEL, tools=[lookup])
+        return Agent(
+            name="worker",
+            instructions=lambda ctx, agent: "Rule policy-canary",
+            model=MODEL,
+            tools=[lookup],
+        )
 
     config = RunConfig(
         model_provider=provider,
@@ -522,6 +533,9 @@ async def test_text_redaction_survives_approval_recovery(
         result = await asyncio.wait_for(exercise(), timeout=30)
         assert result.final_output == "[redacted]"
         assert tool_inputs == ["[redacted]"]
+        for request in (server.requests[0], server.requests[-1]):
+            assert "Rule [redacted]" in json.dumps(request)
+            assert "policy-canary" not in json.dumps(request)
         assert "[redacted]" in json.dumps(server.requests[0]["input"])
         assert any(
             item.get("type") == "function_call_output" and item.get("output") == "[redacted]"

@@ -22,7 +22,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
-from .._redaction import current_redactor, redact_response, require_clean
+from .._redaction import current_redactor, redact_model_input, redact_response
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
@@ -2576,7 +2576,7 @@ async def run_single_turn_streamed(
         input_items=input,
         system_instructions=system_prompt,
     )
-    require_clean(filtered.input)
+    redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
     if server_conversation_tracker is not None:
@@ -3044,7 +3044,7 @@ async def get_new_response(
         input_items=input,
         system_instructions=system_prompt,
     )
-    require_clean(filtered.input)
+    redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 

@@ -9,7 +9,13 @@ from uuid import uuid4
 from typing_extensions import Unpack
 
 from . import _debug
-from ._redaction import current_redactor, redact_items, redaction_scope, require_clean
+from ._redaction import (
+    current_redactor,
+    redact_items,
+    redaction_scope,
+    require_clean,
+    require_clean_agent,
+)
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -26,6 +32,7 @@ from .exceptions import (
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
+    _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
     _sync_data_redacted_error_boundary,
@@ -576,14 +583,21 @@ class Runner:
 
 
 def _prepare_private_input(
-    input: str | list[TResponseInputItem] | RunState[TContext], config: RunConfig
+    agent: Agent[TContext],
+    input: str | list[TResponseInputItem] | RunState[TContext],
+    config: RunConfig,
 ) -> str | list[TResponseInputItem] | RunState[TContext]:
     if current_redactor() is None:
         if isinstance(input, RunState) and input._requires_redaction:
-            raise UserError("Continuing this run requires RunConfig.redact_text.")
+            error = UserError("Continuing this run requires RunConfig.redact_text.")
+            _mark_error_data_redacted(error)
+            raise error
         return input
+    require_clean_agent(agent)
     require_clean((config.workflow_name, config.trace_id, config.group_id, config.trace_metadata))
     if isinstance(input, RunState):
+        if input._current_agent is not None and input._current_agent is not agent:
+            require_clean_agent(input._current_agent)
         # Validate the effective snapshot after applying any context override.
         return input
     return redact_items(input)
@@ -632,7 +646,7 @@ class AgentRunner:
                                 disabled=True,
                             )
                         )
-                    input = _prepare_private_input(input, run_config)
+                    input = _prepare_private_input(starting_agent, input, run_config)
                     configuration_agent = (
                         input._current_agent
                         if isinstance(input, RunState) and input._current_agent is not None
@@ -2709,7 +2723,7 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
-            input = _prepare_private_input(input, run_config)
+            input = _prepare_private_input(starting_agent, input, run_config)
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
             run_state: RunState[TContext] | None = None

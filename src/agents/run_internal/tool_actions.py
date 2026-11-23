@@ -437,9 +437,8 @@ class LocalShellAction:
             span.start(mark_as_current=True)
             if span.span_data.operation.detail == "content":
                 span.span_data.input = _serialize_trace_payload(call.tool_call.action)
-            with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
-                output = call.local_shell_tool.executor(request)
-                raw_result = await output if inspect.isawaitable(output) else output
+            output = call.local_shell_tool.executor(request)
+            raw_result = await output if inspect.isawaitable(output) else output
 
             async def finalize_output() -> ToolCallOutputItem:
                 result = await transform_tool_output(

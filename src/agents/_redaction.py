@@ -18,13 +18,16 @@ from . import _debug
 from .exceptions import (
     ModelBehaviorError,
     UserError,
+    _is_error_data_redacted,
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
 
 if TYPE_CHECKING:
+    from .agent import Agent
     from .items import ModelResponse
+    from .run_config import ModelInputData
 
 _T = TypeVar("_T")
 _Redactor = Callable[[str], str]
@@ -56,7 +59,13 @@ def hook_payload_diagnostics(
     try:
         yield
         return
-    except Exception:
+    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit) as interrupted:
+        if current_redactor() is None:
+            raise
+        _raise_data_redacted_error(_prepare_data_redacted_error(interrupted))
+    except Exception as error:
+        if current_redactor() is not None and _is_error_data_redacted(error):
+            raise
         if current_redactor() is None and not (redact_by_default and _debug.DONT_LOG_TOOL_DATA):
             raise
     safe_error = error_type(message)
@@ -104,6 +113,15 @@ def _walk(value: Any, redact: _Redactor, mode: _Mode) -> Any:
         return value
     if isinstance(value, (list, tuple)):
         items = [_walk(item, redact, mode) for item in value]
+        # Structured prompts and tool results can split a secret across text parts.
+        if len(items) > 1:
+            parts = [
+                item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+                for item in items
+            ]
+            texts = [part for part in parts if isinstance(part, str)]
+            if len(texts) > 1:
+                _walk("".join(texts), redact, "check")
         if all(a is b for a, b in zip(items, value, strict=True)):
             return value
         return tuple(items) if isinstance(value, tuple) else items
@@ -174,6 +192,27 @@ def redact_payload(value: _T) -> _T:
 
 def redact_items(value: _T) -> _T:
     return _apply(value, "item")
+
+
+def require_clean_agent(agent: Agent[Any]) -> None:
+    if current_redactor() is None:
+        return
+    from ._run_state_agent_identity import _iter_agent_graph
+
+    # Events reference the public agents. Don't mutate shared configuration to hide secrets.
+    for target in _iter_agent_graph(agent):
+        require_clean((target.name, target.handoff_description))
+        if isinstance(target.instructions, str):
+            require_clean(target.instructions)
+        if not callable(target.prompt):
+            require_clean(target.prompt)
+
+
+def redact_model_input(data: ModelInputData, prompt: object) -> None:
+    if current_redactor() is not None:
+        # Check server references and tracked history without rewriting them.
+        require_clean((prompt, data.input))
+        data.instructions = redact_payload(data.instructions)
 
 
 def redact_response(response: ModelResponse) -> ModelResponse:

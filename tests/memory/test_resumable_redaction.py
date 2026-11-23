@@ -32,6 +32,44 @@ async def run(agent: Agent[Any], input: Any, *, streamed: bool, **kwargs: Any) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("atomic", [False, True])
+async def test_compaction_scrubs_history_before_replacing_it(streamed: bool, atomic: bool) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agents.memory import OpenAIResponsesCompactionSession, SQLiteSession
+    from tests.utils.simple_session import SimpleListSession
+
+    store = SQLiteSession("test") if atomic else SimpleListSession("test")
+    client = MagicMock()
+    client.responses.compact = AsyncMock(
+        return_value=SimpleNamespace(output=[{"role": "assistant", "content": SECRET}])
+    )
+    session = OpenAIResponsesCompactionSession(
+        "test",
+        store,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+    agent = Agent(name="worker", model=ScriptedModel([[get_text_message("ok")]]))
+    try:
+        await run(
+            agent,
+            "go",
+            streamed=streamed,
+            session=session,
+            run_config=RunConfig(redact_text=redact),
+        )
+        client.responses.compact.assert_awaited_once()
+        assert await store.get_items() == [{"role": "assistant", "content": "[redacted]"}]
+    finally:
+        if isinstance(store, SQLiteSession):
+            store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
 @pytest.mark.parametrize("paused", [False, True], ids=["ready", "paused"])
 async def test_protected_session_requires_policy_before_claim_after_restart(
@@ -174,6 +212,8 @@ async def test_resumed_dirty_context_is_refused_before_claim(streamed: bool, ove
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
 async def test_standalone_approval_retains_redaction_requirement(streamed: bool) -> None:
+    import traceback
+
     from agents import RunState
     from agents.run_state import CURRENT_SCHEMA_VERSION
 
@@ -200,8 +240,17 @@ async def test_standalone_approval_retains_redaction_requirement(streamed: bool)
     assert SECRET not in json.dumps(snapshot)
     restored = await RunState.from_string(agent, json.dumps(snapshot))
     restored.approve(restored.get_interruptions()[0])
-    with pytest.raises(UserError, match="RunConfig.redact_text"):
-        await run(agent, restored, streamed=streamed, run_config=RunConfig(tracing_disabled=True))
+    with pytest.raises(UserError, match="RunConfig.redact_text") as caught:
+        await run(
+            agent,
+            restored,
+            streamed=streamed,
+            context=SECRET,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+    for frame, _ in traceback.walk_tb(caught.tb):
+        if frame.f_globals.get("__name__", "").startswith("agents."):
+            assert SECRET not in repr(frame.f_locals)
     assert executed == []
     assert len(model.calls) == 1
     completed = await run(agent, restored, streamed=streamed, run_config=config)

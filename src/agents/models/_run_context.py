@@ -39,7 +39,7 @@ def model_run_context(owner: object, hooks: ModelToolHooks | None = None) -> Ite
     token = _MODEL_RUN_CONTEXT.set((owner, hooks))
     try:
         yield
-    except Exception as error:
+    except BaseException as error:
         if current_redactor() is None or _is_error_data_redacted(error):
             raise
         # Retry decisions need the original provider error. Once they finish,

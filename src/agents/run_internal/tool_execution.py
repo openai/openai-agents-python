@@ -1138,7 +1138,8 @@ def pending_tool_span(
     operation = span.span_data.operation
     operation.tool_call_id = call_id
     try:
-        yield span
+        with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
+            yield span
     except asyncio.CancelledError:
         operation.outcome = "interrupted"
         raise
