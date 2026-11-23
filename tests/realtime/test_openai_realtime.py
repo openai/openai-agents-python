@@ -4394,3 +4394,75 @@ class TestTransportIntegration:
         # Both should have completed successfully
         assert "fast" in connection_durations
         assert "slow" in connection_durations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["enabled", "manual", "environment", "manual_override"])
+@pytest.mark.parametrize("tracing_config", ["auto", {"workflow_name": "synthetic"}])
+async def test_realtime_tracing_respects_global_control(monkeypatch, mode, tracing_config):
+    from agents.tracing import get_trace_provider, set_trace_provider, set_tracing_disabled
+    from agents.tracing.provider import DefaultTraceProvider
+
+    previous = get_trace_provider()
+    provider = DefaultTraceProvider()
+    monkeypatch.setenv(
+        "OPENAI_AGENTS_DISABLE_TRACING", "1" if mode in {"environment", "manual_override"} else "0"
+    )
+    set_trace_provider(provider)
+    if mode == "manual":
+        set_tracing_disabled(True)
+    elif mode == "manual_override":
+        set_tracing_disabled(False)
+    model = OpenAIRealtimeWebSocketModel()
+    socket = AsyncMock()
+    monkeypatch.setattr(model, "_create_websocket_connection", AsyncMock(return_value=socket))
+    try:
+        await model.connect(
+            {"api_key": "synthetic-key", "initial_model_settings": {"tracing": tracing_config}}
+        )
+        await model._handle_ws_event(
+            {
+                "type": "session.created",
+                "event_id": "synthetic",
+                "session": {"type": "realtime", "model": "gpt-realtime"},
+            }
+        )
+        tracing_messages = [
+            json.loads(call.args[0])
+            for call in socket.send.await_args_list
+            if "tracing" in json.loads(call.args[0]).get("session", {})
+        ]
+        assert len(tracing_messages) == (0 if mode in {"manual", "environment"} else 1)
+    finally:
+        await model.close()
+        set_trace_provider(previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reports_state", [False, True])
+async def test_custom_provider_realtime_tracing_requires_suppression_query(reports_state):
+    from agents.tracing import get_trace_provider, set_trace_provider, set_tracing_disabled
+    from agents.tracing.provider import DefaultTraceProvider, TraceProvider
+
+    # Reuse provider operations while exercising the legacy interface's default query.
+    class CustomProvider(DefaultTraceProvider):
+        is_disabled = (
+            DefaultTraceProvider.is_disabled if reports_state else TraceProvider.is_disabled
+        )
+
+    previous = get_trace_provider()
+    set_trace_provider(CustomProvider())
+    model = OpenAIRealtimeWebSocketModel()
+    socket = AsyncMock()
+    model._websocket = socket
+    try:
+        set_tracing_disabled(False)
+        await model._send_tracing_config("auto")
+        assert socket.send.await_count == int(reports_state)
+        socket.send.reset_mock()
+        set_tracing_disabled(True)
+        await model._send_tracing_config("auto")
+        assert socket.send.await_count == 0
+    finally:
+        model._websocket = None
+        set_trace_provider(previous)
