@@ -765,6 +765,37 @@ async def test_mcp_conversion_preserves_to_function_tool_subclass_hook():
 
 
 @pytest.mark.asyncio
+async def test_converted_mcp_tool_respects_invocation_override():
+    class GuardedMCPUtil(MCPUtil):
+        @classmethod
+        async def invoke_mcp_tool(
+            cls, server, tool, context, input_json, *, meta=None, tool_display_name=None
+        ):
+            if not context.context["allowed"]:
+                raise PermissionError("Call denied")
+            return await super().invoke_mcp_tool(
+                server, tool, context, input_json, meta=meta, tool_display_name=tool_display_name
+            )
+
+    server = FakeMCPServer(
+        tool_meta_resolver=lambda _: {"locale": "resolved"}, failure_error_function=None
+    )
+    server.add_tool("search", {})
+    server.tools[0].meta = {"locale": "discovered", "extra": "value"}
+    context = RunContextWrapper(context={"allowed": False})
+    tools = await GuardedMCPUtil.get_function_tools(server, False, context, Agent(name="test"))
+
+    with pytest.raises(PermissionError, match="Call denied"):
+        await tools[0].on_invoke_tool(context, "{}")
+    assert server.tool_calls == []
+
+    context.context["allowed"] = True
+    await tools[0].on_invoke_tool(context, "{}")
+    assert server.tool_calls == ["search"]
+    assert server.tool_metas == [{"locale": "resolved", "extra": "value"}]
+
+
+@pytest.mark.asyncio
 async def test_mcp_meta_resolver_does_not_mutate_arguments():
     def resolve_meta(context):
         if context.arguments is not None:
