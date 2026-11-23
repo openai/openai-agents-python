@@ -30,6 +30,7 @@ from .session import await_session_mutation
 if TYPE_CHECKING:
     from ..agent import Agent
     from ..models._run_context import ModelToolHooks
+    from ..run_config import ToolNotFoundBehavior
     from ..run_state import ContextDeserializer, ContextOverride, RunState
 
 
@@ -323,17 +324,24 @@ class ResumableSession:
     def _get_history(self) -> list[TResponseInputItem]:
         return copy.deepcopy(self._checkpoint.history)
 
-    async def _begin_run(self, input: Any, tool_hooks: ModelToolHooks) -> None:
+    async def _begin_run(
+        self, input: Any, tool_hooks: ModelToolHooks, tool_not_found_behavior: ToolNotFoundBehavior
+    ) -> None:
         self._validate_run(input)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
         if self.is_paused:
             from ..run_internal.native_approvals import validate_native_restore_hooks
+            from ..run_internal.tool_planning import _check_approved_functions
             from ..run_internal.tool_text import validate_pending_text_transforms
 
             processed = input._last_processed_response
             if processed is not None and processed.native_approvals:
                 validate_native_restore_hooks(processed, tool_hooks)
+            elif tool_not_found_behavior == "raise_error":
+                _check_approved_functions(
+                    input.get_interruptions(), tool_hooks.agent, tool_hooks.context
+                )
             validate_pending_text_transforms(input, tool_hooks.settings)
         active = self._checkpoint.model_copy(
             update={

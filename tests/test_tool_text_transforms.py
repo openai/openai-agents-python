@@ -924,7 +924,7 @@ async def test_reconnected_server_with_same_name_needs_its_own_editor(rotate):
     "route", ["function", "mcp", "child", "namespaced", "copied", "reject_child"]
 )
 async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed, route):
-    from agents import ResumableSession
+    from agents import ModelBehaviorError, ResumableSession
 
     from .memory.test_resumable_session import MemoryStore
 
@@ -993,6 +993,14 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
             return stream
         return await Runner.run(agent, state, run_config=settings)
 
+    if route == "function":
+        worker.tools = []
+        with pytest.raises(ModelBehaviorError, match="Tool report not found"):
+            await resume(correct)
+        assert store.records[session.session_id] == saved
+        assert not effects and len(model.calls) == 1
+        worker.tools = [report]
+
     stale = config((Source(), "read.report")) if mcp else RunConfig()
     with pytest.raises(UserError, match="exact tool_text_transforms target"):
         await resume(stale)
@@ -1004,7 +1012,9 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
         return
     result = await resume(correct)
     assert result.final_output == "done" and RAW not in result.to_state().to_string()
-    assert bool(peer.tool_calls) == mcp and bool(effects) != mcp
+    assert peer.tool_calls == (["read.report"] if mcp else [])
+    assert effects == ([] if mcp else [True])
+    assert store.checkpoint(session.session_id)["status"] == "ready"
 
 
 @pytest.mark.asyncio

@@ -770,6 +770,7 @@ class AgentRunner:
                         hooks,
                         run_config.tool_execution,
                     ),
+                    run_config.tool_not_found_behavior,
                 )
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
@@ -790,6 +791,7 @@ class AgentRunner:
                     ModelToolHooks(
                         starting_agent, context_wrapper, hooks, run_config.tool_execution
                     ),
+                    run_config.tool_not_found_behavior,
                 )
             context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
@@ -3003,6 +3005,7 @@ class AgentRunner:
                             ModelToolHooks(
                                 schema_agent, context_wrapper, hooks, run_config.tool_execution
                             ),
+                            run_config.tool_not_found_behavior,
                         )
                         session.bind_state(run_state)
                     except BaseException:
