@@ -535,11 +535,11 @@ class MCPUtil:
         tool_public_name = tool_name_override or tool.name
         static_meta = cls._extract_static_meta(tool)
         invoke_func_impl = functools.partial(
-            cls.invoke_mcp_tool,
+            cls._invoke_mcp_tool,
             server,
             tool,
             tool_display_name=tool_public_name,
-            meta=static_meta,
+            static_meta=static_meta,
         )
         effective_failure_error_function = server._get_failure_error_function(
             failure_error_function
@@ -609,10 +609,14 @@ class MCPUtil:
     def _merge_mcp_meta(
         resolved_meta: dict[str, Any] | None,
         explicit_meta: dict[str, Any] | None,
+        static_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        if resolved_meta is None and explicit_meta is None:
+        if static_meta is None and resolved_meta is None and explicit_meta is None:
             return None
         merged: dict[str, Any] = {}
+        # Discovered metadata cannot override trusted per-call application metadata.
+        if static_meta is not None:
+            merged.update(copy.deepcopy(static_meta))
         if resolved_meta is not None:
             merged.update(copy.deepcopy(resolved_meta))
         if explicit_meta is not None:
@@ -694,6 +698,27 @@ class MCPUtil:
         tool_display_name: str | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        return await cls._invoke_mcp_tool(
+            server,
+            tool,
+            context,
+            input_json,
+            meta=meta,
+            tool_display_name=tool_display_name,
+        )
+
+    @classmethod
+    async def _invoke_mcp_tool(
+        cls,
+        server: MCPServer,
+        tool: MCPTool,
+        context: RunContextWrapper[Any],
+        input_json: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        tool_display_name: str | None = None,
+        static_meta: dict[str, Any] | None = None,
+    ) -> ToolOutput:
         tool_name_for_display = tool_display_name or tool.name
         json_decode_error: Exception | None = None
         try:
@@ -723,7 +748,7 @@ class MCPUtil:
 
         try:
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
-            merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
+            merged_meta = cls._merge_mcp_meta(resolved_meta, meta, static_meta)
             call_task = asyncio.create_task(
                 server.call_tool(tool.name, json_data)
                 if merged_meta is None
