@@ -271,8 +271,13 @@ class WorkspaceEditor:
             return
 
         staging = moved_destination.with_name(f".apply_patch-{uuid4().hex}.tmp")
+        # Protect copied source content from the moment the staging file is created.
+        # Failed or cancelled creation does not establish ownership of this pathname.
+        # Leave any private partial stage rather than risk deleting another writer's entry.
+        await self._session._write_new_file(
+            staging, io.BytesIO(text.encode("utf-8")), owner_only=True, user=self._user
+        )
         try:
-            await self._write_text(staging, text)
             await self._session.mv(staging, moved_destination, user=self._user)
         except BaseException:
             with contextlib.suppress(Exception):

@@ -126,7 +126,7 @@ class _FileOps:
         with out:
             shutil.copyfileobj(stream, out)
 
-    def write_new(self, path: Path, stream: io.IOBase) -> None:
+    def write_new(self, path: Path, stream: io.IOBase, *, owner_only: bool = False) -> None:
         """Create a file that must not already exist.
 
         O_EXCL fails with EEXIST when the name is taken by anything, including a directory
@@ -137,7 +137,7 @@ class _FileOps:
             fd = os.open(
                 name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o666,
+                0o600 if owner_only else 0o666,
                 dir_fd=parent_fd,
             )
         try:
@@ -292,10 +292,12 @@ def _main() -> None:
     if operation == "write":
         (path,) = paths
         files.write(path, cast(io.IOBase, sys.stdin.buffer))
-    elif operation == "write_new":
+    elif operation in ("write_new", "write_new_private"):
         (path,) = paths
         try:
-            files.write_new(path, cast(io.IOBase, sys.stdin.buffer))
+            files.write_new(
+                path, cast(io.IOBase, sys.stdin.buffer), owner_only=operation == "write_new_private"
+            )
         except FileExistsError:
             # A distinct status keeps "already exists" separable from a real write failure.
             sys.exit(_EXISTING_TARGET_EXIT_CODE)

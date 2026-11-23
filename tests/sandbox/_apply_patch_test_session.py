@@ -78,6 +78,7 @@ class ApplyPatchSession(BaseSandboxSession):
         data: io.IOBase,
         *,
         user: str | User | None = None,
+        owner_only: bool = False,
     ) -> None:
         normalized = self.normalize_path(path)
         if normalized in self.files:

@@ -122,6 +122,7 @@ def _write_start_data(
     data: io.IOBase,
     *,
     user: str | User | None = None,
+    owner_only: bool = False,
 ) -> dict[str, object]:
     user_value = user.name if isinstance(user, User) else user
     out: dict[str, object] = {"path": str(path), "user": user_value}
@@ -710,11 +711,15 @@ class SandboxSession(BaseSandboxSession):
         data: io.IOBase,
         *,
         user: str | User | None = None,
+        owner_only: bool = False,
     ) -> None:
         # Forwarded so a backend with a native exclusive-create primitive is actually
         # used. Without this the wrapper would fall back to the shared implementation and
         # bypass the inner session's override.
-        await self._inner._write_new_file(path, data, user=user)
+        if owner_only:
+            await self._inner._write_new_file(path, data, user=user, owner_only=True)
+        else:
+            await self._inner._write_new_file(path, data, user=user)
 
     @instrumented_op(
         "running",
