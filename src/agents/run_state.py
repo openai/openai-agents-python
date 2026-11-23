@@ -38,7 +38,13 @@ from openai.types.responses.response_output_item import (
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
-from ._redaction import current_redactor, hook_payload_diagnostics, redaction_scope, require_clean
+from ._redaction import (
+    current_redactor,
+    hook_payload_diagnostics,
+    redaction_scope,
+    require_clean,
+    require_clean_history,
+)
 from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
@@ -2009,6 +2015,12 @@ class RunState(Generic[TContext, TAgent]):
                     context_serializer, strict_context, include_tracing_api_key
                 )
             require_clean(snapshot)
+            if policy is not None:
+                # Restored items nest the transcript inside per-agent records.
+                original = snapshot["original_input"]
+                prefix = original if isinstance(original, list) else []
+                for key in ("generated_items", "session_items"):
+                    require_clean_history([*prefix, *(item["raw_item"] for item in snapshot[key])])
             return snapshot
 
     def _serialize_snapshot(

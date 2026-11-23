@@ -22,7 +22,12 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import ResponseOutputItem
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
-from .._redaction import current_redactor, redact_model_input, redact_response
+from .._redaction import (
+    current_redactor,
+    redact_model_input,
+    redact_response,
+    require_clean_history,
+)
 from .._tool_identity import (
     get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
@@ -314,6 +319,25 @@ __all__ = [
 
 _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
 _STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
+
+
+def _publish_stream_items(
+    items: list[RunItem], result: RunResultStreaming, emitted: set[str] | None = None
+) -> None:
+    if items and current_redactor() is not None:
+        # Some resume and guardrail paths already included this batch in new_items.
+        batch = {id(item) for item in items}
+        prior = [item.raw_item for item in result.new_items if id(item) not in batch]
+        require_clean_history(
+            [
+                *ItemHelpers.input_to_new_input_list(result.input),
+                *prior,
+                *(i.raw_item for i in items),
+            ]
+        )
+    if emitted:
+        items = [item for item in items if _stream_event_item_occurrence_key(item) not in emitted]
+    stream_step_items_to_queue(items, result._event_queue)
 
 
 def _stream_event_item_occurrence_key(item: RunItem) -> str | None:
@@ -736,7 +760,7 @@ async def _finalize_streamed_final_output(
         streamed_result._state._terminal_unrecoverable = False
 
     if stream_items_after_guardrails:
-        stream_step_items_to_queue(items, streamed_result._event_queue)
+        _publish_stream_items(items, streamed_result)
     await checkpoint_streamed_result(streamed_result)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -1590,9 +1614,7 @@ async def start_streaming(
                             streamed_result.tool_output_guardrail_results.extend(
                                 accepted_tool_output_guardrail_results[guardrail_result_start:]
                             )
-                        stream_step_items_to_queue(
-                            list(turn_session_items), streamed_result._event_queue
-                        )
+                        _publish_stream_items(list(turn_session_items), streamed_result)
                     store_setting = resumed_response_store(
                         run_state,
                         turn_result.model_response.response_id,
@@ -1862,7 +1884,7 @@ async def start_streaming(
                         run_state._clear_generated_items_last_processed_marker()
                         run_state._session_items = list(streamed_result.new_items)
                     if publish_events:
-                        stream_step_items_to_queue([synthesized_item], streamed_result._event_queue)
+                        _publish_stream_items([synthesized_item], streamed_result)
 
                 await _finalize_streamed_final_output(
                     streamed_result=streamed_result,
@@ -2098,7 +2120,7 @@ async def start_streaming(
                             run_state.set_tool_use_tracker_snapshot(
                                 streamed_result._tool_use_tracker_snapshot
                             )
-                        stream_step_items_to_queue(
+                        _publish_stream_items(
                             [
                                 item
                                 for item in partial_result.new_step_items
@@ -2106,7 +2128,7 @@ async def start_streaming(
                                 # Model-provided outputs were already emitted before execution.
                                 and _stream_event_item_occurrence_key(item) is None
                             ],
-                            streamed_result._event_queue,
+                            streamed_result,
                         )
                         _mark_error_to_drain_stream_events(tool_error)
                         try:
@@ -2780,7 +2802,7 @@ async def run_single_turn_streamed(
             )
 
     assert final_response is not None
-    final_response = redact_response(final_response)
+    final_response = redact_response(final_response, input)
     record_compaction_model_response(
         session,
         context_wrapper,
@@ -2826,7 +2848,7 @@ async def run_single_turn_streamed(
                     else item
                     for item in model_items
                 ]
-            stream_step_items_to_queue(model_items, streamed_result._event_queue)
+            _publish_stream_items(model_items, streamed_result)
         await gather_with_cancel(
             (
                 public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
@@ -2865,16 +2887,11 @@ async def run_single_turn_streamed(
         on_tool_error_selected=on_tool_error_selected,
     )
 
-    items_to_filter = session_items_for_turn(single_step_result)
-
-    items_to_filter = [
-        item
-        for item in items_to_filter
-        if _stream_event_item_occurrence_key(item) not in emitted_model_item_occurrence_keys
-    ]
-
-    filtered_result = _dc.replace(single_step_result, new_step_items=items_to_filter)
-    stream_step_result_to_queue(filtered_result, streamed_result._event_queue)
+    _publish_stream_items(
+        session_items_for_turn(single_step_result),
+        streamed_result,
+        emitted_model_item_occurrence_keys,
+    )
     return single_step_result
 
 
@@ -3169,7 +3186,7 @@ async def get_new_response(
                 isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
             ),
         )
-    new_response = redact_response(new_response)
+    new_response = redact_response(new_response, input)
     if server_conversation_tracker is not None:
         # Retry helpers rewind sent-input tracking before replaying a failed request. Mark the
         # filtered input as delivered again once a retry succeeds so subsequent turns only send

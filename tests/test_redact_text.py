@@ -536,6 +536,66 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("source", ["model", "tool", "resume", "mixed", "next_prompt"])
+async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, source):
+    from agents import RunState, SQLiteSession
+
+    @tool(needs_approval=source == "resume")
+    def lookup(i: int) -> str:
+        if source == "tool":
+            return "private-" if not i else "example"
+        if source == "mixed":
+            return "example"
+        return "ok"
+
+    first = function_call("lookup", {"i": 0}, call_id="one")
+    if source == "tool":
+        script = [
+            [first],
+            [function_call("lookup", {"i": 1}, call_id="two")],
+            [assistant_message("ok")],
+        ]
+    elif source == "next_prompt":
+        script = [[assistant_message("private-")], [assistant_message("example")]]
+    elif source == "mixed":
+        script = [[assistant_message("private-"), first], [assistant_message("ok")]]
+    else:
+        script = [[assistant_message("private-"), first], [assistant_message("example")]]
+    model = ScriptedModel(script)
+    agent = Agent(name="worker", model=model, tools=[lookup])
+    session = SQLiteSession("test")
+    config = RunConfig(redact_text=scrub)
+    published = []
+
+    async def invoke(value):
+        if streamed:
+            result = Runner.run_streamed(agent, value, session=session, run_config=config)
+            async for event in result.stream_events():
+                if event.type == "run_item_stream_event":
+                    published.append(str(event.item.raw_item))
+            return result
+        return await Runner.run(agent, value, session=session, run_config=config)
+
+    try:
+        value: str | RunState = "go"
+        if source == "resume":
+            paused = await invoke(value)
+            value = await RunState.from_json(agent, paused.to_state().to_json())
+            value.approve(value.get_interruptions()[0])
+        elif source == "next_prompt":
+            await invoke(value)
+            value = "continue"
+        with pytest.raises(UserError, match="redact_text"):
+            await invoke(value)
+        assert len(model.calls) == (1 if source == "mixed" else 2)
+        assert "example" not in str(published)
+        assert "example" not in str(await session.get_items())
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
 async def test_checks_tool_output_after_schema_serialization():
     from pydantic import BaseModel, field_serializer
 

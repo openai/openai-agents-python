@@ -113,19 +113,41 @@ async def test_protected_session_requires_policy_before_claim_after_restart(
 
 
 @pytest.mark.asyncio
-async def test_protected_run_refuses_existing_dirty_history_before_claim() -> None:
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("split", [False, True])
+async def test_protected_run_refuses_existing_dirty_history_before_claim(
+    streamed: bool, split: bool
+) -> None:
+    @tool
+    def lookup() -> str:
+        return SECRET[10:]
+
     store = MemoryStore()
     session = await ResumableSession.create(store)
-    agent = Agent(name="assistant", model=ScriptedModel([[get_text_message("answer")]]))
-    await Runner.run(agent, SECRET, session=session, run_config=RunConfig(tracing_disabled=True))
+    model = ScriptedModel(
+        [
+            [get_text_message(SECRET[:10]), get_function_tool_call("lookup", "{}")],
+            [get_text_message("answer")],
+        ]
+        if split
+        else [[get_text_message("answer")]]
+    )
+    agent = Agent(name="assistant", model=model, tools=[lookup])
+    await Runner.run(
+        agent,
+        "go" if split else SECRET,
+        session=session,
+        run_config=RunConfig(tracing_disabled=True),
+    )
     saved = store.records[session.session_id]
     assert json.loads(saved)["version"] == 1
-    assert SECRET in saved
+    assert (SECRET in saved) is not split
     restored = await ResumableSession.resume(store, session.session_id)
     with pytest.raises(UserError) as failure:
-        await Runner.run(
+        await run(
             agent,
             "follow-up",
+            streamed=streamed,
             session=restored,
             run_config=RunConfig(tracing_disabled=True, redact_text=redact),
         )
@@ -284,19 +306,34 @@ async def test_standalone_serialization_checks_context_at_every_export(streamed:
 
 
 @pytest.mark.asyncio
-async def test_standalone_dirty_legacy_state_is_refused_before_execution() -> None:
+@pytest.mark.parametrize("split", [False, True])
+async def test_standalone_dirty_legacy_state_is_refused_before_execution(split: bool) -> None:
     from agents import RunState
 
     executed: list[str] = []
+
+    @tool
+    def lookup() -> str:
+        return SECRET[10:]
 
     @tool(needs_approval=True)
     def change(value: str) -> str:
         executed.append(value)
         return "changed"
 
-    model = ScriptedModel([[get_function_tool_call("change", json.dumps({"value": SECRET}))]])
-    agent = Agent(name="assistant", model=model, tools=[change])
-    paused = await Runner.run(agent, SECRET, run_config=RunConfig(tracing_disabled=True))
+    model = ScriptedModel(
+        [
+            [get_text_message(SECRET[:10]), get_function_tool_call("lookup", "{}", "lookup")],
+            [get_function_tool_call("change", '{"value": "ok"}')],
+            [get_text_message("done")],
+        ]
+        if split
+        else [[get_function_tool_call("change", json.dumps({"value": SECRET}))]]
+    )
+    agent = Agent(name="assistant", model=model, tools=[change, lookup])
+    paused = await Runner.run(
+        agent, "go" if split else SECRET, run_config=RunConfig(tracing_disabled=True)
+    )
     snapshot = paused.to_state().to_json()
     snapshot["$schemaVersion"] = "1.23"
     snapshot.pop("requires_redaction", None)
@@ -308,7 +345,7 @@ async def test_standalone_dirty_legacy_state_is_refused_before_execution() -> No
         )
     assert SECRET not in str(failure.value)
     assert executed == []
-    assert len(model.calls) == 1
+    assert len(model.calls) == (2 if split else 1)
 
 
 @pytest.mark.asyncio

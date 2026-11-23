@@ -232,6 +232,27 @@ def require_clean(value: object) -> None:
     _apply(value, "check")
 
 
+def require_clean_history(items: list[Any]) -> None:
+    """Check the transcript, including the text a consumer sees without protocol fields."""
+    require_clean(items)
+    messages = []
+    visible = []
+    for item in items:
+        if not isinstance(item, (dict, BaseModel)):
+            continue
+        fields = _entries(item)
+        if fields.get("role") == "assistant":
+            content = fields.get("content")
+            messages.append(content)
+            visible.append(content)
+        elif "output" in fields:
+            visible.append(fields["output"])
+    if len(messages) > 1:
+        require_clean(messages)
+    if len(visible) > len(messages):
+        require_clean(visible)
+
+
 def redact_payload(value: _T) -> _T:
     return _apply(value, "payload")
 
@@ -281,7 +302,7 @@ def redact_model_input(data: ModelInputData, prompt: object) -> None:
         data.instructions = redact_payload(data.instructions)
 
 
-def redact_response(response: ModelResponse) -> ModelResponse:
+def redact_response(response: ModelResponse, history: list[Any]) -> ModelResponse:
     if current_redactor() is None:
         return response
     from .items import ItemHelpers
@@ -294,6 +315,7 @@ def redact_response(response: ModelResponse) -> ModelResponse:
             require_clean(item)
     result = copy(response)
     result.output = redact_items(response.output)
+    require_clean_history([*history, *result.output])
     # Consumers concatenate text parts. Refuse fragments which form a secret together.
     for extract in (ItemHelpers.extract_text, ItemHelpers.extract_refusal):
         require_clean("".join(extract(item) or "" for item in result.output))

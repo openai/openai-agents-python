@@ -600,6 +600,9 @@ class RunConfig:
     callback in memory to check each snapshot export. Supply it again when resuming.
     A restored protected state must resume before it can be serialized again.
 
+    A protected session append reads the available history to check for text split across
+    turns. This adds a read per append. Serialize writers to the same session.
+
     Protected runs withhold raw stream events, mute the ``openai.agents`` and
     ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when
     content tracing is requested. Semantic events remain available. Tool errors and
