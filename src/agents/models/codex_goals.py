@@ -19,7 +19,9 @@ __all__ = ["CodexGoal", "GoalThread", "open_goal"]
 class CodexGoal(BaseModel):
     """Native goal snapshot. Times are in seconds and timestamps use Unix time."""
 
-    model_config = ConfigDict(alias_generator=to_camel, frozen=True, strict=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, validate_by_name=True, frozen=True, strict=True
+    )
     thread_id: str
     objective: str
     status: Literal["paused", "budgetLimited", "active", "complete", "blocked", "usageLimited"]

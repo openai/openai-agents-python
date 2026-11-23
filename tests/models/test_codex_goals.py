@@ -18,6 +18,23 @@ native = pytest.mark.skipif(
 )
 
 
+def test_goal_accepts_native_fields_and_round_trips_python_names() -> None:
+    native_goal = {
+        "threadId": "synthetic-root",
+        "objective": "Review",
+        "status": "budgetLimited",
+        "tokenBudget": 64,
+        "tokensUsed": 64,
+        "timeUsedSeconds": 5,
+        "createdAt": 100,
+        "updatedAt": 105,
+    }
+    goal = CodexGoal.model_validate_json(json.dumps(native_goal))
+    assert goal.model_dump(by_alias=True) == native_goal
+    assert CodexGoal(**goal.model_dump()) == goal
+    assert CodexGoal.model_validate_json(goal.model_dump_json()) == goal
+
+
 @pytest.mark.asyncio
 async def test_creation_requires_authority_and_a_profile(tmp_path: Path) -> None:
     with pytest.raises(PermissionError):

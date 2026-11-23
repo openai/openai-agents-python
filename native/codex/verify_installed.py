@@ -149,7 +149,7 @@ class ApprovalStore:
         return True
 
 
-def approval_provider(folder):
+def approval_provider(folder, hooked=False):
     from agents.models.codex import CodexProvider
 
     return CodexProvider(
@@ -158,10 +158,35 @@ def approval_provider(folder):
         config_overrides=[
             'approval_policy="on-request"',
             'approvals_reviewer="user"',
+            f"features.hooks={str(hooked).lower()}",
             'model="installed"',
             f"model_catalog_json={json.dumps(str(folder / 'catalog.json'))}",
         ],
     )
+
+
+def approval_hooks(folder):
+    from agents import ToolExecutionConfig
+
+    events = folder / "approval-hooks.txt"
+    if not events.exists():
+        return None
+
+    async def prepare_input(call):
+        assert not events.read_text()
+        events.write_text("input")
+        command = call.arguments["command"]
+        assert "hook-original" in command
+        prepared = "updated" if command.startswith("*** Begin Patch") else "builtin-approved"
+        return {**call.arguments, "command": command.replace("hook-original", prepared)}
+
+    async def prepare_output(call, output):
+        assert "hook-original" not in call.arguments["command"]
+        assert events.read_text() == "input"
+        events.write_text("output")
+        return "hook-output-substituted"
+
+    return ToolExecutionConfig(prepare_tool_input=prepare_input, prepare_tool_output=prepare_output)
 
 
 def supports_file_sandbox():
@@ -185,7 +210,8 @@ async def pause_approval(folder):
     from agents import Agent, RunConfig, Runner
     from agents.memory.resumable_session import ResumableSession
 
-    provider = approval_provider(folder)
+    hooks = approval_hooks(folder)
+    provider = approval_provider(folder, hooks is not None)
     try:
         store = ApprovalStore()
         session = await ResumableSession.create(store)
@@ -193,7 +219,11 @@ async def pause_approval(folder):
             Agent(name="Plain"),
             "approval-input",
             session=session,
-            run_config=RunConfig(model_provider=provider, tracing_disabled=True),
+            run_config=RunConfig(
+                model_provider=provider,
+                tracing_disabled=True,
+                tool_execution=hooks,
+            ),
         )
         assert len(result.interruptions) == 1
         (folder / "paused.json").write_text(
@@ -243,7 +273,7 @@ async def native_route(folder):
                 )
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append(body)
-                assert len(requests) <= 17, "Unexpected extra inference request."
+                assert len(requests) <= 21, "Unexpected extra inference request."
                 number = len(requests)
                 history = json.dumps(body["input"])
                 response = {"id": f"response-{number}"}
@@ -528,7 +558,10 @@ request_max_retries = 0
         }
         (folder / "catalog.json").write_text(json.dumps({"models": [catalog]}), encoding="utf-8")
 
-        async def resume(approved):
+        async def resume(approved, *, hooked=False):
+            events = folder / "approval-hooks.txt"
+            if hooked:
+                events.touch()
             before = target.read_bytes() if target.exists() else None
             # Only the serialized session survives the worker process.
             await asyncio.to_thread(
@@ -542,19 +575,45 @@ request_max_retries = 0
                 (folder / "paused.json").read_text(encoding="utf-8")
             )
             assert "workspace-only-marker" not in store.value
+            if hooked:
+                assert events.read_text() == "input"
+                assert "hook-original" not in store.value
             assert (target.read_bytes() if target.exists() else None) == before
             recovered = await ResumableSession.resume(store, session_id)
             state = await recovered.load_state(plain)
             (pending,) = state.get_interruptions()
             assert pending.raw_item.call_id == approval_item["call_id"]
+            if hooked:
+                prepared = (
+                    "updated" if approval_item["type"] == "custom_tool_call" else "builtin-approved"
+                )
+                assert prepared in pending.arguments and "hook-original" not in pending.arguments
             state.approve(pending) if approved else state.reject(pending)
-            options = RunConfig(model_provider=provider, tracing_disabled=True)
-            return await Runner.run(plain, state, run_config=options)
+            options = RunConfig(
+                model_provider=provider,
+                tracing_disabled=True,
+                tool_execution=approval_hooks(folder),
+            )
+            result = await Runner.run(plain, state, run_config=options)
+            if hooked:
+                assert events.read_text() == ("output" if approved else "input")
+                assert "hook-original" not in store.value
+                if approved:
+                    outputs = [
+                        item
+                        for item in json.loads(store.value)["history"]
+                        if item.get("call_id") == approval_item["call_id"]
+                        and item.get("type") in ("function_call_output", "custom_tool_call_output")
+                    ]
+                    assert len(outputs) == 1 and outputs[0]["output"] == "hook-output-substituted"
+                events.unlink()
+            return result
 
         approval_checks = []
-        for approved in (False, True):
-            target = folder / "workspace" / f"builtin-command-{approved}.txt"
-            call_id = f"builtin-command-{approved}"
+        for approved, hooked in ((False, False), (True, False), (True, True)):
+            call_id = f"builtin-command-{approved}{'-hooks' if hooked else ''}"
+            target = folder / "workspace" / f"{call_id}.txt"
+            message = "hook-original" if hooked else "builtin-approved"
             approval_item = {
                 "type": "function_call",
                 "name": "exec_command",
@@ -562,38 +621,43 @@ request_max_retries = 0
                 "arguments": json.dumps(
                     {
                         # Keep the process alive long enough for Codex's async exit watcher.
-                        "cmd": f'sleep 1; echo builtin-approved > "{target}"',
+                        "cmd": f'sleep 1; echo {message} > "{target}"',
                         "login": False,
                         "sandbox_permissions": "require_escalated",
                     }
                 ),
             }
-            provider = approval_provider(folder)
-            result = await resume(approved)
+            provider = approval_provider(folder, hooked)
+            result = await resume(approved, hooked=hooked)
             assert result.final_output == "approval resolved"
             assert target.exists() == approved
             if approved:
                 assert b"builtin-approved" in target.read_bytes().replace(b"\x00", b"")
-            approval_checks.append("approve" if approved else "deny")
+            approval_checks.append(
+                ("approve" if approved else "deny") + (" with hooks" if hooked else "")
+            )
             await provider.aclose()
 
         target = folder / "workspace" / "edit.txt"
-        target.write_text("before\nworkspace-only-marker\n", encoding="utf-8")
-        approval_item = {
-            "type": "custom_tool_call",
-            "name": "apply_patch",
-            "call_id": "edit",
-            "input": (
-                "*** Begin Patch\n*** Update File: edit.txt\n@@\n-before\n+updated\n*** End Patch"
-            ),
-        }
-        provider = approval_provider(folder)
-        assert (await resume(True)).final_output == "approval resolved"
-        assert target.read_text(encoding="utf-8") == "updated\nworkspace-only-marker\n"
-        approval_checks.append("edit")
-        await provider.aclose()
+        for hooked in (False, True):
+            target.write_text("before\nworkspace-only-marker\n", encoding="utf-8")
+            replacement = "hook-original" if hooked else "updated"
+            approval_item = {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "edit",
+                "input": (
+                    "*** Begin Patch\n*** Update File: edit.txt\n@@\n"
+                    f"-before\n+{replacement}\n*** End Patch"
+                ),
+            }
+            provider = approval_provider(folder, hooked)
+            assert (await resume(True, hooked=hooked)).final_output == "approval resolved"
+            assert target.read_text(encoding="utf-8") == "updated\nworkspace-only-marker\n"
+            approval_checks.append("edit with hooks" if hooked else "edit")
+            await provider.aclose()
 
-        assert len(requests) == 15
+        assert len(requests) == 19
         if await asyncio.to_thread(supports_file_sandbox):
             os.utime(target, (1_000_000_000, 1_000_000_000))
             written_at = target.stat().st_mtime_ns
@@ -625,7 +689,7 @@ extends = ":workspace"
                 assert "could not confirm" in str(error)
             else:
                 raise AssertionError("A partially applied edit resumed.")
-            assert protected.read_text(encoding="utf-8") == "safe\n" and len(requests) == 16
+            assert protected.read_text(encoding="utf-8") == "safe\n" and len(requests) == 20
             approval_checks.append("partial edit stopped")
             assert target.stat().st_mtime_ns != written_at, "The first write never ran."
         else:
