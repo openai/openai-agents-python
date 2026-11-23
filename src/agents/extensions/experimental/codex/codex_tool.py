@@ -9,6 +9,7 @@ import os
 import re
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypeGuard
 
 from openai.types.responses.response_usage import OutputTokensDetails
@@ -77,7 +78,10 @@ CODEX_TOOL_NAME_PREFIX = "codex_"
 class CodexToolInputItem(BaseModel):
     type: Literal["text", "local_image"]
     text: str | None = None
-    path: str | None = None
+    path: str | None = Field(
+        default=None,
+        description="For local_image, use an image reference provided by the application.",
+    )
 
     model_config = ConfigDict(extra="forbid")
 
@@ -222,6 +226,7 @@ class CodexToolOptions:
     run_context_thread_id_key: str | None = None
     parameter_validation_mode: Literal["python", "json"] = "python"
     """Use "json" for strict types such as tuples. The default validates decoded Python values."""
+    image_attachments: Mapping[str, str] | None = None
 
 
 class CodexToolCallArguments(TypedDict):
@@ -259,8 +264,18 @@ def codex_tool(
     use_run_context_thread_id: bool | None = None,
     run_context_thread_id_key: str | None = None,
     parameter_validation_mode: Literal["python", "json"] | None = None,
+    image_attachments: Mapping[str, str] | None = None,
 ) -> FunctionTool:
-    """Create a Codex tool. Set parameter_validation_mode="json" for Pydantic's JSON input mode."""
+    """Create a Codex tool. Set parameter_validation_mode="json" for Pydantic's JSON input mode.
+
+    By default, the tool rejects local images. To allow a specific image, pass
+    ``image_attachments={"diagram": "/app/diagram.png"}`` and tell the model to use
+    ``"diagram"`` as the ``path`` of a ``local_image`` input.
+
+    The tool copies the mapping at creation. Codex reads the file with host permissions
+    when the tool runs. Only grant paths whose contents and location you control.
+    Use absolute paths without commas, which the CLI treats as image separators.
+    """
     resolved_options = _coerce_tool_options(options)
     if name is not None:
         resolved_options.name = name
@@ -300,6 +315,13 @@ def codex_tool(
         resolved_options.use_run_context_thread_id = use_run_context_thread_id
     if run_context_thread_id_key is not None:
         resolved_options.run_context_thread_id_key = run_context_thread_id_key
+    if image_attachments is not None:
+        resolved_options.image_attachments = image_attachments
+    resolved_image_attachments = dict(resolved_options.image_attachments or {})
+    if any(
+        not Path(path).is_absolute() or "," in path for path in resolved_image_attachments.values()
+    ):
+        raise UserError("Image attachment grants must use absolute host paths without commas.")
     if parameter_validation_mode is None:
         parameter_validation_mode = resolved_options.parameter_validation_mode
     if parameter_validation_mode not in ("python", "json"):
@@ -347,7 +369,7 @@ def codex_tool(
         resolved_thread_id: str | None = None
         try:
             parsed = _parse_tool_input(parameters_model, input_json, parameter_validation_mode)
-            args = _normalize_parameters(parsed)
+            args = _normalize_parameters(parsed, resolved_image_attachments)
 
             if resolved_options.use_run_context_thread_id:
                 _validate_run_context_thread_id_context(ctx, resolved_run_context_thread_id_key)
@@ -567,20 +589,22 @@ def _parse_tool_input(
     raise ModelBehaviorError(base_message)
 
 
-def _normalize_parameters(params: BaseModel) -> CodexToolCallArguments:
+def _normalize_parameters(
+    params: BaseModel, image_attachments: dict[str, str]
+) -> CodexToolCallArguments:
     inputs_value = getattr(params, "inputs", None)
     if inputs_value is None:
         raise UserError("Codex tool parameters must include an inputs field.")
     thread_id_value = getattr(params, "thread_id", None)
 
-    inputs = [{"type": item.type, "text": item.text, "path": item.path} for item in inputs_value]
-
     normalized_inputs: list[UserInput] = []
-    for item in inputs:
-        if item["type"] == "text":
-            normalized_inputs.append({"type": "text", "text": item["text"] or ""})
+    for item in inputs_value:
+        if item.type == "text":
+            normalized_inputs.append({"type": "text", "text": item.text or ""})
         else:
-            normalized_inputs.append({"type": "local_image", "path": item["path"] or ""})
+            if item.type != "local_image" or item.path not in image_attachments:
+                raise ModelBehaviorError("Image attachment is not authorized.")
+            normalized_inputs.append({"type": "local_image", "path": image_attachments[item.path]})
 
     return {
         "inputs": normalized_inputs if normalized_inputs else None,
