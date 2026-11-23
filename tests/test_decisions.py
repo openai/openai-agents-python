@@ -49,6 +49,19 @@ class Provider:
         return DecisionResult(self.value, "request", "fixture", Usage(requests=1, total_tokens=7))
 
 
+class DelegatingProvider:
+    def __init__(self, inner: Provider):
+        self.inner = inner
+
+    async def get_decision(self, request: DecisionRequest) -> DecisionResult[Any]:
+        return await decide(
+            request.question,
+            provider=self.inner,
+            input=request.input,
+            choices=request.output_schema["enum"],
+        )
+
+
 class Count(BaseModel):
     count: int = Field(json_schema_extra={"minimum": 0})
 
@@ -252,6 +265,40 @@ async def run(source, stream, value="history", **kwargs):
             pass
         return result
     return await Runner.run(source, value, run_config=CONFIG, **kwargs)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_handoff_provider_can_delegate_a_decision(stream):
+    inner = Provider("blue")
+    provider = DelegatingProvider(inner)
+    answer = await decide("Which?", provider=provider, input="evidence", choices=["blue"])
+    assert answer.value == "blue"
+
+    source = source_agent()
+    target = Agent(name="Blue", model=ScriptedModel([[assistant_message("done")]]))
+    source.handoffs.append(
+        decision_handoff(source, provider=provider, question="Which?", targets={"blue": target})
+    )
+    result = await run(source, stream)
+    assert result.last_agent is target
+    assert len(inner.requests) == 2 and inner.requests[0] == inner.requests[1]
+
+
+async def test_handoff_cannot_replace_an_external_decision_owner():
+    source = source_agent()
+    inner = Provider("blue")
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            provider=inner,
+            question="Which?",
+            targets={"blue": Agent(name="Blue", model=ScriptedModel())},
+        )
+    )
+    async with decision_scope(object()):
+        with pytest.raises(RuntimeError, match="owner"):
+            await run(source, False)
+    assert not inner.requests
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 255, 256])
@@ -527,14 +574,15 @@ async def test_handoff_error_redaction(
         assert marker in str(error.__cause__)
 
 
-async def test_immediate_stream_cancellation_drains_late_selection():
+@pytest.mark.parametrize("delegate", [False, True])
+async def test_immediate_stream_cancellation_drains_late_selection(delegate):
     source = source_agent()
     model = ScriptedModel()
     provider = BlockingProvider()
     source.handoffs.append(
         decision_handoff(
             source,
-            provider=provider,
+            provider=DelegatingProvider(provider) if delegate else provider,
             question="Which?",
             targets={"blue": Agent(name="Blue", model=model)},
         )

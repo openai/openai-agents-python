@@ -397,6 +397,8 @@ def decision_handoff(
     Labels bind to concrete agents at construction. Removing or replacing a target
     revokes it. A synchronous is_available callback can further restrict each run.
     OpenAIDecisions requires 2 to 255 available labels to offer or invoke the handoff.
+    A custom provider may await decide() without access to the run context.
+    Invoke the handoff outside an explicit decision_scope, which requires its owner.
     Restoring a specialist from serialized RunState checks its incoming selectors.
     Supply a fresh context_override if any of them uses is_available.
     """
@@ -452,20 +454,18 @@ def decision_handoff(
         choices = available_choices(ctx)
         if not choices or not attached():
             raise ValueError("Decision handoff is unavailable")
-        async with decision_scope(ctx):
-            try:
-                result = await decide(
-                    question,
-                    provider=provider,
-                    input=evidence,
-                    choices=choices,
-                    owner=ctx,
-                    timeout=timeout,
-                )
-            except DecisionError as error:
-                if error.usage is not None:
-                    ctx.usage.add(error.usage)
-                raise
+        try:
+            result = await decide(
+                question,
+                provider=provider,
+                input=evidence,
+                choices=choices,
+                timeout=timeout,
+            )
+        except DecisionError as error:
+            if error.usage is not None:
+                ctx.usage.add(error.usage)
+            raise
         if result.usage is not None:
             ctx.usage.add(result.usage)
         if not authorized(ctx, result.value):
