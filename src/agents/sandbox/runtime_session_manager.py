@@ -147,8 +147,10 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
             and run_state._starting_agent is not run_state._current_agent
         ):
             resume_identity_root = run_state._starting_agent
-        self._stable_resume_keys_by_agent_id = _build_agent_identity_keys_by_id(
-            resume_identity_root
+        self._stable_resume_keys_by_agent_id = (
+            _build_agent_identity_keys_by_id(resume_identity_root)
+            if sandbox_config is not None
+            else {}
         )
         self._resources_by_agent: dict[int, _SandboxSessionResources] = {}
         self._current_agent_id: int | None = None
