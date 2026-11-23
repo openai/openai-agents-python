@@ -25,6 +25,7 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
 from .._public_agent import get_public_agent
+from .._redaction import hook_payload_diagnostics, redact_payload, require_clean
 from .._tool_identity import (
     FunctionToolLookupKey,
     NamedToolLookupKey,
@@ -116,7 +117,7 @@ from .items import (
     function_tool_error_output,
 )
 from .run_steps import ToolRunFunction
-from .tool_hooks import hook_payload_diagnostics, transform_tool_output
+from .tool_hooks import transform_tool_output
 from .tool_use_tracker import AgentToolUseTracker
 
 if TYPE_CHECKING:
@@ -1137,7 +1138,8 @@ def pending_tool_span(
     operation = span.span_data.operation
     operation.tool_call_id = call_id
     try:
-        yield span
+        with hook_payload_diagnostics("Tool execution failed.", redact_by_default=False):
+            yield span
     except asyncio.CancelledError:
         operation.outcome = "interrupted"
         raise
@@ -1272,7 +1274,7 @@ async def resolve_approval_rejection_message(
         existing_pending=existing_pending,
     )
     if explicit_message is not None:
-        return explicit_message
+        return redact_payload(explicit_message)
 
     formatter = run_config.tool_error_formatter
     if formatter is None:
@@ -1318,7 +1320,7 @@ async def resolve_approval_rejection_message(
             )
         return REJECTION_MESSAGE
 
-    return message
+    return redact_payload(message)
 
 
 async def function_needs_approval(
@@ -2112,11 +2114,14 @@ class _FunctionToolBatchExecutor:
     ) -> Any:
         bypass_output_schema = False
         try:
-            invocation_result = await _invoke_function_tool_with_metadata(
-                function_tool=func_tool,
-                context=tool_context,
-                arguments=tool_call.arguments,
-            )
+            with hook_payload_diagnostics(
+                "Function tool execution failed.", redact_by_default=False
+            ):
+                invocation_result = await _invoke_function_tool_with_metadata(
+                    function_tool=func_tool,
+                    context=tool_context,
+                    arguments=tool_call.arguments,
+                )
             real_result = invocation_result.output
             bypass_output_schema = invocation_result.is_sdk_generated_error
         except asyncio.CancelledError as e:
@@ -2179,7 +2184,11 @@ class _FunctionToolBatchExecutor:
             real_result=real_result,
             tool_output_guardrail_results=self.tool_output_guardrail_results,
         )
-        final_result = output_guardrail_result.output
+        final_result = (
+            redact_payload(output_guardrail_result.output)
+            if output_guardrail_result.is_rejection
+            else output_guardrail_result.output
+        )
         bypass_output_schema = bypass_output_schema or (output_guardrail_result.is_rejection)
         if bypass_output_schema:
             self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
@@ -2195,7 +2204,7 @@ class _FunctionToolBatchExecutor:
         with hook_payload_diagnostics(
             "Function tool output could not be serialized or does not match "
             "its declared output schema.",
-            enabled=(
+            redact_by_default=(
                 self.config.tool_execution is not None
                 and self.config.tool_execution.prepare_tool_output is not None
             ),
@@ -2208,6 +2217,7 @@ class _FunctionToolBatchExecutor:
                 if bypass_output_schema
                 else func_tool._output_type_adapter,
             )
+        require_clean(raw_output_item)
         output_item: ToolCallOutputItem | None = None
         if not nested_interruptions:
             output_item = ToolCallOutputItem(
@@ -2876,7 +2886,7 @@ async def _execute_tool_input_guardrails(
         if gr_out.behavior["type"] == "raise_exception":
             raise ToolInputGuardrailTripwireTriggered(guardrail=guardrail, output=gr_out)
         elif gr_out.behavior["type"] == "reject_content":
-            return gr_out.behavior["message"]
+            return redact_payload(gr_out.behavior["message"])
 
     return None
 

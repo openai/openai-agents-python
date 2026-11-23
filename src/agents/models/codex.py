@@ -60,7 +60,12 @@ from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
 from ._codex_usage import _add_sample_usage, _usage
 from ._run_context import ModelToolHooks, get_model_tool_hooks
-from .codex_children import CodexChildren as CodexChildren, CodexRole as CodexRole
+from .codex_children import (
+    CodexChildLimitError as CodexChildLimitError,
+    CodexChildren as CodexChildren,
+    CodexRole as CodexRole,
+    _delegation_error,
+)
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -73,8 +78,8 @@ class CodexProvider(ModelProvider):
     Supply the same SDK tool hooks on both workers. The user reviews the prepared
     input. Output preparation runs after execution.
 
-    Pass `children=CodexChildren(roles=[role], max_delegations=2)` to isolate
-    native delegation within each request. Select an exact V1 catalog model
+    Pass `children=CodexChildren(roles=[role], max_delegation_attempts=2)` to isolate
+    native delegation within each model invocation. Select an exact V1 catalog model
     with `get_model`. This profile disables workspace tools, Code Mode and
     MCP servers. SDK tools, handoffs, native tool hooks and saved
     workspace approvals are incompatible. Core can still accept structured inputs and read local
@@ -332,6 +337,13 @@ class _CodexModel(Model):
         return await self._provider._run_approved_native_call(checkpoint, tracing, hooks)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
+        # A retry would grant a fresh allowance and expose the refusal to policy callbacks.
+        if isinstance(request.error, CodexChildLimitError):
+            from ..retry import ModelRetryNormalizedError
+
+            return ModelRetryAdvice(
+                replay_safety="unsafe", normalized=ModelRetryNormalizedError(is_abort=True)
+            )
         # Native Codex tools may have changed the workspace before a failed response.
         return ModelRetryAdvice(replay_safety="unsafe")
 
@@ -668,7 +680,7 @@ class _CodexModel(Model):
                     break
                 if kind == "error":
                     if children is not None and thread.delegation_error:
-                        raise RuntimeError(thread.delegation_error)
+                        raise _delegation_error(*thread.delegation_error)
                     raise RuntimeError("Codex model turn failed.")
                 if kind == "token_count":
                     info = message.get("info")
@@ -924,7 +936,7 @@ class _CodexModel(Model):
                 # A parent can finish without waiting for a child that exceeded the limit.
                 if failure is None and children is not None and thread.delegation_error:
                     completed = None
-                    raise RuntimeError(thread.delegation_error)
+                    raise _delegation_error(*thread.delegation_error)
             finally:
                 # Pending items carry a private recovery checkpoint.
                 observations.close(completed if pending_approval is None else None)

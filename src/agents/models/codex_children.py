@@ -2,6 +2,30 @@
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
+
+from ..exceptions import AgentsException, _mark_error_data_redacted
+
+_ChildLimit = Literal["delegation_attempts", "wait_close_attempts"]
+
+
+class CodexChildLimitError(AgentsException):
+    """A native agent exceeded one of the two tree-wide attempt limits."""
+
+    def __init__(self, message: str, limit: _ChildLimit) -> None:
+        super().__init__(message)
+        self.limit: _ChildLimit = limit
+
+
+def _delegation_error(
+    limit: _ChildLimit | None, message: str
+) -> CodexChildLimitError | RuntimeError:
+    if limit is None:
+        return RuntimeError(message)
+    error = CodexChildLimitError(message, limit)
+    # Both values are fixed by the native interceptor. Keep no request data.
+    _mark_error_data_redacted(error)
+    return error
 
 
 @dataclass(frozen=True)
@@ -26,32 +50,34 @@ class CodexRole:
 
 @dataclass(frozen=True, kw_only=True)
 class CodexChildren:
-    """Allow native V1 delegation within one ephemeral model request.
+    """Allow native V1 children in a private, ephemeral tree.
 
-    The SDK stores a tuple snapshot of the supplied list or tuple.
-    Roles supplement Core's default, explorer and worker roles. The model chooses
-    whether to delegate. A non-leaf can spawn, message, wait for, close
-    and resume agents within this tree. Closed ephemeral threads have no
-    stored history for reopening or full-history forks. Descendants inherit
-    the parent's model and permissions. Roles supply instructions only.
-    max_delegations caps attempts to spawn, resume or send input across
-    the tree, including failed calls. Unknown functions also count.
-    Namespaced V1 wait and close calls share a separate tree-wide limit
-    of twice max_delegations. Repeated, failed and timed-out calls count.
-    Other call forms are rejected. Closing a child restores neither allowance.
-    Exceeding either limit stops the calling thread. Even if the parent
-    finishes normally, the SDK raises RuntimeError after joining the tree.
-    Already admitted calls can still run. max_depth counts generations
-    below the root.
+    With `max_delegation_attempts=N`, the parent and all descendants share
+    N attempts to call spawn_agent, resume_agent, send_input or unknown functions.
+    Namespaced V1 wait_agent and close_agent share a separate 2N attempts.
+    For example, N=1 allows one spawn, one wait and one close. Failed, repeated
+    and timed-out calls count. Closing a child refunds nothing. Other call
+    forms are rejected.
 
-    Waiting, model continuations and transport retries can still incur
-    requests. These limits do not cap model requests, tokens or cost. For a hard
-    request budget, use Agent.as_tool with separate parent and child turn
-    limits and shared application admission before each send and retry.
+    Both allowances reset each native model invocation. At most
+    `max_delegation_attempts` children can be open at once. `max_depth`
+    counts generations below the root and defaults to one. An excess attempt
+    stops the calling thread. After cleanup, the SDK raises CodexChildLimitError
+    even if the parent finished without waiting. Its `limit` is
+    "delegation_attempts" or "wait_close_attempts". Admitted calls can still run.
+
+    The SDK skips the model retry policy and never retries either refusal.
+
+    The SDK copies the roles into a tuple. They supply instructions and
+    supplement the built-in default, explorer and worker roles. The model
+    chooses whether to delegate. Children inherit the parent's model and
+    permissions. Closed threads have no saved history for reopening or
+    full-history forks. These limits grant no permissions and do not cap
+    model requests, retries, tokens or cost.
     """
 
     roles: tuple[CodexRole, ...] | list[CodexRole]
-    max_delegations: int
+    max_delegation_attempts: int
     max_depth: int = 1
 
     def __post_init__(self) -> None:
@@ -65,6 +91,6 @@ class CodexChildren:
             raise ValueError("Provide a nonempty list or tuple of CodexRole declarations.")
         if len({role.name.lower() for role in self.roles}) != len(self.roles):
             raise ValueError("Duplicate Codex role name.")
-        for value in (self.max_delegations, self.max_depth):
+        for value in (self.max_delegation_attempts, self.max_depth):
             if type(value) is not int or not 1 <= value <= 2**31 - 1:
                 raise ValueError("Codex child limits must be positive 32-bit integers.")

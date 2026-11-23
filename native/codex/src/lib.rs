@@ -458,7 +458,7 @@ impl Thread {
     }
 
     #[getter]
-    fn delegation_error(&self) -> Option<&'static str> {
+    fn delegation_error(&self) -> Option<children::Denial> {
         self.lease.services.budget.as_ref()?.denial()
     }
 

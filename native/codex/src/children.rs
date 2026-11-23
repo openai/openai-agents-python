@@ -23,7 +23,7 @@ use crate::NativeResult;
 #[derive(FromPyObject)]
 pub struct Children {
     roles: Vec<Role>,
-    max_delegations: usize,
+    max_delegation_attempts: usize,
     max_depth: i32,
 }
 
@@ -50,12 +50,12 @@ const DISABLED: &[Feature] = &[
 impl Children {
     pub fn budget(&self) -> NativeResult<Arc<Budget>> {
         let wait_close = self
-            .max_delegations
+            .max_delegation_attempts
             .checked_mul(2)
             .ok_or("Codex native delegation limit is too large.")?;
         Ok(Arc::new(Budget {
             wait_close: Arc::new(AtomicUsize::new(wait_close)),
-            remaining: Arc::new(AtomicUsize::new(self.max_delegations)),
+            remaining: Arc::new(AtomicUsize::new(self.max_delegation_attempts)),
             denial: Arc::default(),
         }))
     }
@@ -67,7 +67,7 @@ impl Children {
             "features.multi_agent_v2={enabled=false,disable_native_tools=true}".into(),
             format!(
                 "agents.max_concurrent_threads_per_session={}",
-                self.max_delegations
+                self.max_delegation_attempts
             ),
             format!("agents.max_depth={}", self.max_depth),
             "tools.update_plan.enabled=false".into(),
@@ -97,7 +97,7 @@ impl Children {
                 .any(|server| server.enabled)
             || !config.multi_agent_v2.disable_native_tools
             || config.agent_default_subagent_model.is_some()
-            || config.agent_max_threads != Some(self.max_delegations)
+            || config.agent_max_threads != Some(self.max_delegation_attempts)
             || config.agent_max_depth != self.max_depth
             || config.experimental_request_user_input_enabled
             || config.update_plan_enabled
@@ -158,22 +158,25 @@ pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsR
     Ok(catalog)
 }
 
+// Only the interceptor supplies these limit tags and messages.
+pub type Denial = (Option<&'static str>, &'static str);
+
 #[derive(Clone, Debug)]
 pub struct Budget {
     remaining: Arc<AtomicUsize>,
     wait_close: Arc<AtomicUsize>,
-    denial: Arc<OnceLock<&'static str>>,
+    denial: Arc<OnceLock<Denial>>,
 }
 
 impl Budget {
-    pub fn denial(&self) -> Option<&'static str> {
+    pub fn denial(&self) -> Option<Denial> {
         self.denial.get().copied()
     }
 
-    fn deny(&self, message: &'static str) -> ModelResponseError {
-        let _ = self.denial.set(message);
+    fn deny(&self, denial: Denial) -> ModelResponseError {
+        let _ = self.denial.set(denial);
         ModelResponseError::InvalidRequest {
-            message: message.to_owned(),
+            message: denial.1.to_owned(),
         }
     }
 
@@ -188,7 +191,13 @@ impl Budget {
             } if ns == "multi_agent_v1"
                 && matches!(name.as_str(), "wait_agent" | "close_agent") =>
             {
-                (&self.wait_close, "Codex native wait/close limit exceeded.")
+                (
+                    &self.wait_close,
+                    (
+                        Some("wait_close_attempts"),
+                        "Codex native wait/close limit exceeded.",
+                    ),
+                )
             }
             Message { .. }
             | AgentMessage { .. }
@@ -201,7 +210,13 @@ impl Budget {
             | ConfigurationUpdate { .. }
             | CompactionTrigger { .. }
             | ContextCompaction { .. } => return Ok(()),
-            _ => (&self.remaining, "Codex native delegation limit exceeded."),
+            _ => (
+                &self.remaining,
+                (
+                    Some("delegation_attempts"),
+                    "Codex native delegation limit exceeded.",
+                ),
+            ),
         };
         remaining
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
@@ -210,7 +225,7 @@ impl Budget {
             .map_err(|_| self.deny(error))?;
         // V1 handlers cannot accept custom payloads. Fail before routing alternate forms.
         if !matches!(item, FunctionCall { .. }) {
-            return Err(self.deny("Unsupported native delegation call."));
+            return Err(self.deny((None, "Unsupported native delegation call.")));
         }
         Ok(())
     }

@@ -9,6 +9,13 @@ from uuid import uuid4
 from typing_extensions import Unpack
 
 from . import _debug
+from ._redaction import (
+    current_redactor,
+    redact_items,
+    redaction_scope,
+    require_clean,
+    require_clean_agent,
+)
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
 from .exceptions import (
@@ -25,8 +32,10 @@ from .exceptions import (
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
     _is_tool_local_cancellation,
+    _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
+    _sync_data_redacted_error_boundary,
 )
 from .guardrail import (
     InputGuardrailResult,
@@ -158,6 +167,7 @@ from .run_internal.session_persistence import (
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    require_clean_run_items,
     resume_pending_session_write,
     resumed_failure_items,
     resumed_response_store,
@@ -493,6 +503,7 @@ class Runner:
         _raise_data_redacted_error(redacted_error)
 
     @classmethod
+    @_sync_data_redacted_error_boundary
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
@@ -572,6 +583,51 @@ class Runner:
         )
 
 
+def _prepare_private_input(
+    agent: Agent[TContext],
+    input: str | list[TResponseInputItem] | RunState[TContext],
+    config: RunConfig,
+    options: RunOptions[TContext],
+) -> str | list[TResponseInputItem] | RunState[TContext]:
+    if current_redactor() is None:
+        if isinstance(input, RunState) and input._requires_redaction:
+            error = UserError("Continuing this run requires RunConfig.redact_text.")
+            _mark_error_data_redacted(error)
+            raise error
+        return input
+    remote = (
+        options.get("conversation_id") is not None
+        or options.get("previous_response_id") is not None
+    )
+    if isinstance(input, RunState):
+        # A protected automatic chain keeps the responses used to build its history.
+        if input._conversation_id is not None or (
+            input._previous_response_id is not None
+            and not (
+                input._requires_redaction
+                and input._auto_previous_response_id
+                and input._model_responses
+                and input._model_responses[-1].response_id == input._previous_response_id
+            )
+        ):
+            remote = True
+    if remote:
+        error = UserError(
+            "RunConfig.redact_text requires local history. Use a session or replay "
+            "the conversation without conversation_id or previous_response_id."
+        )
+        _mark_error_data_redacted(error)
+        raise error
+    require_clean_agent(agent)
+    require_clean((config.workflow_name, config.trace_id, config.group_id, config.trace_metadata))
+    if isinstance(input, RunState):
+        if input._current_agent is not None and input._current_agent is not agent:
+            require_clean_agent(input._current_agent)
+        # Validate the effective snapshot after applying any context override.
+        return input
+    return redact_items(input)
+
+
 class AgentRunner:
     """
     WARNING: this class is experimental and not part of the public API
@@ -592,6 +648,7 @@ class AgentRunner:
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
+            trace_stack.enter_context(redaction_scope(run_config.redact_text))
             trace_stack.enter_context(
                 operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
             )
@@ -614,6 +671,7 @@ class AgentRunner:
                                 disabled=True,
                             )
                         )
+                    input = _prepare_private_input(starting_agent, input, run_config, kwargs)
                     configuration_agent = (
                         input._current_agent
                         if isinstance(input, RunState) and input._current_agent is not None
@@ -1654,11 +1712,13 @@ class AgentRunner:
 
                         async def _save_max_turns_handler_output(
                             items: list[RunItem],
+                            original_input: str | list[TResponseInputItem] = original_input,
                             store_setting: bool | None = store_setting,
                             generated_items: list[RunItem] = generated_items,
                             session_items: list[RunItem] = session_items,
                         ) -> None:
                             nonlocal handler_output_recorded, handler_persisted_item_count
+                            require_clean_run_items(original_input, session_items, items)
                             handler_persisted_item_count = (
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
@@ -1830,6 +1890,7 @@ class AgentRunner:
                                         bindings=current_bindings,
                                         original_input=original_input,
                                         generated_items=items_for_model,
+                                        session_items=session_items,
                                         hooks=hooks,
                                         context_wrapper=context_wrapper,
                                         run_config=run_config,
@@ -1937,6 +1998,7 @@ class AgentRunner:
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 generated_items=items_for_model,
+                                session_items=session_items,
                                 hooks=hooks,
                                 context_wrapper=context_wrapper,
                                 run_config=run_config,
@@ -1972,6 +2034,9 @@ class AgentRunner:
                         ) and not input_guardrails_triggered(_attempt_input_guardrail_results())
                         if partial_tool_results and input_accepted:
                             partial_result = partial_tool_results[0]
+                            require_clean_run_items(
+                                original_input, session_items, partial_result.new_step_items
+                            )
                             generated_items.extend(partial_result.new_step_items)
                             session_items.extend(partial_result.new_step_items)
                             model_responses.append(partial_result.model_response)
@@ -2031,6 +2096,7 @@ class AgentRunner:
                     generated_items = turn_result.pre_step_items + turn_result.new_step_items
                     # Accumulate unfiltered items for observability.
                     turn_session_items = session_items_for_turn(turn_result)
+                    require_clean_run_items(original_input, session_items, turn_session_items)
                     session_items.extend(turn_session_items)
                     if pending_input_admission_items and run_state is not None:
                         run_state._generated_items = list(generated_items)
@@ -2656,6 +2722,7 @@ class AgentRunner:
                 with contextlib.suppress(RuntimeError):
                     default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
+    @_sync_data_redacted_error_boundary
     def run_streamed(
         self,
         starting_agent: Agent[TContext],
@@ -2677,6 +2744,7 @@ class AgentRunner:
         # Synchronous setup can invoke application providers before the task starts.
         # Restore caller context before creating the independently masked background task.
         with (
+            redaction_scope(run_config.redact_text),
             operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data),
             TraceCtxManager(
                 workflow_name=run_config.workflow_name,
@@ -2689,6 +2757,7 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            input = _prepare_private_input(starting_agent, input, run_config, kwargs)
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
             run_state: RunState[TContext] | None = None
@@ -2919,6 +2988,7 @@ class AgentRunner:
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
             with (
+                redaction_scope(run_config.redact_text),
                 operation_tracing_scope(
                     run_config.tracing, run_config.trace_include_sensitive_data
                 ),

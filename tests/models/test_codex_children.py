@@ -1,11 +1,21 @@
 import asyncio
 import json
+import traceback
 from threading import Barrier, Event
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, UserError, function_tool
-from agents.models.codex import CodexChildren, CodexProvider, CodexRole
+from agents import (
+    Agent,
+    AgentsException,
+    ModelRetrySettings,
+    ModelSettings,
+    RunConfig,
+    Runner,
+    UserError,
+    function_tool,
+)
+from agents.models.codex import CodexChildLimitError, CodexChildren, CodexProvider, CodexRole
 from agents.models.interface import ModelTracing
 
 from .test_codex_mutable_tool_hooks import codex_fixture, final_message
@@ -15,7 +25,7 @@ from .test_codex_provider import native_pair, threads as threads
 pytest_plugins = ["tests.models.test_codex_mutable_tool_hooks"]
 
 ROLE = CodexRole("editor", "Edit the draft.", 'Return "edited".\nStay concise.')
-PROFILE = CodexChildren(roles=(ROLE,), max_delegations=1)
+PROFILE = CodexChildren(roles=(ROLE,), max_delegation_attempts=1)
 
 
 @pytest.mark.parametrize("name", ["", " ", "default", "explorer", "worker", "a/b"])
@@ -27,17 +37,17 @@ def test_invalid_child_role(name):
 @pytest.mark.parametrize("roles", [[], (), "editor", [None], [ROLE, ROLE]])
 def test_invalid_roles(roles):
     with pytest.raises(ValueError):
-        CodexChildren(roles=roles, max_delegations=1)
+        CodexChildren(roles=roles, max_delegation_attempts=1)
 
 
 def test_invalid_child_declarations():
     with pytest.raises(ValueError, match="nonblank"):
         CodexRole("editor", "description", " ")
     with pytest.raises(ValueError, match="Duplicate"):
-        CodexChildren(roles=(ROLE, ROLE), max_delegations=1)
+        CodexChildren(roles=(ROLE, ROLE), max_delegation_attempts=1)
     for limit in [0, -1, True, 1.5, 2**31]:
-        for field in ("max_depth", "max_delegations"):
-            kwargs = {"max_delegations": 1, field: limit}
+        for field in ("max_depth", "max_delegation_attempts"):
+            kwargs = {"max_delegation_attempts": 1, field: limit}
             with pytest.raises(ValueError, match="limits"):
                 CodexChildren(roles=(ROLE,), **kwargs)
 
@@ -87,6 +97,24 @@ async def test_native_children_reject_unexpected_workspace_approval(tmp_path, th
                 "draft",
                 run_config=RunConfig(tracing_disabled=True),
             )
+        assert thread.closed
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_text_cannot_signal_a_child_limit(tmp_path, threads):
+    thread = ApprovalThread(
+        events=[{"type": "error", "message": "Codex native delegation limit exceeded."}]
+    )
+    thread.delegation_error = None
+    threads[0].append(thread)
+    provider = CodexProvider(cwd=tmp_path, children=PROFILE)
+    provider._manager = CodexProvider(cwd=tmp_path)._native_manager()
+    try:
+        with pytest.raises(RuntimeError, match="Codex model turn failed") as caught:
+            await ask(provider)
+        assert not isinstance(caught.value, CodexChildLimitError)
         assert thread.closed
     finally:
         await provider.aclose()
@@ -193,7 +221,7 @@ async def test_unsupported_children_before_generation(
 async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpoint, catalog):
     port, requests, items = model_endpoint
     roles = [ROLE]
-    children = CodexChildren(roles=roles, max_delegations=2)
+    children = CodexChildren(roles=roles, max_delegation_attempts=2)
     roles.clear()
     assert children.roles == (ROLE,)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
@@ -238,7 +266,7 @@ async def test_child_native_fork_reopen_and_model_selection(
         port,
         monkeypatch,
         [*catalog, 'agents.ambient.description="ambient specialist"'],
-        children=CodexChildren(roles=(ROLE,), max_delegations=5),
+        children=CodexChildren(roles=(ROLE,), max_delegation_attempts=5),
     )
     child_id = ""
 
@@ -290,7 +318,7 @@ async def test_child_native_depth_two_and_live_tree_isolation(
     tmp_path, monkeypatch, model_endpoint, catalog
 ):
     port, requests, items = model_endpoint
-    children = CodexChildren(roles=(ROLE,), max_delegations=2, max_depth=2)
+    children = CodexChildren(roles=(ROLE,), max_delegation_attempts=2, max_depth=2)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
     started, release = Event(), Event()
     child_id = ""
@@ -363,8 +391,9 @@ async def test_child_close_does_not_refund(tmp_path, monkeypatch, model_endpoint
 
     items.extend([step] * 10)
     try:
-        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+        with pytest.raises(CodexChildLimitError) as caught:
             await ask(provider)
+        assert caught.value.limit == "delegation_attempts"
         assert len(requests) == 5
         await ask(provider, prompt="fresh")
         assert len(requests) == 10
@@ -395,8 +424,9 @@ async def test_child_failed_calls_consume_budget(
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
     items.extend([attempt, call("spawn_agent", "next", message="LEAF"), final_message()])
     try:
-        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+        with pytest.raises(CodexChildLimitError) as caught:
             await ask(provider)
+        assert caught.value.limit == "delegation_attempts"
         assert len(requests) == 2
         assert "LEAF" not in user_input(requests[-1])
     finally:
@@ -407,7 +437,7 @@ async def test_child_failed_calls_consume_budget(
 @pytest.mark.allow_call_model_methods
 async def test_children_share_last_delegation(tmp_path, monkeypatch, model_endpoint, catalog):
     port, requests, items = model_endpoint
-    children = CodexChildren(roles=(ROLE,), max_delegations=3, max_depth=2)
+    children = CodexChildren(roles=(ROLE,), max_delegation_attempts=3, max_depth=2)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
     siblings = Barrier(2)
 
@@ -433,8 +463,9 @@ async def test_children_share_last_delegation(tmp_path, monkeypatch, model_endpo
 
     items.extend([step] * 9)
     try:
-        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
+        with pytest.raises(CodexChildLimitError) as caught:
             await ask(provider)
+        assert caught.value.limit == "delegation_attempts"
         waits = [outputs(requests[-1])["wait" + tag] for tag in ("one", "two")]
         assert sum("delegation limit exceeded" in result for result in waits) == 1
         assert sum("done" in result for result in waits) == 1
@@ -460,8 +491,9 @@ async def test_child_rejects_custom_payload(tmp_path, monkeypatch, model_endpoin
         }
     )
     try:
-        with pytest.raises(RuntimeError, match="Unsupported native delegation"):
+        with pytest.raises(RuntimeError, match="Unsupported native delegation") as caught:
             await ask(provider)
+        assert not isinstance(caught.value, CodexChildLimitError)
         assert len(requests) == 1
     finally:
         await provider.aclose()
@@ -469,21 +501,51 @@ async def test_child_rejects_custom_payload(tmp_path, monkeypatch, model_endpoin
 
 @pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("limit", ["delegation_attempts", "wait_close_attempts"])
 async def test_child_counts_each_item_in_one_response(
-    tmp_path, monkeypatch, model_endpoint, catalog
+    tmp_path, monkeypatch, model_endpoint, catalog, streamed, limit
 ):
     port, requests, items = model_endpoint
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
-    items.append(
-        [
-            call("send_input", "same", message="missing target"),
-            call("spawn_agent", "same", message="LEAF"),
-        ]
-    )
+    if limit == "delegation_attempts":
+        items.append(
+            [
+                call("send_input", "same", message="missing target"),
+                call("spawn_agent", "same", message="LEAF"),
+            ]
+        )
+    else:
+        items.append([call("wait_agent", str(i)) for i in range(3)])
     items.append(final_message())
+
+    def unexpected_retry(context):
+        pytest.fail("A limit refusal must not reach the retry policy.")
+
     try:
-        with pytest.raises(RuntimeError, match="delegation limit exceeded"):
-            await ask(provider)
+        with pytest.raises(AgentsException) as caught:
+            agent = Agent(
+                name="manager",
+                model=provider.get_model("v1"),
+                model_settings=ModelSettings(
+                    retry=ModelRetrySettings(max_retries=1, policy=unexpected_retry)
+                ),
+            )
+            config = RunConfig(
+                tracing_disabled=True, redact_text=lambda s: s.replace("private", "*")
+            )
+            if streamed:
+                run = Runner.run_streamed(agent, "private draft", run_config=config)
+                async for _ in run.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, "private draft", run_config=config)
+        assert isinstance(caught.value, CodexChildLimitError)
+        assert caught.value.run_data is None
+        assert caught.value.limit == limit
+        assert "private draft" not in "".join(
+            traceback.format_exception_only(type(caught.value), caught.value)
+        )
         assert len(requests) == 1
     finally:
         await provider.aclose()
@@ -500,8 +562,9 @@ async def test_native_wait_and_close_share_a_finite_allowance(
     attempts = [call("wait_agent", "wait"), call("close_agent", "close")]
     try:
         items.extend([*attempts, call("wait_agent", "again"), final_message()])
-        with pytest.raises(RuntimeError, match="wait/close limit exceeded"):
+        with pytest.raises(CodexChildLimitError) as caught:
             await ask(provider)
+        assert caught.value.limit == "wait_close_attempts"
         assert len(requests) == 3
         items.clear()
         items.extend([*attempts, final_message()])
@@ -517,7 +580,7 @@ async def test_native_child_uses_the_same_wait_and_close_allowance(
     tmp_path, monkeypatch, model_endpoint, catalog
 ):
     port, requests, items = model_endpoint
-    children = CodexChildren(roles=(ROLE,), max_delegations=1, max_depth=2)
+    children = CodexChildren(roles=(ROLE,), max_delegation_attempts=1, max_depth=2)
     provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=children)
 
     def step(request):
@@ -533,8 +596,9 @@ async def test_native_child_uses_the_same_wait_and_close_allowance(
 
     items.extend([step] * 5 + [final_message()])
     try:
-        with pytest.raises(RuntimeError, match="wait/close limit exceeded"):
+        with pytest.raises(CodexChildLimitError) as caught:
             await ask(provider)
+        assert caught.value.limit == "wait_close_attempts"
         assert len(requests) == 5
         assert "done" in outputs(requests[-1])["wait"]
     finally:

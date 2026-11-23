@@ -16,6 +16,7 @@ from agents.exceptions import AgentsException, UserError
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
+from agents.run_state import CURRENT_SCHEMA_VERSION
 from agents.testing import ScriptedModel, UnexpectedModelCall
 from tests.test_error_logging_redaction import _assert_secret_absent_from_agents_traceback
 from tests.test_responses import get_function_tool_call, get_text_message
@@ -133,9 +134,14 @@ async def test_saved_native_approval_cannot_become_an_sdk_tool_approval(
 
 
 async def run_agent(
-    agent: Agent[Any], input: Any, session: Session | ResumableSession | None, streamed: bool
+    agent: Agent[Any],
+    input: Any,
+    session: Session | ResumableSession | None,
+    streamed: bool,
+    *,
+    run_config: RunConfig = CONFIG,
 ) -> RunResult | RunResultStreaming:
-    options: dict[str, Any] = {"run_config": CONFIG}
+    options: dict[str, Any] = {"run_config": run_config}
     if session is not None:
         options["session"] = session
     if not streamed:
@@ -144,6 +150,74 @@ async def run_agent(
     async for _ in result.stream_events():
         pass
     return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_rejected_session_input_can_be_retried_on_a_fresh_handle(streamed: bool) -> None:
+    writes: list[str] = []
+
+    class RecordingStore(MemoryStore):
+        async def save(self, session_id: str, value: str, *, expected: str | None) -> bool:
+            writes.append(value)
+            return await super().save(session_id, value, expected=expected)
+
+    store = RecordingStore()
+    session = await ResumableSession.create(store)
+    model = ScriptedModel([[get_text_message("first reply")], [get_text_message("retry reply")]])
+    agent = Agent(name="assistant", model=model)
+    await run_agent(agent, "first question", session, streamed)
+    history = store.checkpoint(session.session_id)["history"]
+    secret = "synthetic-private-input"
+
+    async def reject(prior: Any, new: Any) -> Any:
+        prior[0]["content"] = new[0]["content"]
+        raise ValueError("scrubber unavailable")
+
+    config = RunConfig(tracing_disabled=True, session_input_callback=reject)
+    with pytest.raises(ValueError, match="scrubber unavailable"):
+        await run_agent(agent, secret, session, streamed, run_config=config)
+    assert len(model.calls) == 1
+    assert store.checkpoint(session.session_id)["history"] == history
+
+    def scrub(prior: Any, new: Any) -> Any:
+        new[0]["content"] = "[redacted]"
+        return prior + new
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    config.session_input_callback = scrub
+    result = await run_agent(agent, secret, fresh, streamed, run_config=config)
+    assert result.final_output == "retry reply"
+    assert len(model.calls) == 2
+    sent = json.dumps(model.calls[1].input)
+    assert "first reply" in sent and sent.count("[redacted]") == 1
+    assert secret not in sent and all(secret not in value for value in writes)
+    saved = store.checkpoint(session.session_id)["history"]
+    assert saved[:2] == history and len(saved) == 4
+    assert saved[2]["content"] == "[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_release_after_input_failure_keeps_claim() -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.fail_checkpoint = True
+    model = ScriptedModel()
+    secret = "synthetic-private-input"
+
+    def reject(prior: Any, new: Any) -> Any:
+        raise ValueError(new[0]["content"])
+
+    config = RunConfig(tracing_disabled=True, session_input_callback=reject)
+    with pytest.raises(ResumableSessionError) as failure:
+        await Runner.run(
+            Agent(name="assistant", model=model), secret, session=session, run_config=config
+        )
+    assert failure.value.reason == "unavailable"
+    _assert_secret_absent_from_agents_traceback(failure.value, secret)
+    assert not model.calls
+    assert secret not in store.records[session.session_id]
+    assert store.checkpoint(session.session_id)["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -756,7 +830,7 @@ async def test_prepared_approval_survives_durable_restore(streamed: bool, approv
     assert json.loads(paused.interruptions[0].arguments) == {"text": "reviewed text"}
     checkpoint = store.checkpoint(session.session_id)
     snapshot = json.loads(checkpoint["run_state"])
-    assert snapshot["$schemaVersion"] == "1.23"
+    assert snapshot["$schemaVersion"] == CURRENT_SCHEMA_VERSION
     assert snapshot["requires_resumable_session"] is True
 
     restored = await ResumableSession.resume(store, session.session_id)
