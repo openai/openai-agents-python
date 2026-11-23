@@ -842,6 +842,30 @@ class TestUnixLocalPersistWorkspaceRestorable:
             assert members["outside"].linkname == str(tmp_path / "elsewhere.txt")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_name", ["", "nested"])
+    async def test_directory_rebase_does_not_enable_relative_link_escape(
+        self, tmp_path: Path, target_name: str
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        (workspace / "nested").mkdir(parents=True)
+        target = workspace / target_name
+        (workspace / "alias").symlink_to(target)
+        (workspace / "escape").symlink_to("alias/../outside.txt")
+
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+
+        restored = tmp_path / "restored"
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await _RecordingUnixLocalSession(restored).hydrate_workspace(blob)
+        assert not (restored / "alias").is_symlink()
+        assert not (restored / "escape").is_symlink()
+        blob.seek(0)
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as archive:
+            members = {member.name.removeprefix("./"): member for member in archive.getmembers()}
+            assert members["alias"].linkname == str(target)
+            assert members["escape"].linkname == "alias/../outside.txt"
+
+    @pytest.mark.asyncio
     async def test_rebased_symlink_keeps_parent_steps_after_symlink_components(
         self,
         tmp_path: Path,
@@ -889,7 +913,8 @@ class TestUnixLocalPersistWorkspaceRestorable:
         (workspace / "loop").symlink_to("loop")
         (workspace / "via_loop").symlink_to(workspace / "loop" / ".." / ".." / "etc")
         (workspace / "b").symlink_to("a/link")
-        (workspace / "a" / "fine").symlink_to(workspace / "b" / "a")
+        (workspace / "a" / "data").write_text("inside", encoding="utf-8")
+        (workspace / "a" / "fine").symlink_to(workspace / "b" / "a" / "data")
 
         blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
 
@@ -898,8 +923,8 @@ class TestUnixLocalPersistWorkspaceRestorable:
             assert members["victim"].linkname == str(workspace / "a" / "link" / ".." / "tmp")
             assert members["via_outside"].linkname == str(workspace / "outside" / "workspace" / "a")
             assert members["via_loop"].linkname == str(workspace / "loop" / ".." / ".." / "etc")
-            # `..` after `b -> a/link -> ..` lands on the root, so `b/a` is provably inside.
-            assert members["a/fine"].linkname == "../b/a"
+            # `b -> a/link -> ..` lands on the root, so `b/a/data` names the archived file.
+            assert members["a/fine"].linkname == "../b/a/data"
 
     @pytest.mark.asyncio
     async def test_rebased_symlink_through_components_the_snapshot_does_not_create_stays_absolute(

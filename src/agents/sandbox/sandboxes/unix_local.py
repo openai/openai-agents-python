@@ -147,8 +147,9 @@ def _symlink_target_stays_under(
     exceeding the hop budget.
 
     Every other component must be established by the snapshot itself: it has to exist in
-    the archive and be a directory unless it is the last one, which must be a regular file
-    or directory. ``hydrate_workspace`` extracts
+    the archive and be a directory unless it is the last one, which must be a regular
+    file. Directory and root targets stay absolute because another relative link can
+    traverse them before a parent step. ``hydrate_workspace`` extracts
     into an existing root, so a component the snapshot does not create may already be a
     symlink in the destination and send the restored link elsewhere; only snapshot-owned
     components are protected by the extractor's destination checks. A target that cannot
@@ -184,7 +185,7 @@ def _symlink_target_stays_under(
         elif not (candidate.isdir() or candidate.isreg()):
             return False
         resolved.append(part)
-    return True
+    return bool(resolved) and members["/".join(resolved)].isreg()
 
 
 def _rebase_symlink_target(linkname: str, *, link_name: str, roots: tuple[Path, ...]) -> str:
