@@ -603,7 +603,9 @@ class RunConfig:
     A protected session append reads the available history to check for text split across
     turns. This adds a read per append. Serialize writers to the same session.
     Automatic compaction skips a replacement if the retained prefix is unavailable.
-    With server-managed history, only items available to this worker can be checked.
+    The Runner rejects caller-supplied ``conversation_id`` and ``previous_response_id``
+    because it cannot inspect earlier messages. Use a session or replay the history.
+    Automatic response chaining can start in a protected run and resume from its state.
 
     Protected runs withhold raw stream events, mute the ``openai.agents`` and
     ``openai.agents.tracing`` loggers and limit automatic traces to metadata, even when

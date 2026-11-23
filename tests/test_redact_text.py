@@ -261,12 +261,12 @@ async def test_hosted_approval_never_shows_different_arguments_from_the_server(s
     with pytest.raises(UserError, match="redact_text"):
         if streamed:
             result = Runner.run_streamed(
-                agent, "go", run_config=config, previous_response_id="prior"
+                agent, "go", run_config=config, auto_previous_response_id=True
             )
             async for event in result.stream_events():
                 assert event.type == "agent_updated_stream_event"
         else:
-            await Runner.run(agent, "go", run_config=config, previous_response_id="prior")
+            await Runner.run(agent, "go", run_config=config, auto_previous_response_id=True)
     assert not approvals
     assert len(model.calls) == 1
 
@@ -644,7 +644,7 @@ async def test_split_structured_text_never_reaches_model_session_or_events(strea
     [
         (source, history)
         for source in ("model", "tool", "resume", "mixed", "user", "arguments")
-        for history in ("session", "conversation_id", "previous_response_id")
+        for history in ("session", "auto_previous_response_id", "local")
     ]
     + [("next_prompt", "session")],
 )
@@ -687,7 +687,7 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
     model = ScriptedModel(script)
     agent = Agent(name="worker", model=model, tools=[lookup])
     session = SQLiteSession("test") if history == "session" else None
-    options = {history: session or "prior"}
+    options = {} if history == "local" else {history: session or True}
     config = RunConfig(redact_text=scrub)
     published = []
 
@@ -720,6 +720,49 @@ async def test_later_turn_cannot_complete_secret_in_history_or_events(streamed, 
     finally:
         if session is not None:
             session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("key", ["conversation_id", "previous_response_id"])
+async def test_private_continuation_rejects_unavailable_history(streamed, restored, key):
+    from agents import RunState
+
+    executions = []
+
+    @tool(needs_approval=True)
+    def lookup() -> str:
+        executions.append(True)
+        return "example"
+
+    first = (
+        [function_call("lookup", {}, call_id="one")]
+        if restored
+        else [assistant_message("private-")]
+    )
+    model = ScriptedModel([first, [assistant_message("example")]])
+    agent = Agent(name="worker", model=model, tools=[lookup])
+    options = {key: "remote-id"}
+    result = await Runner.run(agent, "go", **options)
+    value: str | RunState = "continue"
+    if restored:
+        value = await RunState.from_json(agent, result.to_state().to_json())
+        value.approve(value.get_interruptions()[0])
+        options = {}
+    elif key == "previous_response_id":
+        options[key] = result.last_response_id
+    config = RunConfig(redact_text=scrub)
+    with pytest.raises(UserError, match="local history"):
+        if streamed:
+            async for _ in Runner.run_streamed(
+                agent, value, run_config=config, **options
+            ).stream_events():
+                pytest.fail("Continuation must reject before publishing events.")
+        else:
+            await Runner.run(agent, value, run_config=config, **options)
+    assert not executions
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
