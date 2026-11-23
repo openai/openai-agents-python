@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
+from copy import deepcopy
 from dataclasses import fields
 from functools import partial
 from importlib import import_module
@@ -573,10 +574,8 @@ class _CodexModel(Model):
                             NativeTool(name),
                             request["call_id"],
                             server,
-                            request["arguments"],
+                            deepcopy(request["arguments"]),
                         )
-                        if native_hooks is not None:
-                            native_hooks.confirm_mcp_result(mcp_call.call_id, mcp_call.arguments)
                         with hook_payload_diagnostics(
                             "Native MCP result transform failed or returned an invalid replacement "
                             "(limit 1 MiB)."
@@ -586,7 +585,7 @@ class _CodexModel(Model):
                                 "native_mcp_result_transforms",
                                 name,
                             )
-                            encoded.respond(
+                            hook_name = encoded.respond(
                                 json.dumps(
                                     redact_payload(replacement),
                                     allow_nan=False,
@@ -594,6 +593,8 @@ class _CodexModel(Model):
                                     separators=(",", ":"),
                                 )
                             )
+                            if native_hooks is not None:
+                                native_hooks.confirm_mcp_result(request, hook_name)
                     finally:
                         encoded.discard()
                     continue

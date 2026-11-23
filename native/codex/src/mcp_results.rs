@@ -69,11 +69,12 @@ pub struct PendingResult {
     #[pyo3(get)]
     request: String,
     reply: Option<oneshot::Sender<CallToolResult>>,
+    hook_name: Option<String>,
 }
 
 #[pymethods]
 impl PendingResult {
-    fn respond(&mut self, encoded: &str) -> PyResult<()> {
+    fn respond(&mut self, encoded: &str) -> PyResult<Option<String>> {
         let invalid = || PyValueError::new_err("Invalid native MCP result replacement.");
         if encoded.len() > 1024 * 1024 {
             return Err(PyValueError::new_err(
@@ -93,13 +94,15 @@ impl PendingResult {
         // Validate MCP blocks, but retain their extension fields in Core's JSON representation.
         let _: rmcp::model::CallToolResult =
             serde_json::from_str(encoded).map_err(|_| invalid())?;
-        let result = serde_json::from_value(value).map_err(|_| invalid())?;
+        let result: CallToolResult = serde_json::from_value(value).map_err(|_| invalid())?;
+        let success = result.is_error != Some(true);
         let expired = || super::py_error("Native MCP result request expired.");
         self.reply
             .take()
             .ok_or_else(expired)?
             .send(result)
-            .map_err(|_| expired())
+            .map_err(|_| expired())?;
+        Ok(self.hook_name.take().filter(|_| success))
     }
 
     fn discard(&mut self) {
@@ -135,6 +138,20 @@ impl ToolLifecycleContributor for Transform {
                 },
             );
             let failed = original.is_error == Some(true);
+            // Match McpHandler's PostToolUse name using Core's resolved callable parts.
+            // Peer and replacement errors skip PostToolUse.
+            let hook_name = (!failed).then(|| {
+                let name = format!(
+                    "{}__{}",
+                    tool.callable_namespace.trim_end_matches('_'),
+                    tool.callable_name.trim_start_matches('_')
+                );
+                if name.starts_with("mcp__") {
+                    name
+                } else {
+                    format!("mcp__{name}")
+                }
+            });
             let request = json!({
                 "turn_id": input.turn_id, "call_id": input.call_id,
                 "server": tool.server_name, "name": tool.tool.name,
@@ -147,6 +164,7 @@ impl ToolLifecycleContributor for Transform {
                 .send(PendingResult {
                     request,
                     reply: Some(reply),
+                    hook_name,
                 })
                 .is_ok()
                 && let Ok(mut replacement) = result.await

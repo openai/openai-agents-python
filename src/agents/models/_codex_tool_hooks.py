@@ -81,7 +81,7 @@ class CodexToolHooks:
         self.registered: set[tuple[str, int]] = set()
         self.error: BaseException | None = None
         self.prepared_inputs: dict[str, dict[str, Any] | None] = {}
-        self.transformed_mcp_calls: set[str] = set()
+        self.transformed_mcp_calls: list[tuple[str, str, str, dict[str, Any]]] = []
         self.prepared_outputs: dict[str, str] = {}
         self.required = required
         self._proposal: tuple[str, str, str] | None = None
@@ -189,6 +189,8 @@ class CodexToolHooks:
             }
             if event == "PostToolUse":
                 inputs["result"] = "${tool_response}"
+                if self.settings and self.settings.native_mcp_result_transforms:
+                    inputs["turn_id"] = "${turn_id}"
             handlers[event] = {
                 "hooks": [
                     {
@@ -298,7 +300,7 @@ class CodexToolHooks:
         if (
             settings
             and settings.prepare_tool_output is not None
-            and data["call_id"] not in self.transformed_mcp_calls
+            and not self._consume_mcp_edit(data)
         ):
             prepared = await _await_hook(
                 partial(settings.prepare_tool_output, call, deepcopy(original)),
@@ -327,11 +329,28 @@ class CodexToolHooks:
             return {}
         return decision
 
-    def confirm_mcp_result(self, call_id: str, arguments: dict[str, Any]) -> None:
-        self.transformed_mcp_calls.add(call_id)
+    def confirm_mcp_result(self, request: dict[str, Any], hook_name: str | None) -> None:
+        call_id, arguments = request["call_id"], request["arguments"]
         # Core skips PostToolUse on failure. The result boundary already has effective input.
         if call_id in self.prepared_inputs:
-            self.prepared_inputs[call_id] = deepcopy(arguments)
+            self.prepared_inputs[call_id] = arguments
+        if (
+            hook_name is not None
+            and self.settings
+            and self.settings.prepare_tool_output is not None
+        ):
+            self.transformed_mcp_calls.append((request["turn_id"], call_id, hook_name, arguments))
+
+    def _consume_mcp_edit(self, data: dict[str, Any]) -> bool:
+        for index, (turn, call_id, name, arguments) in enumerate(self.transformed_mcp_calls):
+            if (turn, call_id, name) == (
+                data["turn_id"],
+                data["call_id"],
+                data["name"],
+            ) and _same_json(arguments, data["arguments"]):
+                del self.transformed_mcp_calls[index]
+                return True
+        return False
 
     def prepare_history_item(self, item: Any) -> None:
         """Keep persisted native history on the payloads approved by this attempt's hooks."""
