@@ -56,8 +56,12 @@ def bind_text_transform(
                 if binding is None:
                     continue
                 server = tool._mcp_server_ref() if tool._mcp_server_ref else None
-                if server is not None and server is not target[0] and server.name != target[0].name:
-                    continue
+                if server is not target[0]:
+                    from ..mcp._logging import get_mcp_server_log_name
+
+                    # Use the same credential-free identity as discovery and restore.
+                    if binding[0] != get_mcp_server_log_name(target[0].name):
+                        continue
                 if target[1] != binding[1]:
                     from ..mcp.util import MCPUtil
 

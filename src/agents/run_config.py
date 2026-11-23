@@ -222,7 +222,9 @@ class ToolExecutionConfig:
     If another local function has the same dispatch key (including namespace), or
     another MCP server has the same name and raw tool name, the Runner raises
     `UserError` before invoking it unless it has its own exact registration.
-    This applies across agents. For MCP, a selector matching the exposed name
+    This applies across agents. The SDK compares URL-based server names without
+    credentials, query strings or fragments. Register the replacement server after
+    reconnecting. For MCP, a selector matching the exposed name
     or an SDK-normalized or server-prefixed name requires an exact raw-name registration. For
     example, register `read.report` even if the model sees `mcp_Reports__read_report`.
     If a different raw tool is named `read_report`, register both to call both.

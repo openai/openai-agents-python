@@ -1091,3 +1091,46 @@ async def test_mcp_raw_names_win_over_alias_collisions():
         assert RAW not in repr(model.calls[-1].input)
         assert "edited " + name in repr(result.to_input_list())
     assert peer.tool_calls == list(names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("transport", ["http", "sse"])
+@pytest.mark.parametrize("selector", ["read.report", "read_report"])
+async def test_rotated_mcp_url_requires_current_server(streamed, transport, selector, monkeypatch):
+    from agents.mcp import MCPServerSse, MCPServerStreamableHttp
+
+    server_cls = MCPServerSse if transport == "sse" else MCPServerStreamableHttp
+    previous, current = (
+        server_cls(params={"url": f"https://user:{rev}@example.invalid/tools?q={rev}#{rev}"})
+        for rev in ("old", "new")
+    )
+    source = Source()
+    monkeypatch.setattr(current, "list_tools", source.list_tools)
+    monkeypatch.setattr(current, "call_tool", source.call_tool)
+
+    async def edit(call, texts):
+        assert call.mcp_target == (current, "read.report")
+        return tuple(SAFE for _ in texts)
+
+    stale = ((previous, selector), edit)
+    model = model_for("read.report")
+    agent = Agent(name="reports", model=model, mcp_servers=[current])
+
+    async def run(entries):
+        settings = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=entries))
+        if streamed:
+            stream = Runner.run_streamed(agent, "go", run_config=settings)
+            async for event in stream.stream_events():
+                assert RAW not in repr(event)
+            return stream
+        return await Runner.run(agent, "go", run_config=settings)
+
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await run([stale])
+    assert not source.tool_calls and len(model.calls) == 1
+    agent.model = model = model_for("read.report")
+    result = await run([stale, ((current, "read.report"), edit)])
+    assert source.tool_calls == ["read.report"]
+    assert SAFE in repr(model.calls[-1].input)
+    assert RAW not in repr(model.calls[-1].input) + result.to_state().to_string()
