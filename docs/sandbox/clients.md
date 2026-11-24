@@ -118,19 +118,26 @@ Common mount options:
 
 Mounts are treated as ephemeral workspace entries. Snapshot and persistence flows detach or skip mounted paths instead of copying mounted remote storage into the saved workspace.
 
-Generic local/container strategies:
-
 <div class="sandbox-nowrap-first-column-table" markdown="1">
 
 | Strategy or pattern | Use it when | Notes |
 | --- | --- | --- |
-| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | The sandbox image can run `rclone`. | Supports S3, GCS, R2, Azure Blob, and Box. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
-| `InContainerMountStrategy(pattern=MountpointMountPattern(...))` | The image has `mount-s3` and you want Mountpoint-style S3 or S3-compatible access. | Supports `S3Mount` and `GCSMount`. |
-| `InContainerMountStrategy(pattern=FuseMountPattern(...))` | The image has `blobfuse2` and FUSE support. | Supports `AzureBlobMount`. |
-| `InContainerMountStrategy(pattern=S3FilesMountPattern(...))` | The image has `mount.s3files` and can reach an existing S3 Files mount target. | Supports `S3FilesMount`. |
-| `DockerVolumeMountStrategy(driver=...)` | Docker should attach a volume-driver-backed mount before the container starts. | Docker-only. S3, GCS, R2, Azure Blob, and Box can be mounted through `rclone`; S3 and GCS can also be mounted through `mountpoint`. |
+| `InContainerMountStrategy(pattern=RcloneMountPattern(...))` | A compatible non-Docker sandbox can run `rclone`. | Supports S3, GCS, R2, Azure Blob, and Box. `RcloneMountPattern` can run in `fuse` mode or `nfs` mode. |
+| `InContainerMountStrategy(pattern=MountpointMountPattern(...))` | A compatible non-Docker sandbox has `mount-s3` and needs Mountpoint-style S3 or S3-compatible access. | Supports `S3Mount` and `GCSMount`. |
+| `InContainerMountStrategy(pattern=FuseMountPattern(...))` | A compatible non-Docker sandbox has `blobfuse2` and FUSE support. | Supports `AzureBlobMount`. |
+| `InContainerMountStrategy(pattern=S3FilesMountPattern(...))` | A compatible non-Docker sandbox has `mount.s3files` and can reach an existing S3 Files mount target. | Supports `S3FilesMount`. |
+| `DockerVolumeMountStrategy(driver=...)` | `DockerSandboxClient` should attach a volume-driver-backed mount before the container starts. | Docker is the only built-in sandbox backend that supports this strategy. The `rclone` driver supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. The `mountpoint` driver supports `S3Mount` and `GCSMount`. |
 
 </div>
+
+### Upgrade Docker storage mounts
+
+If you used `InContainerMountStrategy` with Docker in v0.25.0, update your application's mount configuration before creating the next session. `DockerSandboxClient` rejects this strategy during both creation and resume, including for read-only mounts. When the SDK resumes a session, it uses the mount entries from the saved sandbox state. To change the mount strategy, create a fresh session with the updated manifest.
+
+1. Update the application-owned manifest used by `SandboxRunConfig.manifest` or `SandboxAgent.default_manifest`. Choose the option that matches how Docker will access the storage.
+    - **Docker volume driver.** Replace the entry's `mount_strategy` with `DockerVolumeMountStrategy` and configure a compatible volume driver and its storage access for the Docker daemon. Preserve the entry's `mount_path` and `read_only` settings. Transfer storage settings from the old helper pattern to the corresponding mount entry fields or `DockerVolumeMountStrategy.driver_options`. For example, if you set a bucket prefix in `MountpointMountPattern.options`, carry that prefix over so the sandbox continues to see the same portion of the bucket.
+    - **Host mount.** For S3 Files or other application-managed storage, use a trusted host-path grant. Have your application or an administrator mount the storage on the machine running the Docker daemon before starting the sandbox. Remove the old mount entry and add a `SandboxPathGrant` to `Manifest.extra_path_grants` from trusted application configuration. Set `host_path` to the absolute path of the mount on the Docker host. Set `path` to an absolute POSIX path inside the container. The target must be outside the workspace root and distinct from each of the root's ancestor paths. For example, use `/mnt/data` for a workspace rooted at `/workspace`. Set `read_only=True` when the sandbox only needs read access. Update the agent's instructions and any application paths that refer to the previous mount target. See [Manifest path grants](guide.md#manifest) for details.
+2. Create a fresh session with the updated manifest. For direct client use, pass the manifest to `DockerSandboxClient.create()`. When using the runner, start a fresh run with the Docker client and leave out the previous `session`, `session_state`, and any `RunState` that contains the previous sandbox session state. To restore saved workspace files into the new container, use [a workspace snapshot](guide.md#start-from-a-snapshot). The updated manifest supplies the mounts and grants for the new session.
 
 ## Supported hosted platforms
 
@@ -176,7 +183,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 
 | Backend | Mount notes |
 | --- | --- |
-| Docker | Supports `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`, and `S3FilesMount` with local strategies such as `InContainerMountStrategy` and `DockerVolumeMountStrategy`. |
+| Docker | Uses `DockerVolumeMountStrategy` for supported storage entries. For storage mounted on the Docker host, use a [trusted host-path grant](#upgrade-docker-storage-mounts). |
 | `ModalSandboxClient` | Supports cloud bucket mounts by using `ModalCloudBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. You can use inline credentials or a named Modal Secret. |
 | `CloudflareSandboxClient` | Supports bucket mounts by using `CloudflareBucketMountStrategy` with `S3Mount`, `R2Mount`, and HMAC-authenticated `GCSMount`. |
 | `BlaxelSandboxClient` | Supports cloud bucket mounts by pairing `BlaxelCloudBucketMountStrategy` with an `S3Mount`, `R2Mount`, or `GCSMount` entry. Also supports persistent Blaxel Drives with `BlaxelDriveMount` and `BlaxelDriveMountStrategy`, both available from `agents.extensions.sandbox.blaxel`. |
@@ -189,7 +196,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 
 The mount tables describe which storage types each backend can execute. A check mark does not bypass the credential boundary for a mount helper that runs inside a model-controlled sandbox, and it does not mean that every strategy can operate without credentials. The Agents SDK accepts an in-container mount without an acknowledgement only when the selected helper can operate without protected authority. It rejects a mount that requires protected authority before starting the sandbox or mount helper unless trusted application code explicitly acknowledges the exposure for the exact mount path.
 
-Credentialless `rclone` mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. `FuseMountPattern` requires broad acknowledgement because `blobfuse2` discovers ambient Azure authority, even when no inline credential is configured. `S3FilesMountPattern` likewise requires broad acknowledgement because `mount.s3files` uses ambient IAM authority. These requirements also apply when Docker is the backend; the check marks below indicate that Docker can execute the mount after the applicable authority boundary is satisfied.
+For backends that support in-container mounts, credentialless `rclone` mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. `FuseMountPattern` requires broad acknowledgement because `blobfuse2` discovers ambient Azure authority, even when no inline credential is configured. `S3FilesMountPattern` likewise requires broad acknowledgement because `mount.s3files` uses ambient IAM authority.
 
 For a mount entry named `"data"`, retain the copied `Manifest` returned by the acknowledgement that matches the configured authority:
 
@@ -211,7 +218,7 @@ The table below summarizes which remote storage entries each backend can mount d
 
 | Backend | AWS S3 | Cloudflare R2 | GCS | Azure Blob Storage | Box | S3 Files |
 | --- | --- | --- | --- | --- | --- | --- |
-| Docker | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Docker | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `ModalSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `CloudflareSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
