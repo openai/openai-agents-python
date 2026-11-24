@@ -21,7 +21,7 @@ from ._public_agent import get_public_agent
 from ._run_state_agent_identity import _DecisionHandoff
 from .agent import Agent
 from .exceptions import _data_redacted_error_boundary, _mark_error_data_redacted
-from .handoffs import Handoff
+from .handoffs import Handoff, HandoffInputFilter
 from .run_context import RunContextWrapper
 from .usage import Usage, _response_usage_to_usage
 
@@ -394,12 +394,16 @@ def decision_handoff(
     tool_description: str = "Transfer to a specialist. Supply only evidence needed for routing.",
     is_available: Callable[[RunContextWrapper[_T], str], bool] | None = None,
     timeout: float = 30,
+    input_filter: HandoffInputFilter | None = None,
 ) -> Handoff[_T, Agent[_T]]:
     """Build a handoff for source.handoffs. Decisions chooses a label on a model request.
 
     Labels bind to concrete agents at construction. Removing or replacing a target
     revokes it. A synchronous is_available callback can further restrict each run.
     OpenAIDecisions requires 2 to 255 available labels to offer or invoke the handoff.
+    For a single fixed label, use `handoff(target)` or a custom provider.
+    Pass `input_filter` to filter the selected specialist's history. The provider
+    has already received the routing evidence when this filter runs.
     A custom provider may await decide() without access to the run context.
     Invoke the handoff outside an explicit decision_scope, which requires its owner.
     Restoring a specialist from serialized RunState checks its incoming selectors.
@@ -414,6 +418,11 @@ def decision_handoff(
     ):
         raise ValueError("Expected nonblank labels mapped to agents")
     roster = {label: (agent, agent.name) for label, agent in targets.items()}
+
+    if isinstance(provider, OpenAIDecisions) and len(roster) == 1:
+        raise ValueError(
+            "OpenAIDecisions requires at least two labels. Use handoff(target) for one."
+        )
 
     def admitted(ctx: RunContextWrapper[_T] | None, label: str) -> bool:
         agent, name = roster[label]
@@ -480,6 +489,7 @@ def decision_handoff(
         tool_description=tool_description,
         input_json_schema=_RoutingInput.model_json_schema(),
         on_invoke_handoff=invoke,
+        input_filter=input_filter,
         agent_name=tool_name,
         is_enabled=enabled,
     )

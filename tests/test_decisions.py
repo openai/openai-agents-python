@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 from unittest.mock import Mock
 
@@ -315,6 +316,50 @@ async def test_handoff_cannot_replace_an_external_decision_owner():
         with pytest.raises(RuntimeError, match="owner"):
             await run(source, False)
     assert not inner.requests
+
+
+def test_openai_single_target_suggests_ordinary_handoff():
+    source = source_agent()
+    with pytest.raises(ValueError, match=r"handoff\(target\)"):
+        decision_handoff(
+            source,
+            provider=OpenAIDecisions(Mock(spec=AsyncOpenAI), model="fixture"),
+            question="Which?",
+            targets={"blue": Agent(name="Blue")},
+        )
+    assert not source.handoffs
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("routed", [False, True])
+async def test_input_filter_changes_specialist_history_only(stream, routed):
+    def summary(data):
+        return replace(data, input_history="summary", input_items=())
+
+    model = ScriptedModel([[assistant_message("done")]])
+    target = Agent(name="Blue", model=model)
+    provider = Provider("blue")
+    if routed:
+        source = source_agent()
+        route = decision_handoff(
+            source,
+            provider=provider,
+            question="Which?",
+            targets={"blue": target},
+            input_filter=summary,
+        )
+    else:
+        route = handoff(target, input_filter=summary)
+        source = Agent(
+            name="Source",
+            model=ScriptedModel([[function_call(route.tool_name, {}, call_id="transfer")]]),
+        )
+    assert not source.handoffs
+    source.handoffs.append(route)
+    result = await run(source, stream)
+    assert result.last_agent is target
+    assert model.calls[0].input == [{"role": "user", "content": "summary"}]
+    assert [request.input for request in provider.requests] == (["evidence"] if routed else [])
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 255, 256])
