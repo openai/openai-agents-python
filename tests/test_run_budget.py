@@ -238,6 +238,43 @@ async def test_durable_approval_stop_preserves_effect_and_idle_budget(streamed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_budget_stop_checkpoints_staged_checklist_with_completed_tool(streamed):
+    from agents.memory.resumable_session import CodexChecklist, CodexChecklistStep
+    from agents.models._run_context import get_model_tool_hooks
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    checklist = CodexChecklist(
+        thread_id="thread",
+        turn_id="turn",
+        steps=(CodexChecklistStep(text="Record", status="in_progress"),),
+    )
+    effects = []
+
+    @tool
+    def record() -> str:
+        effects.append(1)
+        return "saved"
+
+    def respond(_):
+        # Simulate a staged update. RunBudget rejects native Codex sampling.
+        hooks = get_model_tool_hooks()
+        assert hooks is not None and hooks.resumable is not None
+        hooks.resumable.codex_checklist = checklist
+        return step(get_function_tool_call("record"))
+
+    model = ScriptedModel([ModelStep.respond(respond)])
+    agent = Agent(name="root", model=model, tools=[record])
+    with pytest.raises(RunBudgetError):
+        await run(agent, RunBudget(max_model_calls=1), streamed, session=session)
+    assert effects == [1] and len(model.calls) == 1
+    restored = await ResumableSession.resume(store, session.session_id)
+    assert store.checkpoint(session.session_id)["history"][-1]["output"] == "saved"
+    assert restored.codex_checklist == checklist
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 async def test_nested_tool_has_independent_budget_and_usage(streamed):
     child_model = ScriptedModel(
         [step(get_function_tool_call("unknown"), 50), step(get_text_message("child"), 50)]
