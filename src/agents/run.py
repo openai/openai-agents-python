@@ -724,7 +724,7 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
-        budget = _prepare_budget(run_config, starting_agent, run_state, session)
+        budget = _prepare_budget(run_config, starting_agent, run_state)
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -2798,7 +2798,7 @@ class AgentRunner:
         ):
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
             budget = _prepare_budget(
-                run_config, starting_agent, input if isinstance(input, RunState) else None, session
+                run_config, starting_agent, input if isinstance(input, RunState) else None
             )
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)

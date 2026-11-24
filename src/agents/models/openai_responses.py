@@ -755,8 +755,6 @@ class OpenAIResponsesModel(Model):
                 log_model_action_error(logger, message, e)
                 raise
 
-        if self._prompt_owns_model(prompt):
-            usage._reported_model = getattr(response, "model", None)
         return ModelResponse(
             output=response.output,
             usage=usage,

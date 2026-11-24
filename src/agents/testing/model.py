@@ -500,7 +500,7 @@ class ScriptedModel(Model):
             if inspect.isawaitable(result):
                 result = await result
             step = self._coerce_step(result, 0)
-        if step.usage == Usage():
+        if step.usage._total_missing and step.usage == Usage():
             usage = self._default_usage if self._default_usage is not None else Usage(requests=1)
         else:
             usage = step.usage

@@ -306,7 +306,6 @@ class RunContextWrapper(Generic[TContext]):
         copied.usage = copy.deepcopy(self.usage)
         if self._budget is not None:
             copied._budget = copy.copy(self._budget)
-            copied._budget.pending = copy.deepcopy(self._budget.pending)
         copied._approvals = copy.deepcopy(self._approvals)
         copied._tool_invocations = copy.deepcopy(self._tool_invocations)
         copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)

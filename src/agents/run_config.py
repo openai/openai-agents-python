@@ -673,7 +673,7 @@ class RunConfig:
     """
 
     budget: RunBudget | None = None
-    """Optional limits on root model admissions and observed response usage."""
+    """Optional limits on root model calls and observed tokens."""
 
     if TYPE_CHECKING:
 
