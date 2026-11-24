@@ -3926,6 +3926,10 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "module": "agents",
             "name": "OutputGuardrailBlockedMessageFormatter",
         },
+        {
+            "module": "agents",
+            "name": "ModelSelector",
+        },
     )
     type_aliases: dict[tuple[str, str], dict[str, Any]] = {
         (cast(str, entry["module"]), cast(str, entry["name"])): cast(
@@ -3980,6 +3984,31 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "members": [
                 {"identity": "builtins.NoneType", "kind": "type"},
                 {"identity": "builtins.str", "kind": "type"},
+            ],
+        },
+    }
+    selector_results = [
+        {"identity": "builtins.NoneType", "kind": "type"},
+        {"identity": "builtins.str", "kind": "type"},
+    ]
+    assert type_aliases[("agents", "ModelSelector")] == {
+        "kind": "callable",
+        "parameters": [
+            {
+                "arguments": [{"kind": "any"}],
+                "kind": "generic",
+                "origin": "agents.run_config.ModelSelectionData",
+            }
+        ],
+        "return": {
+            "kind": "union",
+            "members": [
+                {
+                    "arguments": [{"kind": "union", "members": selector_results}],
+                    "kind": "generic",
+                    "origin": "collections.abc.Awaitable",
+                },
+                *selector_results,
             ],
         },
     }

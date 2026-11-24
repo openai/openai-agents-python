@@ -116,6 +116,8 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    ModelSelectionData,
+    ModelSelector,
     NativeMCPResult,
     NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
@@ -501,6 +503,8 @@ __all__ = [
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunBudget",
     "RunBudgetError",
     "RunConfig",

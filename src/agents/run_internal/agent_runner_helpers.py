@@ -20,6 +20,7 @@ from ..exceptions import UserError
 from ..guardrail import InputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
+from ..models.interface import Model
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
@@ -75,6 +76,7 @@ __all__ = [
     "finalize_conversation_tracking",
     "get_unsent_tool_call_ids_for_interrupted_state",
     "input_guardrails_triggered",
+    "validate_output_guardrails_for_server_model",
     "validate_output_guardrails_with_server_managed_conversation",
     "validate_resumed_agent_tools",
     "validate_session_conversation_settings",
@@ -302,9 +304,18 @@ def validate_output_guardrails_with_server_managed_conversation(
     """Reject an output-guardrail run whose rejected history cannot be locally replaced."""
     if conversation_id is None and previous_response_id is None and not auto_previous_response_id:
         return
+    validate_output_guardrails_for_server_model(agent, run_config)
+
+
+def validate_output_guardrails_for_server_model(
+    agent: Agent[Any], run_config: RunConfig, model: Model | None = None
+) -> None:
+    """Check the configured model early and the actual model before each server-managed request."""
     if not agent.output_guardrails and not run_config.output_guardrails:
         return
-    if isinstance(get_model(agent, run_config), OpenAIChatCompletionsModel):
+    if model is None:
+        model = get_model(agent, run_config)
+    if isinstance(model, OpenAIChatCompletionsModel):
         # Chat Completions owns its released warn-and-ignore or strict rejection behavior.
         return
     raise UserError(

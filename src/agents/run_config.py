@@ -72,6 +72,26 @@ class ModelInputData:
     instructions: str | None
 
 
+@dataclass(frozen=True)
+class ModelSelectionData(Generic[TContext]):
+    """Information available when choosing the model for one Runner turn."""
+
+    agent_name: str
+    """The name of the current agent, including after a handoff."""
+
+    model_name: str | None
+    """The agent's configured name, or None for the provider default."""
+
+    turn_number: int
+    """The one-based Runner turn. Retries of a request do not start a new turn."""
+
+    context: TContext | None
+    """The application's context object for this run."""
+
+
+ModelSelector = Callable[[ModelSelectionData[Any]], MaybeAwaitable[str | None]]
+
+
 @dataclass
 class CallModelData(Generic[TContext]):
     """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
@@ -918,6 +938,17 @@ class RunConfig:
     budget: RunBudget | None = None
     """Optional limits on root model calls and observed tokens."""
 
+    model_selector: ModelSelector | None = None
+    """Choose a model by name before each new Runner request, before the input filter.
+
+    Return a name on the same provider route, or None to use the current agent's
+    configured model for this turn. The callback may be async. It runs once per
+    request, including after tools and handoffs. Retries reuse that choice.
+    RunConfig.model and agents with a Model instance bypass selection.
+    SandboxAgent requires a fixed model. With CodexProvider, selection applies
+    to the whole request, including any internal Codex calls.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -951,17 +982,20 @@ class RunConfig:
             ) = None,
             redact_text: Callable[[str], str] | None = None,
             budget: RunBudget | dict[str, Any] | None = None,
+            model_selector: ModelSelector | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
-        if self.redact_text is not None and (
-            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
-        ):
-            raise TypeError("redact_text must be a synchronous callable or None")
         if self.budget is not None:
             self.budget = coerce_dataclass_config(
                 self.budget, RunBudget, parameter_name="run_config.budget"
             )
+        if self.model_selector is not None and not callable(self.model_selector):
+            raise TypeError("model_selector must be callable or None")
+        if self.redact_text is not None and (
+            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
+        ):
+            raise TypeError("redact_text must be a synchronous callable or None")
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message
@@ -1050,6 +1084,8 @@ __all__ = [
     "OutputGuardrailBlockedMessageArgs",
     "OutputGuardrailBlockedMessageFormatter",
     "ReasoningItemIdPolicy",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunConfig",
     "RunOptions",
     "SandboxArchiveLimits",

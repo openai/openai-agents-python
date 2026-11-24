@@ -61,6 +61,8 @@ from .run_config import (
     CallModelInputFilter,
     MCPTextTransform,
     ModelInputData,
+    ModelSelectionData,
+    ModelSelector,
     NativeMCPResult,
     NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
@@ -216,6 +218,8 @@ DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 __all__ = [
     "AgentRunner",
     "Runner",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunConfig",
     "RunOptions",
     "RunState",

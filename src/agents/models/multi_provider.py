@@ -187,22 +187,21 @@ class MultiProvider(ModelProvider):
             )
         return cast(MultiProviderUnknownPrefixMode, mode)
 
-    def _get_fallback_provider(self, prefix: str | None) -> ModelProvider:
-        if prefix is None or prefix == "openai":
-            return self.openai_provider
-        elif prefix in self._fallback_providers:
+    def _get_fallback_provider(self, prefix: str) -> ModelProvider:
+        if prefix in self._fallback_providers:
             return self._fallback_providers[prefix]
         else:
             self._fallback_providers[prefix] = self._create_fallback_provider(prefix)
             return self._fallback_providers[prefix]
 
-    def _resolve_prefixed_model(
-        self,
-        *,
-        original_model_name: str,
-        prefix: str,
-        stripped_model_name: str | None,
-    ) -> tuple[ModelProvider, str | None]:
+    def _model_route(
+        self, original_model_name: str | None
+    ) -> tuple[ModelProvider | str, str | None]:
+        """Resolve routing without constructing an optional fallback provider."""
+        prefix, stripped_model_name = self._get_prefix_and_model_name(original_model_name)
+        if prefix is None:
+            return self.openai_provider, stripped_model_name
+
         # Explicit provider_map entries are the least surprising routing mechanism, so they always
         # win over the built-in OpenAI alias and unknown-prefix fallback behavior.
         if (
@@ -212,7 +211,7 @@ class MultiProvider(ModelProvider):
             return provider, stripped_model_name
 
         if prefix in {"litellm", "any-llm"}:
-            return self._get_fallback_provider(prefix), stripped_model_name
+            return prefix, stripped_model_name
 
         if prefix == "openai":
             if self._openai_prefix_mode == "alias":
@@ -223,6 +222,19 @@ class MultiProvider(ModelProvider):
             return self.openai_provider, original_model_name
 
         raise UserError(f"Unknown prefix: {prefix}")
+
+    def _validate_model_selection(self, configured: str | None, selected: str | None) -> None:
+        original, configured_name = self._model_route(configured)
+        target, selected_name = self._model_route(selected)
+        if target is original:
+            if isinstance(original, MultiProvider):
+                original._validate_model_selection(configured_name, selected_name)
+            return
+        if isinstance(original, str) and isinstance(target, str) and target == original:
+            return
+        raise UserError(
+            "model_selector cannot switch providers. Choose a model on the same provider."
+        )
 
     def get_model(self, model_name: str | None) -> Model:
         """Returns a Model based on the model name. The model name can have a prefix, ending with
@@ -235,20 +247,9 @@ class MultiProvider(ModelProvider):
         Returns:
             A Model.
         """
-        # Bare model names are always delegated directly to the OpenAI provider. That provider can
-        # still point at an OpenAI-compatible endpoint via ``base_url``.
-        if model_name is None:
-            return self.openai_provider.get_model(None)
-
-        prefix, stripped_model_name = self._get_prefix_and_model_name(model_name)
-        if prefix is None:
-            return self.openai_provider.get_model(stripped_model_name)
-
-        provider, resolved_model_name = self._resolve_prefixed_model(
-            original_model_name=model_name,
-            prefix=prefix,
-            stripped_model_name=stripped_model_name,
-        )
+        provider, resolved_model_name = self._model_route(model_name)
+        if isinstance(provider, str):
+            provider = self._get_fallback_provider(provider)
         return provider.get_model(resolved_model_name)
 
     async def aclose(self) -> None:
