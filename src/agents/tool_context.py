@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ._function_tool_arguments import PreparedFunctionArguments
     from .agent import AgentBase
     from .items import ToolApprovalItem, TResponseInputItem
+    from .memory.resumable_session import Plan
     from .run_config import RunConfig
     from .run_context import _ApprovalKey, _ApprovalRecord
 
@@ -121,6 +122,7 @@ class ToolContext(RunContextWrapper[TContext], _Decider):
             self.run_config = None
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._edit_text: Callable[[tuple[str, ...]], Awaitable[tuple[str, ...]]] | None = None
+        self._propose_plan: Callable[[Plan], None] | None = None
         self._custom_data: dict[str, Any] | None = None
         self._function_tool_arguments: PreparedFunctionArguments | None = None
 

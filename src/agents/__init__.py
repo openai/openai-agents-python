@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from openai import AsyncOpenAI
 
 from . import _config, sandbox
+from ._plan import update_plan
 from .agent import (
     Agent,
     AgentBase,
@@ -96,6 +97,7 @@ from .memory import (
     SessionSettings,
     is_openai_responses_compaction_aware_session,
 )
+from .memory.resumable_session import Plan, PlanStep
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
@@ -489,6 +491,9 @@ __all__ = [
     "ItemHelpers",
     "RunHooks",
     "AgentHooks",
+    "Plan",
+    "PlanStep",
+    "update_plan",
     "ResumableSession",
     "ResumableSessionError",
     "ResumableSessionStore",

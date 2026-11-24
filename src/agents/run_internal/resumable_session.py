@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..items import ToolApprovalItem, TResponseInputItem
 from ..memory.resumable_session import (
-    CodexChecklist,
+    Plan,
     ResumableSession,
     ResumableSessionError,
     _ResumableSessionBinding,
@@ -31,7 +31,7 @@ class ResumableRun:
     def __init__(self, source: ResumableSession | None) -> None:
         self.session_id = source.session_id if source is not None else ""
         self.session_settings: SessionSettings | None = None
-        self.codex_checklist: CodexChecklist | None = None
+        self.plan: Plan | None = None
         self._source = source
         self._items: list[TResponseInputItem] = []
 
@@ -61,13 +61,13 @@ class ResumableRun:
         if state is not None:
             state._resumable_binding = "detached"
         result._resumable_binding = await self._source._save_checkpoint(
-            self._items, state, codex_checklist=self.codex_checklist
+            self._items, state, codex_checklist=self.plan
         )
 
     async def finish_budget_stop(self) -> None:
         """Keep completed work when the next request was refused before dispatch."""
         assert self._source is not None
-        await self._source._save_checkpoint(self._items, None, codex_checklist=self.codex_checklist)
+        await self._source._save_checkpoint(self._items, None, codex_checklist=self.plan)
 
     def configure_stream(self, result: RunResultStreaming) -> None:
         queue = _CheckpointEventQueue()

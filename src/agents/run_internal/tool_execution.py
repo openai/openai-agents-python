@@ -24,6 +24,7 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
+from .._plan import is_plan_tool
 from .._redaction import hook_payload_diagnostics, redact_payload, require_clean
 from .._tool_identity import (
     FunctionToolLookupKey,
@@ -66,6 +67,7 @@ from ..items import (
     ToolCallOutputItem,
 )
 from ..logger import log_tool_action_error as _log_tool_action_error, logger
+from ..memory.resumable_session import Plan
 from ..model_settings import ModelSettings
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import RunContextWrapper
@@ -113,6 +115,7 @@ from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ._asyncio_progress import get_function_tool_task_progress_deadline
 from .agent_bindings import AgentBindings, bind_public_agent
+from .agent_tool_configuration import current_plan_session
 from .approvals import append_approval_error_output
 from .items import (
     REJECTION_MESSAGE,
@@ -2140,6 +2143,8 @@ class _FunctionToolBatchExecutor:
         record = self.context_wrapper._tool_invocations.get(tool_call.call_id)
         if record is not None and record.declaration is not None:
             await record.declaration.check(self.context_wrapper, self.config)
+        plan_session = current_plan_session() if is_plan_tool(func_tool) else None
+        pending_plan: list[Plan] = []
         bypass_output_schema = False
         try:
             with hook_payload_diagnostics(
@@ -2157,6 +2162,8 @@ class _FunctionToolBatchExecutor:
                     if tool_context._edit_text is not None
                     else _invoke_function_tool_with_metadata
                 )
+                if plan_session is not None:
+                    tool_context._propose_plan = pending_plan.append
                 invocation_result = await invoke(
                     function_tool=func_tool,
                     context=tool_context,
@@ -2196,6 +2203,9 @@ class _FunctionToolBatchExecutor:
                 )
             )
             real_result = result
+            pending_plan.clear()
+        finally:
+            tool_context._propose_plan = None
 
         nested_run_result = peek_agent_tool_run_result(
             task_state.tool_run.tool_call,
@@ -2287,6 +2297,13 @@ class _FunctionToolBatchExecutor:
         await run_tool_end_hooks(
             self.hooks, agent_hooks, tool_context, self.public_agent, func_tool, final_result
         )
+        if (
+            pending_plan
+            and not bypass_output_schema
+            and plan_session is not None
+            and current_plan_session() is plan_session
+        ):
+            plan_session.plan = pending_plan[0]
         return final_result
 
     async def _await_invoke_task(

@@ -701,7 +701,9 @@ class AgentRunner:
                     decisions = _DecisionRun(
                         starting_agent, run_config.tracing_disabled, kwargs.get("context")
                     )
-                    with agent_tool_configuration_run(configuration_agent):
+                    with agent_tool_configuration_run(
+                        configuration_agent, session if isinstance(session, ResumableRun) else None
+                    ):
                         async with decisions.bind():
                             result = await self._run_impl(starting_agent, input, **kwargs)
                         require_clean_final_output(
@@ -3118,7 +3120,9 @@ class AgentRunner:
                     if run_state is not None and run_state._current_agent is not None
                     else starting_agent
                 )
-                with agent_tool_configuration_run(configuration_agent):
+                with agent_tool_configuration_run(
+                    configuration_agent, session if isinstance(session, ResumableRun) else None
+                ):
                     await start_streaming(
                         starting_input=input_for_result,
                         streamed_result=streamed_result,

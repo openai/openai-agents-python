@@ -42,7 +42,7 @@ from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
-from ..memory.resumable_session import CodexChecklist, CodexChecklistStep
+from ..memory.resumable_session import Plan, PlanStep
 from ..memory.session import await_session_mutation as _join_close
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
@@ -289,7 +289,17 @@ def _pending_native_call(
 _CHILD_TOOL_CONFLICT = "Native children cannot use SDK tools, handoffs, or tool hooks."
 
 
-def _validate_static_children(bindings: ModelToolHooks) -> None:
+def _check_plan_tool(tools: list[Tool]) -> None:
+    from .._plan import is_plan_tool
+
+    if any(is_plan_tool(tool) for tool in tools):
+        raise UserError(
+            "Remove the SDK update_plan tool and enable tools.update_plan.enabled "
+            "in CodexProvider.config_overrides."
+        )
+
+
+def _validate_static_tools(bindings: ModelToolHooks) -> None:
     """Reject known conflicts before a fresh checkpoint claim, without discovery."""
     from ..agent import Agent
     from ..run_internal.tool_declarations import _covered
@@ -305,18 +315,21 @@ def _validate_static_children(bindings: ModelToolHooks) -> None:
         provider, name = config.model_provider, selected
     else:
         return
+    policy = config.tool_execution.prepare_tool_declaration if config.tool_execution else None
+    static_tools = [
+        t
+        for t in agent.tools
+        if not isinstance(t, FunctionTool)
+        or (t.is_enabled is True and (policy is None or not _covered(t)))
+    ]
     if provider._children is None:
+        _check_plan_tool(static_tools)
         return
     settings = agent.model_settings.resolve(config.model_settings)
     if settings.tool_choice == "required":
         raise UserError("Native children cannot require an SDK tool. Use tool_choice='auto'.")
-    policy = config.tool_execution.prepare_tool_declaration if config.tool_execution else None
     if (
-        any(
-            not isinstance(t, FunctionTool)
-            or (t.is_enabled is True and (policy is None or not _covered(t)))
-            for t in agent.tools
-        )
+        static_tools
         or any(isinstance(h, Agent) or h.is_enabled is True for h in agent.handoffs)
         or _uses_sdk_workspace([], bindings)
         or CodexToolHooks.for_run(bindings, set()) is not None
@@ -487,6 +500,7 @@ class _CodexModel(Model):
             raise UserError("CodexProvider does not support Responses API state or prompt IDs.")
         effort, summary = _settings(model_settings)
         history, turn_input = prepare_codex_history(input, tools)
+        _check_plan_tool(tools)
         dynamic_tools, identities = prepare_dynamic_tools(tools, handoffs)
         require_sdk_call = model_settings.tool_choice == "required"
         if require_sdk_call:
@@ -757,14 +771,12 @@ class _CodexModel(Model):
                     if checkpoint is not None and turn_id and event.get("id") == turn_id:
                         from .. import _redaction
 
-                        checklist = CodexChecklist(
+                        checklist = Plan(
                             thread_id=thread.thread_id,
                             turn_id=turn_id,
                             explanation=_redaction.redact_payload(message.get("explanation")),
                             steps=tuple(
-                                CodexChecklistStep(
-                                    **dict(item, step=_redaction.redact_payload(item["step"]))
-                                )
+                                PlanStep(**dict(item, step=_redaction.redact_payload(item["step"])))
                                 for item in message["plan"]
                             ),
                         )
@@ -1114,5 +1126,5 @@ class _CodexModel(Model):
             response=completed, sequence_number=sequence, type="response.completed"
         )
         if checkpoint is not None and checklist is not None:
-            checkpoint.codex_checklist = checklist
+            checkpoint.plan = checklist
         yield completed_event

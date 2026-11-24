@@ -12,6 +12,7 @@ from ..tool import Tool
 
 if TYPE_CHECKING:
     from ..agent import AgentBase
+    from .resumable_session import ResumableRun
 
 
 @dataclass(eq=False)
@@ -24,6 +25,7 @@ class _ToolResolution:
 
 @dataclass
 class _ToolConfigurationRun:
+    resumable: ResumableRun | None = field(default=None, repr=False)
     resolutions: dict[int, _ToolResolution] = field(default_factory=dict)
     closed: bool = False
 
@@ -57,10 +59,17 @@ def _raise_conflict() -> None:
     )
 
 
+def current_plan_session() -> ResumableRun | None:
+    owner = _current_run.get()
+    return owner.resumable if owner is not None and not owner.closed else None
+
+
 @contextmanager
-def agent_tool_configuration_run(agent: AgentBase[Any]) -> Iterator[None]:
+def agent_tool_configuration_run(
+    agent: AgentBase[Any], resumable: ResumableRun | None = None
+) -> Iterator[None]:
     """Own configuration checks across all turns without persisting runtime locks or state."""
-    owner = _ToolConfigurationRun()
+    owner = _ToolConfigurationRun(resumable=resumable)
     token = _current_run.set(owner)
     try:
         register_agent_tool_configuration(agent)
@@ -68,6 +77,7 @@ def agent_tool_configuration_run(agent: AgentBase[Any]) -> Iterator[None]:
     finally:
         with _resolution_lock:
             owner.closed = True
+            owner.resumable = None
             for agent_id, resolution in owner.resolutions.items():
                 active = _resolutions[agent_id]
                 # Preserve changes from failed/cancelled callbacks for surviving runs.

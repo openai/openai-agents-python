@@ -2266,13 +2266,21 @@ class PlanThread(FakeThread):
 
 
 def test_checklist_constructors_show_python_field_names():
-    from agents.memory.resumable_session import CodexChecklist, CodexChecklistStep
+    from agents.memory.resumable_session import Plan, PlanStep
 
-    step = CodexChecklistStep(text="Review", status="pending")
-    checklist = CodexChecklist(thread_id="thread", turn_id="turn", steps=(step,))
+    step = PlanStep(text="Review", status="pending")
+    checklist = Plan(thread_id="thread", turn_id="turn", steps=(step,))
     assert checklist.steps[0].text == "Review"
-    assert "text" in inspect.signature(CodexChecklistStep).parameters
-    assert "steps" in inspect.signature(CodexChecklist).parameters
+    assert step.model_dump() == {"text": "Review", "status": "pending"}
+    assert json.loads(checklist.model_dump_json())["steps"] == [step.model_dump()]
+    assert checklist.model_dump(by_alias=True) == checklist.model_dump()
+    for mode in ("validation", "serialization"):
+        schema = Plan.model_json_schema(mode=mode)
+        assert "steps" in schema["properties"]
+        assert "text" in schema["$defs"]["PlanStep"]["properties"]
+    assert "thread" not in repr(checklist) and "turn" not in repr(checklist)
+    assert "text" in inspect.signature(PlanStep).parameters
+    assert "steps" in inspect.signature(Plan).parameters
 
 
 @pytest.mark.parametrize("streamed", [False, True])
@@ -2285,7 +2293,7 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
     session = await ResumableSession.create(store)
     agent = Agent(name="Planner")
     cfg = config(tmp_path)
-    assert session.codex_checklist is None
+    assert session.plan is None
     clear = {"type": "plan_update", "plan": []}
     revision = {
         "type": "plan_update",
@@ -2307,7 +2315,7 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
 
     await turn([clear, revision, dict(clear, event_id=""), dict(clear, event_id="other")])
     session = await ResumableSession.resume(store, session.session_id)
-    saved = session.codex_checklist
+    saved = session.plan
     assert saved is not None
     assert (saved.thread_id, saved.turn_id, saved.explanation) == (
         "native_thread",
@@ -2321,7 +2329,8 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
     record = store.checkpoint(session.session_id)
     assert record["version"] == 3
     assert record["codex_checklist"]["plan"] == revision["plan"]
-    assert json.loads(saved.model_dump_json()) == record["codex_checklist"]
+    assert "tool_call_id" not in record["codex_checklist"]
+    assert type(saved).model_validate_json(json.dumps(record["codex_checklist"])) == saved
     assert type(saved).model_validate_json(saved.model_dump_json()) == saved
     assert "Review" not in repr(saved) and "Two passes" not in repr(saved)
     record["version"] = 1  # Earlier writers stored checklists without a distinct version.
@@ -2329,17 +2338,17 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
     session = await ResumableSession.resume(store, session.session_id)
     await turn([])
     assert store.checkpoint(session.session_id)["version"] == 3
-    assert session.codex_checklist == saved
+    assert session.plan == saved
     await turn([clear])
     assert store.checkpoint(session.session_id)["version"] == 3
-    cleared = session.codex_checklist
+    cleared = session.plan
     assert cleared is not None and cleared.steps == () and cleared.explanation is None
 
     store.fail_checkpoint = True
     with pytest.raises(ResumableSessionError):
         await turn([revision])
     with pytest.raises(ResumableSessionError) as error:
-        _ = session.codex_checklist
+        _ = session.plan
     assert error.value.reason == "active"
     assert store.checkpoint(session.session_id)["codex_checklist"]["plan"] == []
 
@@ -2369,14 +2378,14 @@ async def test_checklist_survives_approval_and_excludes_nested_updates(tmp_path,
     await Runner.run(manager, "Go", session=session, run_config=cfg)
     resumed = await ResumableSession.resume(store, session.session_id)
     assert resumed.is_paused
-    saved = resumed.codex_checklist
+    saved = resumed.plan
     assert saved is not None and saved.steps[0].text == "Consult"
     state = await resumed.load_state(manager)
     state.approve(state.get_interruptions()[0])
     queue.append(PlanThread(events=[{"type": "plan_update", "plan": []}]))
     result = await Runner.run(manager, state, run_config=cfg)
     assert result.final_output == "A Codex response"
-    assert resumed.codex_checklist == saved
+    assert resumed.plan == saved
 
     record = store.checkpoint(session.session_id)
     record["codex_checklist"]["plan"][0]["status"] = "blocked"
@@ -2417,7 +2426,7 @@ async def test_checklist_redacts_display_text_before_saving(tmp_path, threads, s
     assert marker not in store.records[session.session_id]
     assert store.checkpoint(session.session_id)["version"] == 4
     reopened = await ResumableSession.resume(store, session.session_id)
-    saved = reopened.codex_checklist
+    saved = reopened.plan
     assert saved is not None and saved.explanation == "[hidden]"
     assert [(s.text, s.status) for s in saved.steps] == [("Check [hidden]", "pending")]
 
@@ -2431,4 +2440,23 @@ async def test_checklist_redacts_display_text_before_saving(tmp_path, threads, s
     threads[0].append(PlanThread(events=[]))
     await Runner.run(agent, "Next", session=reopened, run_config=cfg)
     assert store.checkpoint(session.session_id)["version"] == 4
-    assert reopened.codex_checklist == saved
+    assert reopened.plan == saved
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("namespaced", [False, True])
+async def test_sdk_plan_tool_conflict_precedes_claim(tmp_path, streamed, namespaced):
+    from agents import ResumableSession, tool_namespace, update_plan
+    from tests.memory.test_resumable_session import MemoryStore, run_agent
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    tools = (
+        tool_namespace(name="group", description="Tools", tools=[update_plan])
+        if namespaced
+        else [update_plan]
+    )
+    agent = Agent(name="Planner", tools=[*tools])
+    with pytest.raises(UserError, match="tools.update_plan.enabled"):
+        await run_agent(agent, "plan", session, streamed, run_config=config(tmp_path))
+    assert (await ResumableSession.resume(store, session.session_id)).plan is None

@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     TypeAdapter,
     ValidationError,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -110,28 +111,40 @@ def _history_adapter() -> TypeAdapter[list[TResponseInputItem]]:
     return TypeAdapter(list[TResponseInputItem])
 
 
-class CodexChecklistStep(BaseModel):
-    """One entry in the native checklist, in the order supplied by Codex."""
+class PlanStep(BaseModel):
+    """One ordered step with a model-reported status."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, serialize_by_alias=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    text: str = Field(
-        validation_alias=AliasChoices("text", "step"), serialization_alias="step", repr=False
-    )
+    text: str = Field(validation_alias=AliasChoices("text", "step"), repr=False)
     status: Literal["pending", "in_progress", "completed"]
 
 
-class CodexChecklist(BaseModel):
-    """The most recent native checklist and the ephemeral thread and turn that issued it."""
+class Plan(BaseModel):
+    """A saved snapshot from one SDK tool call or one native thread and turn."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, serialize_by_alias=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    thread_id: str = Field(min_length=1)
-    turn_id: str = Field(min_length=1)
-    steps: tuple[CodexChecklistStep, ...] = Field(
-        validation_alias=AliasChoices("steps", "plan"), serialization_alias="plan"
+    thread_id: str | None = Field(
+        default=None, repr=False, min_length=1, exclude_if=lambda v: v is None
     )
+    turn_id: str | None = Field(
+        default=None, repr=False, min_length=1, exclude_if=lambda v: v is None
+    )
+    tool_call_id: str | None = Field(
+        default=None, repr=False, min_length=1, exclude_if=lambda v: v is None
+    )
+    steps: tuple[PlanStep, ...] = Field(validation_alias=AliasChoices("steps", "plan"))
     explanation: str | None = Field(default=None, repr=False)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Plan:
+        if self.tool_call_id is None:
+            if self.thread_id is None or self.turn_id is None:
+                raise ValueError("A native plan requires a thread and turn.")
+        elif self.thread_id is not None or self.turn_id is not None:
+            raise ValueError("A plan must have a single source.")
+        return self
 
 
 class _Checkpoint(BaseModel):
@@ -143,7 +156,16 @@ class _Checkpoint(BaseModel):
     status: Literal["ready", "paused", "active"]
     history: list[Any]
     run_state: str | None
-    codex_checklist: CodexChecklist | None = Field(default=None, exclude_if=lambda v: v is None)
+    codex_checklist: Plan | None = Field(default=None, exclude_if=lambda v: v is None)
+
+    @field_serializer("codex_checklist", when_used="unless-none")
+    def _save_plan(self, plan: Plan) -> dict[str, Any]:
+        # Keep the original checkpoint wire format independent of the Python API.
+        return {
+            **plan.model_dump(exclude={"steps", "explanation"}),
+            "plan": [{"step": step.text, "status": step.status} for step in plan.steps],
+            "explanation": plan.explanation,
+        }
 
     @field_validator("history")
     @classmethod
@@ -232,44 +254,44 @@ class ResumableSession:
         self._serialized = _serialized
 
     @property
-    def codex_checklist(self) -> CodexChecklist | None:
-        """Read the latest accepted native plan in this idle checkpoint without inference.
+    def plan(self) -> Plan | None:
+        """Read the last saved plan without starting a run.
 
-        Use `CodexProvider(config_overrides=["tools.update_plan.enabled=true"])`
-        as the model provider in `config`. Read the snapshot after `Runner.run`
-        returns or after you finish iterating over `stream_events()`, including
-        when the run pauses for approval. Bounded native delegation disables
-        `update_plan`. Save the session ID to reopen the same conversation.
+        Register `update_plan` on an ordinary agent. With CodexProvider, use
+        `config_overrides=["tools.update_plan.enabled=true"]` instead of
+        registering the SDK tool. Bounded native delegation disables this tool.
 
         ```python
+        from agents import Agent, ResumableSession, Runner, update_plan
+
+        agent = Agent(name="Planner", tools=[update_plan])
+        session = await ResumableSession.create(store)
         session_id = session.session_id
-        await Runner.run(agent, message, session=session, run_config=config)
+        await Runner.run(agent, "Plan a reading group", session=session)
 
         session = await ResumableSession.resume(store, session_id)
-        checklist = session.codex_checklist
-        if checklist is not None:
-            for step in checklist.steps:
+        plan = session.plan
+        if plan is not None:
+            for step in plan.steps:
                 print(step.text, step.status)
         ```
 
-        `None` means no saved checklist. Each accepted update replaces the
-        snapshot. An explicit clear leaves `steps == ()` and keeps the
-        `thread_id` and `turn_id` of the update that cleared the steps.
-        With no accepted update, even after invalid tool arguments, the
-        previous snapshot stays unchanged.
+        Read after the run or stream ends, including a pause for approval.
+        `None` means no accepted update. Each update replaces the entire plan.
+        For parallel calls, the last accepted update wins. Empty steps
+        clear the plan. No update leaves the previous snapshot intact.
+        The source is an SDK `tool_call_id` or a native `thread_id` and `turn_id`.
 
-        This property reads the loaded checkpoint. After another worker saves
-        a change, resume the session again to read that change.
-        Reading or loading an active checkpoint raises `ResumableSessionError`
-        with `reason == "active"`.
+        This property reads the loaded checkpoint. Resume again to see another
+        worker's changes. Active checkpoints raise `ResumableSessionError`.
+        An agent offering the SDK tool requires a ResumableSession before
+        its model request. History-only sessions cannot track plans. Child agents cannot write
+        their parent's plan. A plan grants no authority, does not verify
+        completed work and does not schedule another run.
 
-        RunConfig.redact_text scrubs saved step text and explanations. It does
-        not cover work inside Codex or rewrite an existing checkpoint.
-
-        History-only sessions cannot store this snapshot. Nested agent tools
-        do not update their parent session. Use the plan for display only. It
-        cannot authorize tools or resume a native thread. Older SDK versions
-        cannot open checkpoints that contain a checklist.
+        Treat text and explanations as private. `RunConfig.redact_text` covers
+        saved plans and SDK history, not native execution or existing records.
+        Older SDK versions may reject checkpoints with a plan.
         """
         if self._checkpoint.status == "active":
             raise ResumableSessionError("active")
@@ -404,9 +426,9 @@ class ResumableSession:
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
         if not self.is_paused:
-            from ..models.codex import _validate_static_children
+            from ..models.codex import _validate_static_tools
 
-            _validate_static_children(tool_hooks)
+            _validate_static_tools(tool_hooks)
         else:
             from ..run_internal.native_approvals import validate_native_restore_hooks
             from ..run_internal.tool_planning import (
@@ -439,7 +461,7 @@ class ResumableSession:
         history: list[TResponseInputItem],
         state: RunState[Any, Any] | None,
         *,
-        codex_checklist: CodexChecklist | None = None,
+        codex_checklist: Plan | None = None,
     ) -> _ResumableSessionBinding:
         if self._checkpoint.status != "active":
             raise ResumableSessionError("conflict")

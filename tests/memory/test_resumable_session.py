@@ -994,3 +994,198 @@ async def test_prepared_approval_survives_durable_restore(streamed: bool, approv
     assert json.loads(calls[0]["arguments"]) == {"text": "reviewed text"}
     assert outputs[0]["output"] == ("public receipt" if approved else "Rejected reviewed text")
     assert "private receipt" not in json.dumps(history)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_plan_replacement_redaction_and_clear(streamed):
+    from agents import Plan, PlanStep, update_plan
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    assert session.plan is None
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("update_plan", '{"steps":[]}', "first")],
+            [
+                get_function_tool_call(
+                    "update_plan",
+                    '{"steps":[{"text":"private","status":"pending"}],"explanation":"private"}',
+                    "second",
+                )
+            ],
+            [get_text_message("done")],
+            [get_text_message("no change")],
+            [get_function_tool_call("update_plan", '{"steps":[]}', "clear")],
+            [get_text_message("cleared")],
+        ]
+    )
+    config = RunConfig(
+        tracing_disabled=True, redact_text=lambda s: s.replace("private", "[hidden]")
+    )
+    agent = Agent(name="Planner", model=model, tools=[update_plan])
+    await run_agent(agent, "begin", session, streamed, run_config=config)
+    session = await ResumableSession.resume(store, session.session_id)
+    saved = session.plan
+    assert saved == Plan(
+        tool_call_id="second",
+        explanation="[hidden]",
+        steps=(PlanStep(text="[hidden]", status="pending"),),
+    )
+    assert "private" not in store.records[session.session_id]
+    assert "[hidden]" not in repr(saved)
+    assert store.checkpoint(session.session_id)["codex_checklist"] == {
+        "tool_call_id": "second",
+        "explanation": "[hidden]",
+        "plan": [{"step": "[hidden]", "status": "pending"}],
+    }
+    await run_agent(agent, "leave unchanged", session, streamed, run_config=config)
+    assert session.plan == saved
+    await run_agent(agent, "clear", session, streamed, run_config=config)
+    assert session.plan == Plan(steps=(), tool_call_id="clear")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_plan_only_changes_after_approval(streamed, approved):
+    from dataclasses import replace
+
+    from agents import Plan, update_plan
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("update_plan", '{"steps":[],"explanation":"private"}', "edit")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="Planner", model=model, tools=[replace(update_plan, needs_approval=True)])
+    config = RunConfig(
+        tracing_disabled=True, redact_text=lambda s: s.replace("private", "[hidden]")
+    )
+    await run_agent(agent, "begin", session, streamed, run_config=config)
+    assert "private" not in store.records[session.session_id]
+    assert "[hidden]" in store.checkpoint(session.session_id)["run_state"]
+    session = await ResumableSession.resume(store, session.session_id)
+    assert session.plan is None
+    state = await session.load_state(agent)
+    (pending,) = state.get_interruptions()
+    if approved:
+        state.approve(pending)
+    else:
+        state.reject(pending)
+    await run_agent(agent, state, None, streamed, run_config=config)
+    assert session.plan == (
+        Plan(steps=(), tool_call_id="edit", explanation="[hidden]") if approved else None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_plan_requires_own_resumable_session(streamed):
+    from agents import update_plan
+
+    model = ScriptedModel([[get_function_tool_call("update_plan", '{"steps":[]}', "child")]])
+    child = Agent(name="child", tools=[update_plan], model=model)
+    with pytest.raises(UserError, match="ResumableSession"):
+        await run_agent(child, "plan", None, streamed)
+    assert not model.calls
+
+    session = await ResumableSession.create(MemoryStore())
+    parent = Agent(
+        name="parent",
+        tools=[child.as_tool(tool_name="ask", tool_description="Ask")],
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("ask", '{"input":"plan"}', "ask")],
+                [get_text_message("done")],
+            ]
+        ),
+    )
+    await run_agent(parent, "delegate", session, streamed)
+    assert not model.calls and session.plan is None
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_tool_name_cannot_update_the_plan():
+    @tool
+    def update_plan() -> str:
+        return "Plan updated."
+
+    session = await ResumableSession.create(MemoryStore())
+    model = ScriptedModel([[get_function_tool_call("update_plan")], [get_text_message("done")]])
+    agent = Agent(name="Worker", model=model, tools=[update_plan])
+    await run_agent(agent, "begin", session, False)
+    assert session.plan is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("deserialize", [False, True])
+async def test_concurrent_plan_approvals_with_shared_context(streamed, deserialize):
+    from dataclasses import replace
+
+    from agents import Plan, RunContextWrapper, update_plan
+
+    store = MemoryStore()
+    shared = RunContextWrapper(context={})
+    paused = []
+    for name in ("first", "second"):
+        session = await ResumableSession.create(store)
+        agent = Agent(
+            name=name,
+            tools=[replace(update_plan, needs_approval=True)],
+            model=ScriptedModel(
+                [
+                    [get_function_tool_call("update_plan", '{"steps":[]}', name)],
+                    [get_text_message("done")],
+                ]
+            ),
+        )
+        await Runner.run(agent, "begin", context={}, session=session, run_config=CONFIG)
+        state = await session.load_state(
+            agent,
+            context_override=None if deserialize else shared,
+            context_deserializer=(lambda _: shared) if deserialize else None,
+        )
+        paused.append((agent, state, session))
+    for _, state, _ in paused:
+        state.approve(state.get_interruptions()[0])
+    results = await asyncio.gather(*(run_agent(a, s, None, streamed) for a, s, _ in paused))
+    for result, (agent, _, session) in zip(results, paused, strict=True):
+        assert result.context_wrapper.context is shared.context
+        saved = await ResumableSession.resume(store, session.session_id)
+        assert saved.plan == Plan(tool_call_id=agent.name, steps=())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_rejected_tool_output_preserves_previous_plan(streamed):
+    from dataclasses import replace
+
+    from agents import Plan, update_plan
+    from agents.tool_guardrails import ToolGuardrailFunctionOutput, tool_output_guardrail
+
+    @tool_output_guardrail
+    def reject(data):
+        return ToolGuardrailFunctionOutput.reject_content("Rejected")
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    for updater, name in [
+        (update_plan, "saved"),
+        (replace(update_plan, tool_output_guardrails=[reject]), "blocked"),
+    ]:
+        model = ScriptedModel(
+            [
+                [get_function_tool_call("update_plan", '{"steps":[]}', name)],
+                [get_text_message("done")],
+            ]
+        )
+        await run_agent(
+            Agent(name="Planner", model=model, tools=[updater]), "plan", session, streamed
+        )
+    reopened = await ResumableSession.resume(store, session.session_id)
+    assert reopened.plan == Plan(tool_call_id="saved", steps=())
