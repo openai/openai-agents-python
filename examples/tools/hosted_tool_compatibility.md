@@ -1,6 +1,26 @@
 # Hosted tool compatibility
 
-**Recommended setup** — a compatible model name in `Agent.model`, a hosted tool in `Agent.tools`, and direct OpenAI Responses. Explicit argument for `Runner.run` or `Runner.run_streamed` — `run_config=RunConfig(model_provider=OpenAIProvider(use_responses=True))`.
+With the SDK defaults, the Runner uses the Responses API for unprefixed OpenAI model names. Choose a compatible `model_name` and a configured `hosted_tool` from the examples below. In an async function, run the agent with your `prompt`.
+
+```python
+from agents import Agent, Runner
+
+agent = Agent(name="assistant", model=model_name, tools=[hosted_tool])
+result = await Runner.run(agent, prompt)
+```
+
+If your application defaults to Chat Completions, replace the last line with this per-run override. `aclosing` awaits `provider.aclose()` when the block exits.
+
+```python
+from contextlib import aclosing
+
+from agents import OpenAIProvider, RunConfig
+
+async with aclosing(OpenAIProvider(use_responses=True)) as provider:
+    result = await Runner.run(agent, prompt, run_config=RunConfig(model_provider=provider))
+```
+
+For streaming, start `Runner.run_streamed` and consume `result.stream_events()` before closing the provider.
 
 ## Python SDK support
 
