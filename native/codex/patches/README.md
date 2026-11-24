@@ -4,6 +4,7 @@ The SDK pins Codex in [Cargo.toml](../Cargo.toml). The wheel builder copies that
 
 - [Detailed tracing](01-operation-tracing.md) observes the final model request and the start of tool execution.
 - [Approval recovery](02-approval-recovery.md) lets a new worker resume a built-in command or edit after a human decision.
+- [Tool hook failures](03-required-tool-hooks.md) block execution when a synchronous pre-tool hook fails or times out.
 
 ## Rules for every patch
 

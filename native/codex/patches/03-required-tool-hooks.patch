@@ -1,0 +1,20 @@
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -233,9 +233,16 @@
+         additional_contexts,
+         updated_input,
+     } = hooks.run_pre_tool_use(request).await;
++    let failed = hook_events.iter().any(|event| {
++        event.run.execution_mode == HookExecutionMode::Sync
++            && event.run.status == HookRunStatus::Failed
++    });
+     emit_hook_completed_events(sess, turn_context, hook_events).await;
+     record_additional_contexts(sess, turn_context, additional_contexts).await;
+
++    if failed {
++        return PreToolUseHookResult::Blocked("PreToolUse hook failed.".to_owned());
++    }
+     if !should_block {
+         return PreToolUseHookResult::Continue { updated_input };
+     }
