@@ -77,6 +77,23 @@ print(
     assert payload["shutdown_handler_registered"] is False
 
 
+def test_run_without_mcp_servers_does_not_import_mcp() -> None:
+    payload = _run_python(
+        """
+import json
+import sys
+
+from agents import Agent, RunConfig, Runner
+from agents.testing import ScriptedModel, assistant_message
+
+agent = Agent(name="test", model=ScriptedModel([[assistant_message("done")]]))
+result = Runner.run_sync(agent, "hello", run_config=RunConfig(tracing_disabled=True))
+print(json.dumps({"answer": result.final_output, "loaded": "mcp" in sys.modules}))
+"""
+    )
+    assert payload == {"answer": "done", "loaded": False}
+
+
 def test_core_imports_respect_mcp_httpx_dependency() -> None:
     payload = _run_python(
         """

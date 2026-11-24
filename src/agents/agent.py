@@ -36,7 +36,6 @@ from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
 from .logger import log_model_and_tool_action_error, logger
-from .mcp import MCPUtil
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.default_models import (
     get_default_model_settings,
@@ -277,6 +276,11 @@ class AgentBase(Generic[TContext]):
             if include_server_in_tool_names
             else None
         )
+        if not self.mcp_servers:
+            return []
+
+        from .mcp import MCPUtil
+
         return await MCPUtil.get_all_function_tools(
             self.mcp_servers,
             convert_schemas_to_strict,
