@@ -255,7 +255,7 @@ async fn manager_actor(
                         settings.overrides.clone(),
                         settings.api_key.clone(),
                         settings.children.clone(),
-                        request.settings["model"].as_str(),
+                        &request.settings,
                     )
                     .await
                     {

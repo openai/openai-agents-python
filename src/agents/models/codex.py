@@ -78,7 +78,8 @@ class CodexProvider(ModelProvider):
     Supply the same SDK tool hooks on both workers. The user reviews the prepared
     input. Output preparation runs after execution.
 
-    To enable native children, run `codex debug models` with a CLI that matches
+    Without `children`, Core's defaults and local configuration govern delegation.
+    To bound native children, run `codex debug models` with a CLI that matches
     the Codex Core revision in the SDK wheel. Use the same workspace,
     credentials, provider and catalog settings. With `jq`, list candidate slugs:
 

@@ -4,6 +4,7 @@ import traceback
 from threading import Barrier, Event
 
 import pytest
+from openai.types.shared import Reasoning
 
 from agents import (
     Agent,
@@ -238,7 +239,10 @@ def catalog(tmp_path):
                         "slug": version,
                         "display_name": version,
                         "base_instructions": "Answer briefly.",
-                        "supported_reasoning_levels": [],
+                        "default_reasoning_level": "low",
+                        "supported_reasoning_levels": [
+                            {"effort": level, "description": level} for level in ("low", "high")
+                        ],
                         "shell_type": "unified_exec",
                         "visibility": "list",
                         "supported_in_api": True,
@@ -263,10 +267,14 @@ def catalog(tmp_path):
     ]
 
 
-async def ask(provider, model="v1", prompt="draft"):
+async def ask(provider, model="v1", prompt="draft", *, settings=None):
     result = await asyncio.wait_for(
         Runner.run(
-            Agent(name="manager", model=provider.get_model(model)),
+            Agent(
+                name="manager",
+                model=provider.get_model(model),
+                model_settings=settings or ModelSettings(),
+            ),
             prompt,
             run_config=RunConfig(tracing_disabled=True),
         ),
@@ -306,6 +314,7 @@ def outputs(request):
         ("v2", []),
         ("unknown", []),
         ("v1", ["agents.max_depth=2"]),
+        ("v1", ['agents.default_subagent_reasoning_effort="low"']),
         ("v1", ["tools.update_plan.enabled=true"]),
         ("v1", ["features.shell_tool=true"]),
         ("v1", ["features.multi_agent_v2=true"]),
@@ -336,7 +345,10 @@ async def test_unsupported_children_before_generation(
 
 @pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
-async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpoint, catalog):
+@pytest.mark.parametrize("spawn", [{}, {"model": "v1"}])
+async def test_native_children_at_depth_limit(
+    tmp_path, monkeypatch, model_endpoint, catalog, spawn
+):
     port, requests, items = model_endpoint
     roles = [ROLE]
     children = CodexChildren(roles=roles, max_delegation_attempts=2)
@@ -351,7 +363,7 @@ async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpo
                 return call("spawn_agent", "grand", message="GRAND")
             return final_message()
         if not receipts:
-            return call("spawn_agent", "spawn", message="LEAF", agent_type=ROLE.name)
+            return call("spawn_agent", "spawn", message="LEAF", agent_type=ROLE.name, **spawn)
         if "wait" not in receipts:
             target = json.loads(receipts["spawn"])["agent_id"]
             return call("wait_agent", "wait", targets=[target], timeout_ms=10000)
@@ -359,8 +371,9 @@ async def test_native_children_at_depth_limit(tmp_path, monkeypatch, model_endpo
 
     items.extend([step] * 5)
     try:
-        await ask(provider)
+        await ask(provider, settings=ModelSettings(reasoning=Reasoning(effort="high")))
         assert len(requests) == 5
+        assert all(r["model"] == "v1" and r["reasoning"]["effort"] == "high" for r in requests)
         assert ROLE.description in json.dumps(requests[0])
         leaf = next(r for r in requests if "grand" in outputs(r))
         assert json.dumps(ROLE.instructions)[1:-1] in json.dumps(leaf)
@@ -383,8 +396,12 @@ async def test_child_native_fork_reopen_and_model_selection(
         tmp_path,
         port,
         monkeypatch,
-        [*catalog, 'agents.ambient.description="ambient specialist"'],
-        children=CodexChildren(roles=(ROLE,), max_delegation_attempts=5),
+        [
+            *catalog,
+            'model_reasoning_effort="high"',
+            'agents.ambient.description="ambient specialist"',
+        ],
+        children=CodexChildren(roles=(ROLE,), max_delegation_attempts=6),
     )
     child_id = ""
 
@@ -396,12 +413,13 @@ async def test_child_native_fork_reopen_and_model_selection(
         if not receipts:
             return [
                 call("spawn_agent", "switch", message="LEAF", model="v2"),
+                call("spawn_agent", "effort", message="LEAF", reasoning_effort="low"),
                 call("spawn_agent", "ambient", message="LEAF", agent_type="ambient"),
             ]
         if "fork" not in receipts:
             return call("spawn_agent", "fork", message="LEAF", fork_context=True)
         if "spawn" not in receipts:
-            return call("spawn_agent", "spawn", message="LEAF", agent_type=ROLE.name)
+            return call("spawn_agent", "spawn", message="LEAF", agent_type=ROLE.name, model="v1")
         if "wait" not in receipts:
             child_id = json.loads(receipts["spawn"])["agent_id"]
             return call("wait_agent", "wait", targets=[child_id], timeout_ms=10000)
@@ -419,6 +437,9 @@ async def test_child_native_fork_reopen_and_model_selection(
         assert "ambient specialist" not in json.dumps(requests[0])
         assert "unknown" in parent["ambient"].lower()
         assert "Unknown model" in parent["switch"]
+        assert "not supported" in parent["effort"]
+        assert sum("LEAF" in user_input(r) for r in requests) == 1
+        assert all(r["model"] == "v1" and r["reasoning"]["effort"] == "high" for r in requests)
         assert "no thread" in parent["fork"]
         assert "done" in parent["wait"]
         assert len(requests) == 8

@@ -310,7 +310,7 @@ pub async fn build_services(
     overrides: Vec<String>,
     api_key: Option<String>,
     children: Option<Arc<crate::children::Children>>,
-    model: Option<&str>,
+    attempt: &Value,
 ) -> Result<CoreServices> {
     codex_utils_rustls_provider::ensure_rustls_crypto_provider();
     let cwd = PathBuf::from(cwd)
@@ -324,6 +324,11 @@ pub async fn build_services(
     let mut overrides = parse_overrides(overrides)?;
     if let Some(profile) = &children {
         overrides.splice(0..0, parse_overrides(profile.defaults())?);
+        // This manager lives for one invocation. Resolve its catalog with the
+        // same parent effort that prepare_config applies to the thread.
+        if let Some(effort) = attempt.get("reasoning_effort").filter(|v| !v.is_null()) {
+            override_value(&mut overrides, "model_reasoning_effort", effort.clone())?;
+        }
     }
     // These are the provider's defaults, preceding caller overrides.
     overrides.splice(
@@ -427,7 +432,9 @@ pub async fn build_services(
     let mut models = build_models_manager(&config, auth.clone());
     if let Some(profile) = &children {
         profile.validate(&config)?;
-        let name = model.ok_or(crate::children::MODEL_REQUIRED)?;
+        let name = attempt["model"]
+            .as_str()
+            .ok_or(crate::children::MODEL_REQUIRED)?;
         let catalog = models
             .raw_model_catalog(
                 codex_models_manager::manager::RefreshStrategy::OnlineIfUncached,
@@ -436,7 +443,7 @@ pub async fn build_services(
             .await;
         models = Arc::new(codex_models_manager::manager::StaticModelsManager::new(
             Some(auth.clone()),
-            crate::children::catalog(catalog, name)?,
+            crate::children::catalog(catalog, name, &config)?,
             codex_models_manager::ModelOrigin::ExplicitConfig,
         ));
     }
@@ -948,6 +955,9 @@ pub async fn prepare_config(services: &CoreServices, attempt: &Value) -> Result<
     }
     if let Some(profile) = &services.children {
         profile.validate(&config)?;
+        if config.model_reasoning_effort != services.config.model_reasoning_effort {
+            return Err("Codex policy changed the native child reasoning effort.".into());
+        }
         if config.model.as_deref() != attempt["model"].as_str() {
             return Err("Codex policy changed the native child model.".into());
         }

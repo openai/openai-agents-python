@@ -5,7 +5,7 @@ import json
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Generic
+from typing import TYPE_CHECKING, Annotated, Any, Generic, cast
 from uuid import uuid4
 
 from pydantic import (
@@ -39,6 +39,7 @@ from ._tool_invocation import (
     tool_output_identity,
 )
 from .exceptions import ModelBehaviorError, UserError
+from .run_budget import _BudgetState
 from .usage import Usage
 
 if TYPE_CHECKING:
@@ -218,6 +219,16 @@ class RunContextWrapper(Generic[TContext]):
         repr=False,
     )
 
+    # Runtime-only state. RunState owns its portable representation.
+    _budget = cast("_BudgetState | None", None)
+
+    def _for_new_root(self, budget: _BudgetState | None) -> RunContextWrapper[TContext]:
+        if budget is None and self._budget is None:
+            return self
+        root = copy.copy(self)
+        root._budget = budget
+        return root
+
     @model_validator(mode="wrap")
     @classmethod
     def _restore_converted_tool_state(
@@ -293,6 +304,8 @@ class RunContextWrapper(Generic[TContext]):
         # checkpoint's tokens land on every other checkpoint and on the result
         # the checkpoints came from.
         copied.usage = copy.deepcopy(self.usage)
+        if self._budget is not None:
+            copied._budget = copy.copy(self._budget)
         copied._approvals = copy.deepcopy(self._approvals)
         copied._tool_invocations = copy.deepcopy(self._tool_invocations)
         copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)

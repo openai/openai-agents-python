@@ -100,6 +100,7 @@ impl Children {
                 .any(|server| server.enabled)
             || !config.multi_agent_v2.disable_native_tools
             || config.agent_default_subagent_model.is_some()
+            || config.agent_default_subagent_reasoning_effort.is_some()
             || config.agent_max_threads != Some(self.max_delegation_attempts)
             || config.agent_max_depth != self.max_depth
             || config.experimental_request_user_input_enabled
@@ -146,8 +147,12 @@ pub(crate) const MODEL_REQUIRED: &str = "Native children require an exact V1 mod
 
 // Core selects collaboration and Code Mode from model metadata independently of
 // feature flags. Freeze one approved entry so neither refresh nor a child override
-// can select a different model. Only remove tool capabilities.
-pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsResponse> {
+// can select a different model.
+pub fn catalog(
+    mut catalog: ModelsResponse,
+    model: &str,
+    config: &Config,
+) -> NativeResult<ModelsResponse> {
     catalog.models.retain(|entry| entry.slug == model);
     let [entry] = catalog.models.as_mut_slice() else {
         return Err(MODEL_REQUIRED.into());
@@ -155,6 +160,14 @@ pub fn catalog(mut catalog: ModelsResponse, model: &str) -> NativeResult<ModelsR
     if entry.multi_agent_version != Some(MultiAgentVersion::V1) {
         return Err(MODEL_REQUIRED.into());
     }
+    // A spawn naming the same model resets effort to the catalog default.
+    // Keep Core's own override validation, with only the parent's effort eligible.
+    if let Some(effort) = &config.model_reasoning_effort {
+        entry.default_reasoning_level = Some(effort.clone());
+    }
+    entry
+        .supported_reasoning_levels
+        .retain(|level| Some(&level.effort) == entry.default_reasoning_level.as_ref());
     entry.tool_mode = Some(codex_protocol::openai_models::ToolMode::Direct);
     entry.supports_search_tool = false;
     entry.shell_type = ConfigShellToolType::Disabled;

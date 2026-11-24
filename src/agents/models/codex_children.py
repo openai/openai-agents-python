@@ -30,7 +30,7 @@ def _delegation_error(
 
 @dataclass(frozen=True)
 class CodexRole:
-    """A named specialist that inherits the native parent's model and permissions.
+    """A named specialist that inherits the parent's model, reasoning effort and permissions.
 
     Codex uses the name and description to select a role. Its instructions cannot
     restrict access. Choose permissions for the whole tree on the parent.
@@ -76,9 +76,10 @@ class CodexChildren:
     With `max_delegation_attempts=N`, the parent and all descendants share
     N attempts to call spawn_agent, resume_agent, send_input or unknown functions.
     Namespaced V1 wait_agent and close_agent share a separate 2N attempts.
-    For example, N=1 allows one spawn, one wait and one close. Failed, repeated
-    and timed-out calls count. Closing a child refunds nothing. Other call
-    forms are rejected.
+    This lets a parent wait and close after its last spawn and bounds repeated
+    polling. For example, N=1 allows one spawn, one wait and one close.
+    Failed, repeated and timed-out calls count. Closing a child refunds nothing.
+    Other call forms are rejected.
 
     Both allowances reset each native model invocation. At most
     `max_delegation_attempts` children can be open at once. `max_depth`
@@ -92,10 +93,12 @@ class CodexChildren:
     Use `CodexChildren(max_delegation_attempts=1)` for built-in roles only.
     The SDK copies any custom roles into a tuple. They supply instructions and
     supplement the built-in default, explorer and worker roles. The model
-    chooses whether to delegate. Children inherit the parent's model and
-    permissions. Closed threads have no saved history for reopening or
-    full-history forks. These limits grant no permissions and do not cap
-    model requests, retries, tokens or cost.
+    chooses whether to delegate. Children inherit the parent's model, reasoning
+    effort and permissions. Set the effort on the parent. Local subagent model
+    or effort defaults conflict with this profile. Core rejects a spawn that
+    requests a different model or effort. Closed threads have no saved history
+    for reopening or full-history forks. These limits grant no permissions
+    and do not cap model requests, retries, tokens or cost.
     """
 
     roles: tuple[CodexRole, ...] | list[CodexRole] = ()
