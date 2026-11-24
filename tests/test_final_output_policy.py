@@ -922,3 +922,50 @@ async def test_feedback_requires_input_based_compaction(streamed, mode):
         assert "Check units." not in str(await session.get_items())
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("route", ["direct", "to_policy", "from_policy", "custom"])
+async def test_agent_tool_empty_answer_uses_finishing_policy(streamed, route):
+    def decide(ctx, proposal):
+        return ContinueWithFeedback("Reconsider.") if proposal.output == "draft" else "finish"
+
+    async def extract(result):
+        assert result.final_output == ""
+        return "custom"
+
+    hooks = AgentHooks(final_output_policy=decide)
+    draft = [get_text_message("draft")]
+    empty = [get_text_message("")]
+    if route == "from_policy":
+        target = Agent(name="target", model=ScriptedModel([empty]))
+        worker = Agent(
+            name="worker",
+            model=ScriptedModel([draft, [get_handoff_tool_call(target)]]),
+            hooks=hooks,
+            handoffs=[target],
+        )
+    else:
+        worker = Agent(name="editor", model=ScriptedModel([draft, empty]), hooks=hooks)
+        if route == "to_policy":
+            worker = Agent(
+                name="worker",
+                model=ScriptedModel([[get_handoff_tool_call(worker)]]),
+                handoffs=[worker],
+            )
+
+    edit = worker.as_tool(
+        "edit",
+        "Edit",
+        on_stream=(lambda _: None) if streamed else None,
+        custom_output_extractor=extract if route == "custom" else None,
+    )
+    model = ScriptedModel(
+        [[get_function_tool_call("edit", '{"input":"Review"}', "c")], [get_text_message("done")]]
+    )
+    await Runner.run(Agent(name="manager", model=model, tools=[edit]), "Review")
+    expected = {"custom": "custom", "from_policy": "draft"}.get(route, "")
+    assert model.calls[1].input[-1] == {
+        "type": "function_call_output",
+        "call_id": "c",
+        "output": expected,
+    }

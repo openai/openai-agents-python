@@ -700,9 +700,10 @@ class Agent(AgentBase, Generic[TContext]):
             tool_description: The description of the tool, which should indicate what it does and
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the final output is used. When output guardrails ran, empty final
-                outputs are preserved; otherwise, empty final outputs fall back to the latest
-                nonempty message or tool output from the nested run. Nested run results expose
+                provided, the final output is used. Output guardrails preserve empty outputs.
+                If the finishing agent has a final output policy, empty text is preserved too.
+                Otherwise, empty outputs fall back to the latest nonempty message or tool
+                output from the nested run. Nested run results expose
                 `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
@@ -1149,6 +1150,12 @@ class Agent(AgentBase, Generic[TContext]):
             # Output guardrails validated the final output, not intermediate run items.
             if run_result.output_guardrail_results:
                 return run_result.final_output
+
+            # After a handoff, the finishing agent may have accepted empty text.
+            if run_result.final_output == "":
+                final_hooks = run_result.last_agent.hooks
+                if final_hooks is not None and final_hooks.final_output_policy is not None:
+                    return run_result.final_output
 
             for item in reversed(run_result.new_items):
                 if isinstance(item, MessageOutputItem):
