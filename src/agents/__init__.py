@@ -115,6 +115,8 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    ModelSelectionData,
+    ModelSelector,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -496,6 +498,8 @@ __all__ = [
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunBudget",
     "RunBudgetError",
     "RunConfig",

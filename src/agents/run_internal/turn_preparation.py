@@ -5,6 +5,7 @@ from typing import Any
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
+from .._redaction import require_clean
 from ..agent import Agent
 from ..agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from ..exceptions import UserError
@@ -14,7 +15,8 @@ from ..lifecycle import AgentHooksBase, RunHooks, RunHooksBase
 from ..model_settings import ModelSettings
 from ..models.default_models import get_default_model_settings
 from ..models.interface import Model
-from ..run_config import CallModelData, ModelInputData, RunConfig
+from ..models.multi_provider import MultiProvider
+from ..run_config import CallModelData, ModelInputData, ModelSelectionData, RunConfig
 from ..run_context import RunContextWrapper, TContext
 from ..tool import Tool
 from ..tracing import SpanError
@@ -27,6 +29,7 @@ __all__ = [
     "get_output_schema",
     "get_handoffs",
     "get_all_tools",
+    "select_model_name",
     "get_model",
     "get_model_settings",
 ]
@@ -133,22 +136,63 @@ def get_output_schema(agent: Agent[Any]) -> AgentOutputSchemaBase | None:
     return AgentOutputSchema(agent.output_type)
 
 
-def get_model(agent: Agent[Any], run_config: RunConfig) -> Model:
-    """Resolve the model instance for this run."""
-    if isinstance(run_config.model, Model):
-        return run_config.model
-    elif isinstance(run_config.model, str):
-        return run_config.model_provider.get_model(run_config.model)
-    elif isinstance(agent.model, Model):
-        return agent.model
+async def select_model_name(
+    agent: Agent[TContext],
+    run_config: RunConfig,
+    context_wrapper: RunContextWrapper[TContext],
+    turn_number: int,
+) -> str | None:
+    """Ask only for a new Runner request, never for a retry or approval recovery."""
+    selector = run_config.model_selector
+    if selector is None or run_config.model is not None or isinstance(agent.model, Model):
+        return None
+    choice = selector(
+        ModelSelectionData(
+            agent_name=agent.name,
+            model_name=agent.model,
+            turn_number=turn_number,
+            context=context_wrapper.context,
+        )
+    )
+    name = await choice if inspect.isawaitable(choice) else choice
+    if name is not None:
+        if not isinstance(name, str) or not name.strip():
+            raise UserError("model_selector must return a non-empty model name or None")
+        require_clean(name)
+    return name
 
-    return run_config.model_provider.get_model(agent.model)
+
+def _effective_model(
+    agent: Agent[Any], run_config: RunConfig, selected_model_name: str | None
+) -> Model | str | None:
+    """Use the same selection for provider lookup and implicit model settings."""
+    if run_config.model is not None:
+        return run_config.model
+    if isinstance(agent.model, Model) or selected_model_name is None:
+        return agent.model
+    return selected_model_name
+
+
+def get_model(
+    agent: Agent[Any], run_config: RunConfig, *, selected_model_name: str | None = None
+) -> Model:
+    """Resolve the model instance for this request."""
+    selection = _effective_model(agent, run_config, selected_model_name)
+    if isinstance(selection, Model):
+        return selection
+    provider = run_config.model_provider
+    if (
+        selected_model_name is not None
+        and isinstance(provider, MultiProvider)
+        and not isinstance(agent.model, Model)
+    ):
+        provider._validate_model_selection(agent.model, selected_model_name)
+    return provider.get_model(selection)
 
 
 def _model_settings_for_resolved_name(
-    agent: Agent[Any], run_config: RunConfig, model: Model
+    agent: Agent[Any], selection: Model | str | None, model: Model
 ) -> ModelSettings:
-    selection = run_config.model if run_config.model is not None else agent.model
     if getattr(model, "_sandbox_model_capabilities", {}).get("use_provider_defaults"):
         return model.get_default_model_settings() or ModelSettings()
     if isinstance(selection, Model):
@@ -168,6 +212,7 @@ def get_model_settings(
     run_config: RunConfig,
     model: Model,
     *,
+    selected_model_name: str | None = None,
     prepared_overrides: ModelSettings | None = None,
     prompt: ResponsePromptParam | None = None,
     has_tools: bool = False,
@@ -175,7 +220,8 @@ def get_model_settings(
     """Resolve model settings, keeping implicit defaults aligned with the resolved model name."""
     settings = agent.model_settings
     if agent._uses_implicit_model_settings():
-        settings = _model_settings_for_resolved_name(agent, run_config, model)
+        selection = _effective_model(agent, run_config, selected_model_name)
+        settings = _model_settings_for_resolved_name(agent, selection, model)
 
     implicit_fields = agent._implicit_request_fields()
     for override in (prepared_overrides, run_config.model_settings):
