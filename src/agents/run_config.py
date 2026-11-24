@@ -196,8 +196,10 @@ class MCPTextTransform:
 
         if not isinstance(self.server, MCPServer):
             raise ValueError("MCPTextTransform requires an MCP server object, not a server name.")
-        if not isinstance(self.tool_name, str) or not self.tool_name or not callable(self.edit):
-            raise ValueError("MCPTextTransform requires a raw tool name and an async editor.")
+        if not isinstance(self.tool_name, str) or not self.tool_name.strip():
+            raise ValueError("MCPTextTransform requires a nonblank raw tool name.")
+        if not callable(self.edit):
+            raise ValueError("MCPTextTransform requires an async editor.")
 
 
 @dataclass
@@ -354,6 +356,11 @@ class ToolExecutionConfig:
 
     prepare_tool_output: Callable[[ToolCallHookContext[Any], Any], Awaitable[Any]] | None = None
     """Experimental. Return the tool result to use after the tool has executed.
+
+    A selected result editor replaces this callback even when it returns its input unchanged.
+    For Runner MCP tools, custom data extraction happens before this callback. Runner text
+    editors do not cover native MCP tools, even when the names match. Enforce mandatory
+    rules in every matching editor or at the source.
 
     The runner awaits this callback before function-tool output guardrails and before building the
     tool-output item used for history and later model turns. `on_tool_end` observes the accepted

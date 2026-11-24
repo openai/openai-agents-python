@@ -448,6 +448,10 @@ def test_invalid_or_duplicate_registration():
     with pytest.raises(ValueError, match="MCP server object") as error:
         MCPTextTransform(server="example-server", tool_name="read.report", edit=edit)
     assert "example-server" not in str(error.value) and "read.report" not in str(error.value)
+    for name in ("", " \t "):
+        with pytest.raises(ValueError, match="nonblank raw tool name"):
+            MCPTextTransform(server=peer, tool_name=name, edit=edit)
+    assert MCPTextTransform(server=peer, tool_name=" lookup ", edit=edit).tool_name == " lookup "
     for malformed in [
         None,
         [None],
