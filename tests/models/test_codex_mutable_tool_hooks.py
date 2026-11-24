@@ -502,6 +502,14 @@ def test_native_mcp_result_registrations():
     pairs.clear()
     assert config.native_mcp_result_transforms == (pair,)
     assert ToolExecutionConfig().native_mcp_result_transforms == ()
+    server = MCPServerStdio(name="private-peer", params={"command": sys.executable})
+    wrong_route = ((server, "private-tool"), edit)
+    with pytest.raises(ValueError) as exc:
+        ToolExecutionConfig(native_mcp_result_transforms=[wrong_route])  # type: ignore[list-item]
+    assert str(exc.value) == (
+        "Use the exact native MCP (server name, raw tool name), both nonblank strings. "
+        "Use the server object for Runner MCP text edits."
+    )
     for invalid in (
         {},
         [pair, pair],

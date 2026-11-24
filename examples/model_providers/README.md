@@ -1,31 +1,30 @@
 # Model provider examples
 
-The examples in this directory show how to route models through adapter layers such as LiteLLM and
-any-llm. The default examples all use OpenRouter so you only need one API key:
+These examples route models through LiteLLM and any-llm adapters. The default examples all use OpenRouter so you only need one API key:
 
 ```bash
 export OPENROUTER_API_KEY="..."
 ```
 
-Run one of the adapter examples:
+Run one of the adapter examples from the repository root. any-llm requires Python 3.11 or newer:
 
 ```bash
-uv run examples/model_providers/any_llm_provider.py
-uv run examples/model_providers/any_llm_auto.py
-uv run examples/model_providers/litellm_provider.py
-uv run examples/model_providers/litellm_auto.py
+uv run --extra any-llm python examples/model_providers/any_llm_provider.py
+uv run --extra any-llm python examples/model_providers/any_llm_auto.py
+uv run --extra litellm python examples/model_providers/litellm_provider.py
+uv run --extra litellm python examples/model_providers/litellm_auto.py
 ```
 
 Direct-model examples let you override the target model:
 
 ```bash
-uv run examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
-uv run examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
+uv run --extra any-llm python examples/model_providers/any_llm_provider.py --model openrouter/openai/gpt-5.4-mini
+uv run --extra litellm python examples/model_providers/litellm_provider.py --model openrouter/openai/gpt-5.4-mini
 ```
 
 ## Using Codex alongside these adapters
 
-Setting `RunConfig(model_provider=CodexProvider())` sends model names to Codex. It does not make Codex run LiteLLM or any-llm. A model object passed to the agent handles inference directly. See the [Codex provider guide](../../docs/models/codex.md) for setup and limitations.
+Setting `RunConfig(model_provider=CodexProvider())` sends model names to Codex. It does not make Codex run LiteLLM or any-llm. A model object passed to the agent handles inference directly. See the [Codex guide](../codex/README.md) for setup and limitations.
 
 To keep both paths in the same application, register Codex under a prefix:
 
@@ -44,8 +43,8 @@ Pass `run_config=config` to `Runner.run` and select `model="codex/" + model_id` 
 For a prompt example that needs no hosted prompt ID, run:
 
 ```bash
-uv run examples/basic/prompt_template.py --local
-uv run examples/basic/prompt_template.py --local --codex
+uv run python examples/basic/prompt_template.py --local
+python examples/basic/prompt_template.py --local --codex
 ```
 
-Here the application supplies the prompt text. For tool access, the [Calendar example](../hosted_mcp/connectors.py) includes an explicit SDK-managed MCP path. Neither example translates an OpenAI-hosted prompt or connector ID into Codex configuration.
+For the Codex command, use the matching wheel and source environment from the Codex guide. Here the application supplies the prompt text. For tool access, the [Calendar example](../hosted_mcp/connectors.py) includes an explicit SDK-managed MCP path. Neither example translates an OpenAI-hosted prompt or connector ID into Codex configuration.

@@ -24,7 +24,6 @@ from openai.types.responses.response_input_param import McpApprovalResponse
 
 from .. import _debug
 from .._function_tool_arguments import FunctionToolApproval
-from .._public_agent import get_public_agent
 from .._redaction import hook_payload_diagnostics, redact_payload, require_clean
 from .._tool_identity import (
     FunctionToolLookupKey,
@@ -85,6 +84,7 @@ from ..tool import (
     ToolOrigin,
     _computer_tool_uses_run_scoped_initializer,
     _consume_function_tool_default_failure,
+    _function_tool_enabled,
     _invoke_function_tool_with_metadata,
     _is_programmatic_tool_call,
     default_tool_error_function,
@@ -103,7 +103,12 @@ from ..tool_guardrails import (
 from ..tracing import FunctionSpanData, Span, SpanError, function_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
-from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
+from ..util._asyncio_tasks import (
+    _FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS,
+    _consume_future_exception,
+    _join_cleanup,
+    gather_with_cancel,
+)
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ._asyncio_progress import get_function_tool_task_progress_deadline
@@ -172,7 +177,6 @@ __all__ = [
 ]
 
 TToolSpanResult = TypeVar("TToolSpanResult")
-_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS = 0.25
 _FUNCTION_TOOL_CANCELLED_IMMEDIATE_STEP_LIMIT = 64
 _FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS = 0.1
 
@@ -578,21 +582,12 @@ async def resolve_enabled_function_tools(
 ) -> list[FunctionTool]:
     """Resolve enabled function tools without triggering MCP tool discovery."""
 
-    async def _check_tool_enabled(tool: FunctionTool) -> bool:
-        attr = tool.is_enabled
-        if isinstance(attr, bool):
-            return attr
-        result = attr(context_wrapper, get_public_agent(agent))
-        if inspect.isawaitable(result):
-            return bool(await result)
-        return bool(result)
-
     function_tools = [tool for tool in agent.tools if isinstance(tool, FunctionTool)]
     if not function_tools:
         return []
 
     enabled_results = await gather_with_cancel(
-        *(_check_tool_enabled(tool) for tool in function_tools)
+        *(_function_tool_enabled(tool, context_wrapper, agent) for tool in function_tools)
     )
     return [tool for tool, enabled in zip(function_tools, enabled_results, strict=False) if enabled]
 
@@ -1656,7 +1651,7 @@ class _FunctionToolBatchExecutor:
             if self.sibling_category_failure is not None and self.sibling_category_failure.is_set():
                 await self._drain_pending_tasks_for_sibling_category_failure()
             else:
-                self._cancel_pending_tasks_for_parent_cancellation()
+                await self._cancel_pending_tasks_for_parent_cancellation()
             raise
 
         return (
@@ -1787,7 +1782,7 @@ class _FunctionToolBatchExecutor:
             _, remaining_cancelled_tasks = await self._drain_cancelled_tasks(cancellable_tasks)
             _, remaining_post_invoke_tasks = await self._wait_post_invoke_tasks(post_invoke_tasks)
         except BaseException:
-            self._cancel_pending_tasks_for_parent_cancellation()
+            await self._cancel_pending_tasks_for_parent_cancellation()
             self.pending_tasks = set()
             raise
 
@@ -1801,13 +1796,27 @@ class _FunctionToolBatchExecutor:
         )
         self.pending_tasks = set()
 
-    def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+    async def _cancel_pending_tasks_for_parent_cancellation(self) -> None:
+        # An agent invocation and the tools it runs own work in the same cancellation tree.
+        # Keep ordinary top-level tools and post-invocation hooks on the prompt-return path.
+        attached = {
+            task
+            for task in self.pending_tasks
+            if (state := self.task_states[task]).invoke_task is not None
+            and not state.in_post_invoke_phase
+            and (
+                state.tool_run.function_tool._is_agent_tool
+                or isinstance(self.context_wrapper, ToolContext)
+            )
+        }
+        _cancel_function_tool_tasks(self.pending_tasks - (attached & self.teardown_cancelled_tasks))
         self.teardown_cancelled_tasks.update(self.pending_tasks)
-        _cancel_function_tool_tasks(self.pending_tasks)
         _attach_function_tool_task_result_callbacks(
             self.pending_tasks,
             message_for_exception=_parent_cancelled_task_exception_message,
         )
+        if attached:
+            await _join_cleanup(*attached)
 
     async def _run_single_tool(
         self,
@@ -2057,6 +2066,11 @@ class _FunctionToolBatchExecutor:
             scope_id=self.tool_state_scope_id,
         )
         is_nested_continuation = bool(self._get_nested_tool_interruptions(pending_nested_result))
+        record = self.context_wrapper._tool_invocations.get(tool_call.call_id)
+        if record is not None and record.requires_declaration:
+            if record.declaration is None or record.declaration.tool is not func_tool:
+                raise UserError("The prepared tool binding is missing or changed.")
+            await record.declaration.check(self.context_wrapper, self.config)
         if not is_nested_continuation:
             self.context_wrapper._mark_tool_invocation_executed(
                 tool_call,
@@ -2082,6 +2096,16 @@ class _FunctionToolBatchExecutor:
                     else _coro.noop_coroutine()
                 ),
             )
+
+        if (
+            record is not None
+            and record.requires_declaration
+            and (
+                self.context_wrapper._tool_invocations.get(tool_call.call_id) is not record
+                or tool_context.tool_call_id != tool_call.call_id
+            )
+        ):
+            raise UserError("The prepared tool call ID changed before execution.")
 
         invoke_task = asyncio.create_task(
             self._invoke_tool_and_run_post_invoke(
@@ -2112,6 +2136,9 @@ class _FunctionToolBatchExecutor:
         tool_context: ToolContext[Any],
         agent_hooks: Any,
     ) -> Any:
+        record = self.context_wrapper._tool_invocations.get(tool_call.call_id)
+        if record is not None and record.declaration is not None:
+            await record.declaration.check(self.context_wrapper, self.config)
         bypass_output_schema = False
         try:
             with hook_payload_diagnostics(

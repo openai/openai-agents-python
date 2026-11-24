@@ -161,8 +161,9 @@ class CodexToolHooks:
             del self.prepared_inputs[item.call_id]
 
     def restore(self, call: dict[str, Any]) -> None:
-        # The user reviewed the prepared input. Never transform it a second time.
-        self.events = ["PostToolUse"]
+        # Keep the pre-tool decision and confirm the result on the replacement worker.
+        if "PostToolUse" not in self.events:
+            self.events.append("PostToolUse")
         self._restoring = (
             call["call_id"],
             "Bash" if call["name"] == "exec_command" else "apply_patch",
@@ -240,7 +241,7 @@ class CodexToolHooks:
             return decision
         except (Exception, asyncio.CancelledError) as exc:
             self.error = self.error or exc
-            # A transport-level hook error lets Codex run the original tool. Block explicitly.
+            # Keep the original exception in Python and send a payload-free denial.
             message = "The registered tool hook did not complete."
             if data.get("event") == "PreToolUse":
                 return {
@@ -272,7 +273,8 @@ class CodexToolHooks:
         if data["event"] == "PreToolUse":
             decision: dict[str, Any] = {}
             prepared = arguments
-            if settings and settings.prepare_tool_input is not None:
+            # The user approved the prepared input. Never transform it a second time.
+            if self._restoring is None and settings and settings.prepare_tool_input is not None:
                 prepared = await _await_hook(
                     partial(settings.prepare_tool_input, call), "prepare_tool_input", name
                 )
