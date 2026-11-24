@@ -960,21 +960,18 @@ class ItemHelpers:
         # If the output is either a single or list of the known structured output types, convert to
         # ResponseFunctionCallOutputItemListParam.
         if isinstance(output, list | tuple):
-            maybe_converted_output_list = [
-                cls._maybe_get_output_as_structured_function_output(item) for item in output
+            structured_items: list[ValidToolOutputPydanticModels] = []
+            for item in output:
+                structured = cls._maybe_get_output_as_structured_function_output(item)
+                if structured is None:
+                    return None
+                structured_items.append(structured)
+            # Empty sequences must also fall back to the plain output.
+            if not structured_items:
+                return None
+            return [
+                cls._convert_single_tool_output_pydantic_model(item) for item in structured_items
             ]
-            # An empty list/tuple has no structured items; ``all([])`` is ``True``,
-            # so guard against it to avoid emitting an empty structured-output list
-            # (which would drop the tool result) and stringify instead.
-            if maybe_converted_output_list and all(
-                item is not None for item in maybe_converted_output_list
-            ):
-                return [
-                    cls._convert_single_tool_output_pydantic_model(item)
-                    for item in maybe_converted_output_list
-                    if item is not None
-                ]
-            return None
 
         maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
         if maybe_converted_output is not None:

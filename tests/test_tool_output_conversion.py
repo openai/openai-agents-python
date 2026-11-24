@@ -373,6 +373,7 @@ def test_tool_call_output_item_mixed_list_partial_invalid_not_converted() -> Non
     out = [
         {"type": "text", "text": "hello"},  # Valid
         {"msg": "foobar"},  # Invalid
+        {"type": "text", "text": "end"},
     ]
     payload = ItemHelpers.tool_call_output_item(call, out)
 
@@ -380,7 +381,7 @@ def test_tool_call_output_item_mixed_list_partial_invalid_not_converted() -> Non
     assert payload["call_id"] == call.call_id
     # All-or-nothing: if any item is invalid, convert entire list to string
     assert isinstance(payload["output"], str)
-    assert payload["output"] == "[{'type': 'text', 'text': 'hello'}, {'msg': 'foobar'}]"
+    assert payload["output"] == str(out)
 
 
 def test_tool_call_output_item_empty_list_not_converted() -> None:
