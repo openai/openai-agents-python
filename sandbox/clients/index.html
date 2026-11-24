@@ -675,6 +675,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Mounts and remote storage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-docker-storage-mounts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade Docker storage mounts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5106,6 +5123,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Mounts and remote storage">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#upgrade-docker-storage-mounts" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrade Docker storage mounts
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -5360,7 +5394,6 @@
 <li><code>mount_strategy</code>: required. Use a strategy that matches both the mount entry and the sandbox backend.</li>
 </ul>
 <p>Mounts are treated as ephemeral workspace entries. Snapshot and persistence flows detach or skip mounted paths instead of copying mounted remote storage into the saved workspace.</p>
-<p>Generic local/container strategies:</p>
 <div class="sandbox-nowrap-first-column-table">
 <table>
 <thead>
@@ -5373,32 +5406,42 @@
 <tbody>
 <tr>
 <td><code>InContainerMountStrategy(pattern=RcloneMountPattern(...))</code></td>
-<td>The sandbox image can run <code>rclone</code>.</td>
+<td>A compatible non-Docker sandbox can run <code>rclone</code>.</td>
 <td>Supports S3, GCS, R2, Azure Blob, and Box. <code>RcloneMountPattern</code> can run in <code>fuse</code> mode or <code>nfs</code> mode.</td>
 </tr>
 <tr>
 <td><code>InContainerMountStrategy(pattern=MountpointMountPattern(...))</code></td>
-<td>The image has <code>mount-s3</code> and you want Mountpoint-style S3 or S3-compatible access.</td>
+<td>A compatible non-Docker sandbox has <code>mount-s3</code> and needs Mountpoint-style S3 or S3-compatible access.</td>
 <td>Supports <code>S3Mount</code> and <code>GCSMount</code>.</td>
 </tr>
 <tr>
 <td><code>InContainerMountStrategy(pattern=FuseMountPattern(...))</code></td>
-<td>The image has <code>blobfuse2</code> and FUSE support.</td>
+<td>A compatible non-Docker sandbox has <code>blobfuse2</code> and FUSE support.</td>
 <td>Supports <code>AzureBlobMount</code>.</td>
 </tr>
 <tr>
 <td><code>InContainerMountStrategy(pattern=S3FilesMountPattern(...))</code></td>
-<td>The image has <code>mount.s3files</code> and can reach an existing S3 Files mount target.</td>
+<td>A compatible non-Docker sandbox has <code>mount.s3files</code> and can reach an existing S3 Files mount target.</td>
 <td>Supports <code>S3FilesMount</code>.</td>
 </tr>
 <tr>
 <td><code>DockerVolumeMountStrategy(driver=...)</code></td>
-<td>Docker should attach a volume-driver-backed mount before the container starts.</td>
-<td>Docker-only. S3, GCS, R2, Azure Blob, and Box can be mounted through <code>rclone</code>; S3 and GCS can also be mounted through <code>mountpoint</code>.</td>
+<td><code>DockerSandboxClient</code> should attach a volume-driver-backed mount before the container starts.</td>
+<td>Docker is the only built-in sandbox backend that supports this strategy. The <code>rclone</code> driver supports <code>S3Mount</code>, <code>GCSMount</code>, <code>R2Mount</code>, <code>AzureBlobMount</code>, and <code>BoxMount</code>. The <code>mountpoint</code> driver supports <code>S3Mount</code> and <code>GCSMount</code>.</td>
 </tr>
 </tbody>
 </table>
 </div>
+<h3 id="upgrade-docker-storage-mounts">Upgrade Docker storage mounts</h3>
+<p>If you used <code>InContainerMountStrategy</code> with Docker in v0.25.0, update your application's mount configuration before creating the next session. <code>DockerSandboxClient</code> rejects this strategy during both creation and resume, including for read-only mounts. When the SDK resumes a session, it uses the mount entries from the saved sandbox state. To change the mount strategy, create a fresh session with the updated manifest.</p>
+<ol>
+<li>Update the application-owned manifest used by <code>SandboxRunConfig.manifest</code> or <code>SandboxAgent.default_manifest</code>. Choose the option that matches how Docker will access the storage.<ul>
+<li><strong>Docker volume driver.</strong> Replace the entry's <code>mount_strategy</code> with <code>DockerVolumeMountStrategy</code> and configure a compatible volume driver and its storage access for the Docker daemon. Preserve the entry's <code>mount_path</code> and <code>read_only</code> settings. Transfer storage settings from the old helper pattern to the corresponding mount entry fields or <code>DockerVolumeMountStrategy.driver_options</code>. For example, if you set a bucket prefix in <code>MountpointMountPattern.options</code>, carry that prefix over so the sandbox continues to see the same portion of the bucket.</li>
+<li><strong>Host mount.</strong> For S3 Files or other application-managed storage, use a trusted host-path grant. Have your application or an administrator mount the storage on the machine running the Docker daemon before starting the sandbox. Remove the old mount entry and add a <code>SandboxPathGrant</code> to <code>Manifest.extra_path_grants</code> from trusted application configuration. Set <code>host_path</code> to the absolute path of the mount on the Docker host. Set <code>path</code> to an absolute POSIX path inside the container. The target must be outside the workspace root and distinct from each of the root's ancestor paths. For example, use <code>/mnt/data</code> for a workspace rooted at <code>/workspace</code>. Set <code>read_only=True</code> when the sandbox only needs read access. Update the agent's instructions and any application paths that refer to the previous mount target. See <a href="../guide/#manifest">Manifest path grants</a> for details.</li>
+</ul>
+</li>
+<li>Create a fresh session with the updated manifest. For direct client use, pass the manifest to <code>DockerSandboxClient.create()</code>. When using the runner, start a fresh run with the Docker client and leave out the previous <code>session</code>, <code>session_state</code>, and any <code>RunState</code> that contains the previous sandbox session state. To restore saved workspace files into the new container, use <a href="../guide/#start-from-a-snapshot">a workspace snapshot</a>. The updated manifest supplies the mounts and grants for the new session.</li>
+</ol>
 <h2 id="supported-hosted-platforms">Supported hosted platforms</h2>
 <p>When you need a hosted environment, the same <code>SandboxAgent</code> definition usually carries over and only the sandbox client changes in <a class="autorefs autorefs-internal" title="SandboxRunConfig
 
@@ -5479,7 +5522,7 @@
 <tbody>
 <tr>
 <td>Docker</td>
-<td>Supports <code>S3Mount</code>, <code>GCSMount</code>, <code>R2Mount</code>, <code>AzureBlobMount</code>, <code>BoxMount</code>, and <code>S3FilesMount</code> with local strategies such as <code>InContainerMountStrategy</code> and <code>DockerVolumeMountStrategy</code>.</td>
+<td>Uses <code>DockerVolumeMountStrategy</code> for supported storage entries. For storage mounted on the Docker host, use a <a href="#upgrade-docker-storage-mounts">trusted host-path grant</a>.</td>
 </tr>
 <tr>
 <td><code>ModalSandboxClient</code></td>
@@ -5513,7 +5556,7 @@
 </table>
 </div>
 <p>The mount tables describe which storage types each backend can execute. A check mark does not bypass the credential boundary for a mount helper that runs inside a model-controlled sandbox, and it does not mean that every strategy can operate without credentials. The Agents SDK accepts an in-container mount without an acknowledgement only when the selected helper can operate without protected authority. It rejects a mount that requires protected authority before starting the sandbox or mount helper unless trusted application code explicitly acknowledges the exposure for the exact mount path.</p>
-<p>Credentialless <code>rclone</code> mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. <code>FuseMountPattern</code> requires broad acknowledgement because <code>blobfuse2</code> discovers ambient Azure authority, even when no inline credential is configured. <code>S3FilesMountPattern</code> likewise requires broad acknowledgement because <code>mount.s3files</code> uses ambient IAM authority. These requirements also apply when Docker is the backend; the check marks below indicate that Docker can execute the mount after the applicable authority boundary is satisfied.</p>
+<p>For backends that support in-container mounts, credentialless <code>rclone</code> mounts are limited to S3, GCS, R2, and Azure Blob. An in-container Box mount requires a non-interactive authentication source and the acknowledgement that matches that source. <code>FuseMountPattern</code> requires broad acknowledgement because <code>blobfuse2</code> discovers ambient Azure authority, even when no inline credential is configured. <code>S3FilesMountPattern</code> likewise requires broad acknowledgement because <code>mount.s3files</code> uses ambient IAM authority.</p>
 <p>For a mount entry named <code>"data"</code>, retain the copied <code>Manifest</code> returned by the acknowledgement that matches the configured authority:</p>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># Mount-scoped values such as inline access keys.</span>
 </span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">manifest</span> <span class="o">=</span> <span class="n">manifest</span><span class="o">.</span><span class="n">with_in_container_mount_credential_exposure_acknowledged</span><span class="p">(</span><span class="s2">&quot;data&quot;</span><span class="p">)</span>
@@ -5545,7 +5588,7 @@
 <td>✓</td>
 <td>✓</td>
 <td>✓</td>
-<td>✓</td>
+<td>-</td>
 </tr>
 <tr>
 <td><code>ModalSandboxClient</code></td>
