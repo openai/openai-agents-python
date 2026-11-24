@@ -45,6 +45,7 @@ from ..usage import (
 from ..util._error_tracing import model_span_errors
 from ..util._json import _to_dump_compatible
 from ._openai_retry import create_with_retry_observation, get_openai_retry_advice
+from ._openai_shared import merge_openai_extra_args
 from ._retry_runtime import should_disable_provider_managed_retries
 from ._trace import model_config_for_trace, populate_generation_span, record_generation_tools
 from .chatcmpl_converter import Converter
@@ -94,35 +95,67 @@ class OpenAIChatCompletionsModel(Model):
     def preflight(self, request: ModelRequest) -> ModelPreflight:
         """Check the Chat adapter's local conversion without contacting its endpoint."""
         errors: tuple[str, ...] = ()
+        has_replay_callback = self.should_replay_reasoning_content is not None
         static_input = (
-            None
-            if self.should_replay_reasoning_content is not None
-            else static_input_copy(request.input)
+            static_input_copy(request.input)
+            if self._strict_feature_validation or not has_replay_callback
+            else None
         )
         unchecked = ["Catalog, files, replay callbacks, and host policy remain unchecked."]
+        if request.model_settings.extra_args:
+            unchecked.append("Provider acceptance of extra_args remains unchecked.")
         try:
             validate_python_tool_execution(request)
+            if self._strict_feature_validation:
+                self._handle_unsupported_server_managed_conversation_state(
+                    previous_response_id=request.previous_response_id,
+                    conversation_id=request.conversation_id,
+                )
+                self._handle_unsupported_prompt(request.prompt)
+                self._handle_unsupported_reasoning_settings(request.model_settings)
+            elif (
+                request.prompt is not None
+                or request.previous_response_id is not None
+                or request.conversation_id is not None
+            ):
+                unchecked.append(
+                    "Chat Completions does not support Responses state or reusable prompt IDs. "
+                    "Legacy mode ignores them."
+                )
             if static_input is not None:
                 self._validate_official_openai_input_content_types(static_input)
                 Converter.items_to_messages(
                     static_input,
                     model=self.model,
                     base_url=str(self._client.base_url),
-                    should_replay_reasoning_content=self.should_replay_reasoning_content,
+                    # Replay only adds reasoning text. Check the rest of the conversion
+                    # without invoking the caller's predicate or claiming its result.
+                    should_replay_reasoning_content=(lambda _: False)
+                    if has_replay_callback
+                    else None,
                     strict_feature_validation=self._strict_feature_validation,
+                    warn_on_lossy_tool_output=False,
                 )
-            Converter.convert_tool_choice(request.model_settings.tool_choice)
-            for tool in request.tools:
-                Converter.tool_to_openai(tool)
-            for handoff in request.handoffs:
-                Converter.convert_handoff_tool(handoff)
-            if request.prompt or request.previous_response_id or request.conversation_id:
-                message = (
-                    "Chat Completions does not support Responses state or reusable prompt IDs."
+            tool_choice = Converter.convert_tool_choice(request.model_settings.tool_choice)
+            converted_tools = [Converter.tool_to_openai(tool) for tool in request.tools]
+            converted_tools.extend(
+                Converter.convert_handoff_tool(handoff) for handoff in request.handoffs
+            )
+            if request.model_settings.extra_args:
+                # Messages and headers are always supplied. ModelRequest does not carry
+                # an output schema or stream mode, and client defaults are deferred.
+                self._chat_completion_kwargs(
+                    request.model_settings,
+                    converted_messages=[],
+                    converted_tools=converted_tools,
+                    tool_choice=tool_choice,
+                    response_format=omit,
+                    store=request.model_settings.store,
+                    stream_options=None,
+                    stream=False,
+                    extra_headers={},
+                    error_type=UserError,
                 )
-                if self._strict_feature_validation:
-                    raise UserError(message)
-                unchecked.append(message + " Legacy mode ignores them.")
         except UserError as error:
             errors = (str(error),)
         return ModelPreflight(
@@ -131,6 +164,8 @@ class OpenAIChatCompletionsModel(Model):
             if errors
             else "passed"
             if static_input is not None
+            and not has_replay_callback
+            and not request.model_settings.extra_args
             else "unknown",
             model_name=self.model,
             tools=tool_ownership(request.tools),
@@ -725,13 +760,6 @@ class OpenAIChatCompletionsModel(Model):
 
         converted_tools = _to_dump_compatible(converted_tools)
         record_generation_tools(span, tracing, converted_tools)
-        tools_param = converted_tools if converted_tools else omit
-        # Chat Completions rejects parallel_tool_calls unless tools are present, so derive it
-        # from the converted list, which also covers handoff-only turns.
-        parallel_tool_calls: bool | Omit = (
-            self._non_null_or_omit(model_settings.parallel_tool_calls) if converted_tools else omit
-        )
-
         if _debug.DONT_LOG_MODEL_DATA:
             logger.debug("Calling LLM")
         else:
@@ -754,75 +782,23 @@ class OpenAIChatCompletionsModel(Model):
                 response_format,
             )
 
-        reasoning_effort = (
-            model_settings.reasoning.effort if model_settings.reasoning is not None else None
-        )
-        # These models require non-reasoning mode for Chat Completions function tools.
-        # Keep Responses defaults and caller-provided effort overrides unchanged.
-        if (
-            reasoning_effort is None
-            and self._tools_require_non_reasoning_mode(bool(converted_tools))
-            and "reasoning_effort" not in (model_settings.extra_args or {})
-        ):
-            reasoning_effort = "none"
         store = ChatCmplHelpers.get_store_param(self._get_client(), model_settings)
 
         stream_options = ChatCmplHelpers.get_stream_options_param(
             self._get_client(), model_settings, stream=stream
         )
 
-        stream_param: Literal[True] | Omit = True if stream else omit
-
-        create_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": converted_messages,
-            "tools": tools_param,
-            "temperature": self._non_null_or_omit(model_settings.temperature),
-            "top_p": self._non_null_or_omit(model_settings.top_p),
-            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
-            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
-            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
-            "tool_choice": tool_choice,
-            "response_format": response_format,
-            "parallel_tool_calls": parallel_tool_calls,
-            "stream": cast(Any, stream_param),
-            "stream_options": self._non_null_or_omit(stream_options),
-            "store": self._non_null_or_omit(store),
-            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
-            "verbosity": self._non_null_or_omit(model_settings.verbosity),
-            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
-            "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
-            "prompt_cache_options": self._non_null_or_omit(model_settings.prompt_cache_options),
-            "extra_headers": self._merge_headers(model_settings),
-            "extra_query": model_settings.extra_query,
-            "extra_body": model_settings.extra_body,
-            "metadata": self._non_null_or_omit(model_settings.metadata),
-        }
-        # The Chat Completions API requires logprobs=True whenever top_logprobs is set.
-        # Skip the key when the caller already supplies logprobs via extra_args, so that
-        # extra_args={"logprobs": ...} keeps passing through and setting both top_logprobs
-        # and extra_args["logprobs"] (a pre-existing workaround) does not collide with the
-        # duplicate-key check below.
-        if model_settings.top_logprobs is not None and "logprobs" not in (
-            model_settings.extra_args or {}
-        ):
-            create_kwargs["logprobs"] = True
-        duplicate_extra_arg_keys = sorted(
-            key
-            for key in model_settings.extra_args or {}
-            if key in create_kwargs and not isinstance(create_kwargs[key], Omit)
+        create_kwargs, parallel_tool_calls = self._chat_completion_kwargs(
+            model_settings,
+            converted_messages=converted_messages,
+            converted_tools=converted_tools,
+            tool_choice=tool_choice,
+            response_format=response_format,
+            store=store,
+            stream_options=stream_options,
+            stream=stream,
+            extra_headers=self._merge_headers(model_settings),
         )
-        if duplicate_extra_arg_keys:
-            if len(duplicate_extra_arg_keys) == 1:
-                key = duplicate_extra_arg_keys[0]
-                raise TypeError(
-                    f"chat.completions.create() got multiple values for keyword argument '{key}'"
-                )
-            keys = ", ".join(repr(key) for key in duplicate_extra_arg_keys)
-            raise TypeError(
-                f"chat.completions.create() got multiple values for keyword arguments {keys}"
-            )
-        create_kwargs.update(model_settings.extra_args or {})
 
         client = self._get_client()
         ret = await create_with_retry_observation(client, client.chat.completions, create_kwargs)
@@ -857,6 +833,83 @@ class OpenAIChatCompletionsModel(Model):
             reasoning=model_settings.reasoning,
         )
         return response, ret
+
+    def _chat_completion_kwargs(
+        self,
+        model_settings: ModelSettings,
+        *,
+        converted_messages: list[Any],
+        converted_tools: list[Any],
+        tool_choice: Any,
+        response_format: Any,
+        store: bool | None,
+        stream_options: dict[str, bool] | None,
+        stream: bool,
+        extra_headers: dict[str, Any],
+        error_type: type[Exception] = TypeError,
+    ) -> tuple[dict[str, Any], bool | Omit]:
+        tools_param = converted_tools if converted_tools else omit
+        # Chat Completions rejects parallel_tool_calls unless tools are present, so derive it
+        # from the converted list, which also covers handoff-only turns.
+        parallel_tool_calls: bool | Omit = (
+            self._non_null_or_omit(model_settings.parallel_tool_calls) if converted_tools else omit
+        )
+
+        reasoning_effort = (
+            model_settings.reasoning.effort if model_settings.reasoning is not None else None
+        )
+        # These models require non-reasoning mode for Chat Completions function tools.
+        # Keep Responses defaults and caller-provided effort overrides unchanged.
+        if (
+            reasoning_effort is None
+            and self._tools_require_non_reasoning_mode(bool(converted_tools))
+            and "reasoning_effort" not in (model_settings.extra_args or {})
+        ):
+            reasoning_effort = "none"
+        stream_param: Literal[True] | Omit = True if stream else omit
+
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": converted_messages,
+            "tools": tools_param,
+            "temperature": self._non_null_or_omit(model_settings.temperature),
+            "top_p": self._non_null_or_omit(model_settings.top_p),
+            "frequency_penalty": self._non_null_or_omit(model_settings.frequency_penalty),
+            "presence_penalty": self._non_null_or_omit(model_settings.presence_penalty),
+            "max_tokens": self._non_null_or_omit(model_settings.max_tokens),
+            "tool_choice": tool_choice,
+            "response_format": response_format,
+            "parallel_tool_calls": parallel_tool_calls,
+            "stream": cast(Any, stream_param),
+            "stream_options": self._non_null_or_omit(stream_options),
+            "store": self._non_null_or_omit(store),
+            "reasoning_effort": self._non_null_or_omit(reasoning_effort),
+            "verbosity": self._non_null_or_omit(model_settings.verbosity),
+            "top_logprobs": self._non_null_or_omit(model_settings.top_logprobs),
+            "prompt_cache_retention": self._non_null_or_omit(model_settings.prompt_cache_retention),
+            "prompt_cache_options": self._non_null_or_omit(model_settings.prompt_cache_options),
+            "extra_headers": extra_headers,
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            "metadata": self._non_null_or_omit(model_settings.metadata),
+        }
+        # The Chat Completions API requires logprobs=True whenever top_logprobs is set.
+        # Skip the key when the caller already supplies logprobs via extra_args, so that
+        # extra_args={"logprobs": ...} keeps passing through and setting both top_logprobs
+        # and extra_args["logprobs"] (a pre-existing workaround) does not collide with the
+        # duplicate-key check below.
+        if model_settings.top_logprobs is not None and "logprobs" not in (
+            model_settings.extra_args or {}
+        ):
+            create_kwargs["logprobs"] = True
+        merge_openai_extra_args(
+            create_kwargs,
+            model_settings.extra_args or {},
+            method="chat.completions.create",
+            omitted_types=Omit,
+            error_type=error_type,
+        )
+        return create_kwargs, parallel_tool_calls
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
