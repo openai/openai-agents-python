@@ -709,6 +709,14 @@ async def test_metadata_only_scope_bounds_agent_tool_and_nested_runner(exporter,
     assert "CANARY" not in "".join(s.to_json() for s in exported)
 
 
+def test_metadata_only_scope_rejects_async_decorator():
+    with pytest.raises(TypeError):
+
+        @metadata_only_run_tracing()  # type: ignore[operator]
+        async def run():
+            pass
+
+
 @pytest.mark.asyncio
 async def test_metadata_only_scope_is_task_local_and_restored_after_cancellation():
     config = RunConfig(tracing={"operation_detail": "content"}, trace_include_sensitive_data=True)

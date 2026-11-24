@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar, Token
 from typing import Literal
 
 from typing_extensions import TypedDict
@@ -14,8 +14,23 @@ _operation_detail: ContextVar[OperationDetail | None] = ContextVar("operation_de
 _metadata_only_runs: ContextVar[bool] = ContextVar("metadata_only_runs", default=False)
 
 
-@contextmanager
-def metadata_only_run_tracing() -> Iterator[None]:
+class _MetadataOnlyRunTracing(AbstractContextManager[None]):
+    _token: Token[bool] | None = None
+
+    def __enter__(self) -> None:
+        if self._token is not None:
+            raise RuntimeError(
+                "Create a new metadata_only_run_tracing() scope for each with block."
+            )
+        self._token = _metadata_only_runs.set(True)
+
+    def __exit__(self, *exc: object) -> None:
+        assert self._token is not None
+        _metadata_only_runs.reset(self._token)
+        self._token = None
+
+
+def metadata_only_run_tracing() -> AbstractContextManager[None]:
     """Limit automatic model and tool capture for Runner calls in this context.
 
     A child config can override a parent's operation_detail. In this scope,
@@ -23,6 +38,7 @@ def metadata_only_run_tracing() -> Iterator[None]:
     trace_include_sensitive_data=False even if they request content.
     Disabled tracing stays disabled.
 
+    Use `with metadata_only_run_tracing():` inside the function doing the work.
     Start Runner.run_streamed() and drain result.stream_events() inside the
     scope. New asyncio tasks inherit it. Independent resumes and remote
     services need their own scope.
@@ -30,11 +46,7 @@ def metadata_only_run_tracing() -> Iterator[None]:
     The scope does not sanitize raw stream events, returned data, saved state,
     exceptions, logs, names, IDs, custom spans or trace metadata.
     """
-    token = _metadata_only_runs.set(True)
-    try:
-        yield
-    finally:
-        _metadata_only_runs.reset(token)
+    return _MetadataOnlyRunTracing()
 
 
 class TracingConfig(TypedDict, total=False):
