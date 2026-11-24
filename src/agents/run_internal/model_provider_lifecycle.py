@@ -8,6 +8,7 @@ from .._redaction import current_redactor
 from ..logger import log_model_action_warning, logger
 from ..models.interface import ModelProvider
 from ..run_config import RunConfig, _coerce_run_config
+from ..tracing.config import _metadata_only_runs
 
 
 def _normalize_run_config_for_runner(
@@ -26,12 +27,14 @@ def _normalize_run_config_for_runner(
         redactor = run_config.redact_text
     elif run_config.redact_text is not None and run_config.redact_text is not redactor:
         raise ValueError("A nested run cannot replace its parent's redact_text policy.")
-    if redactor is not None or (detail == "metadata" and run_config.trace_include_sensitive_data):
+    force_metadata = redactor is not None or (_metadata_only_runs.get() and detail != "metadata")
+    if force_metadata or (detail == "metadata" and run_config.trace_include_sensitive_data):
         # Route every existing capture decision through the run's sensitive-data gate.
         run_config = copy(run_config)
         run_config.trace_include_sensitive_data = False
         if redactor is not None:
             run_config.redact_text = redactor
+        if force_metadata:
             run_config.tracing = {**(run_config.tracing or {}), "operation_detail": "metadata"}
     return run_config, owns_model_provider
 

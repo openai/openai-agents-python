@@ -544,3 +544,77 @@ def test_missing_or_zero_usage_details_do_not_add_optional_counts(otel, details)
             "gen_ai.usage.reasoning.output_tokens",
         )
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage", [None, {"total_tokens": 0}])
+async def test_business_trace_links_stages_and_reports_only_measured_direct_usage(otel, usage):
+    from agents import Agent, ModelSettings
+    from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+    from examples.basic.business_tracing import route
+
+    provider, receiver = otel
+    child_model = ScriptedModel(
+        [ModelStep(output=[assistant_message("ok")], raw_usage={"total_tokens": 19})]
+    )
+    settings = ModelSettings(preserve_raw_usage=True)
+    child = Agent(name="child", model=child_model, model_settings=settings)
+    agent = Agent(
+        name="classifier",
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[function_call("lookup", {"input": "check"}, call_id="call_lookup")],
+                    raw_usage={"total_tokens": 0},
+                ),
+                ModelStep(output=[assistant_message("priority")], raw_usage=usage),
+            ]
+        ),
+        model_settings=settings,
+        tools=[child.as_tool("lookup", "Check the queue")],
+    )
+    outbox = []
+    traceparent = "00-" + "1" * 32 + "-" + "2" * 16 + "-01"
+    await route(provider.get_tracer("test"), traceparent, agent, "PRIVATE_REQUEST", outbox)
+
+    assert len(child_model.calls) == 1
+    assert outbox == ["priority"]
+    spans = {span.name: span for span in receiver.get_finished_spans()}
+    assert spans["route"].parent.is_remote
+    assert spans["route"].parent.span_id == int("2" * 16, 16)
+    for name in ("specialist", "validate", "deliver"):
+        assert spans[name].parent.span_id == spans["route"].context.span_id
+        assert spans[name].attributes["app.outcome"] == "ok"
+    specialist = spans["specialist"]
+    assert any(
+        s.name.startswith("invoke_runner ") and s.parent.span_id == specialist.context.span_id
+        for s in spans.values()
+    )
+    assert specialist.attributes["app.direct_usage.available"] is (usage is not None)
+    if usage is None:
+        assert "app.direct_usage.total_tokens" not in specialist.attributes
+    else:
+        assert specialist.attributes["app.direct_usage.total_tokens"] == 0
+    assert "PRIVATE_REQUEST" not in "".join(s.to_json() for s in receiver.get_finished_spans())
+
+
+@pytest.mark.asyncio
+async def test_business_trace_preserves_errors_without_recording_private_text(otel):
+    from agents import Agent
+    from agents.testing import ScriptedModel
+    from examples.basic.business_tracing import route, stage
+
+    provider, receiver = otel
+    tracer = provider.get_tracer("test")
+    agent = Agent(name="classifier", model=ScriptedModel([ValueError("PRIVATE_ERROR")]))
+    outbox = []
+    with pytest.raises(ValueError, match="PRIVATE_ERROR"), stage(tracer, "ingress"):
+        await route(tracer, "", agent, "PRIVATE_REQUEST", outbox)
+    assert not outbox
+    spans = {span.name: span for span in receiver.get_finished_spans()}
+    for name in ("ingress", "route", "specialist"):
+        assert spans[name].attributes["app.outcome"] == "failed"
+        assert not spans[name].status.is_ok
+        assert spans[name].status.description is None
+        assert not spans[name].events
+    assert "PRIVATE_" not in "".join(s.to_json() for s in receiver.get_finished_spans())
