@@ -841,6 +841,94 @@ class MCPServer(abc.ABC):
 
         return _to_bool(require_approval, location="require_approval")
 
+    tool_filter: ToolFilter = None
+
+    async def _apply_tool_filter(
+        self,
+        tools: list[MCPTool],
+        run_context: RunContextWrapper[Any] | None = None,
+        agent: AgentBase | None = None,
+    ) -> list[MCPTool]:
+        """Apply the tool filter to the list of tools."""
+        if self.tool_filter is None:
+            return tools
+
+        # Handle static tool filter
+        if isinstance(self.tool_filter, dict):
+            return self._apply_static_tool_filter(tools, self.tool_filter)
+
+        # Handle callable tool filter (dynamic filter)
+        else:
+            if run_context is None or agent is None:
+                raise UserError("run_context and agent are required for dynamic tool filtering")
+            return await self._apply_dynamic_tool_filter(tools, run_context, agent)
+
+    def _apply_static_tool_filter(
+        self, tools: list[MCPTool], static_filter: ToolFilterStatic
+    ) -> list[MCPTool]:
+        """Apply static tool filtering based on allowlist and blocklist."""
+        filtered_tools = tools
+
+        # Apply allowed_tool_names filter (whitelist)
+        if "allowed_tool_names" in static_filter:
+            allowed_names = static_filter["allowed_tool_names"]
+            filtered_tools = [t for t in filtered_tools if t.name in allowed_names]
+
+        # Apply blocked_tool_names filter (blacklist)
+        if "blocked_tool_names" in static_filter:
+            blocked_names = static_filter["blocked_tool_names"]
+            filtered_tools = [t for t in filtered_tools if t.name not in blocked_names]
+
+        return filtered_tools
+
+    async def _apply_dynamic_tool_filter(
+        self,
+        tools: list[MCPTool],
+        run_context: RunContextWrapper[Any],
+        agent: AgentBase,
+    ) -> list[MCPTool]:
+        """Apply dynamic tool filtering using a callable filter function."""
+
+        # Ensure we have a callable filter
+        if not callable(self.tool_filter):
+            raise ValueError("Tool filter must be callable for dynamic filtering")
+        tool_filter_func = self.tool_filter
+
+        # Create filter context
+        filter_context = ToolFilterContext(
+            run_context=run_context,
+            agent=agent,
+            server_name=self.name,
+        )
+
+        filtered_tools = []
+        for tool, detached in zip(tools, _snapshot_tools(tools), strict=True):
+            try:
+                # Inspect a detached copy so a mutating filter cannot corrupt the cache.
+                result = tool_filter_func(filter_context, detached)
+
+                if inspect.isawaitable(result):
+                    should_include = await result
+                else:
+                    should_include = result
+
+                if should_include:
+                    filtered_tools.append(tool)
+            except Exception as e:
+                if _debug.DONT_LOG_TOOL_DATA:
+                    message = "Error applying MCP tool filter"
+                else:
+                    server_name = get_mcp_server_log_name(self.name)
+                    message = (
+                        f"Error applying MCP tool filter to tool '{tool.name}' "
+                        f"on server '{server_name}'"
+                    )
+                log_tool_action_error(logger, message, e)
+                # On error, exclude the tool for safety
+                continue
+
+        return filtered_tools
+
     def _get_needs_approval_for_tool(
         self,
         tool: MCPTool,
@@ -1037,92 +1125,6 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                 )
             ),
         )
-
-    async def _apply_tool_filter(
-        self,
-        tools: list[MCPTool],
-        run_context: RunContextWrapper[Any] | None = None,
-        agent: AgentBase | None = None,
-    ) -> list[MCPTool]:
-        """Apply the tool filter to the list of tools."""
-        if self.tool_filter is None:
-            return tools
-
-        # Handle static tool filter
-        if isinstance(self.tool_filter, dict):
-            return self._apply_static_tool_filter(tools, self.tool_filter)
-
-        # Handle callable tool filter (dynamic filter)
-        else:
-            if run_context is None or agent is None:
-                raise UserError("run_context and agent are required for dynamic tool filtering")
-            return await self._apply_dynamic_tool_filter(tools, run_context, agent)
-
-    def _apply_static_tool_filter(
-        self, tools: list[MCPTool], static_filter: ToolFilterStatic
-    ) -> list[MCPTool]:
-        """Apply static tool filtering based on allowlist and blocklist."""
-        filtered_tools = tools
-
-        # Apply allowed_tool_names filter (whitelist)
-        if "allowed_tool_names" in static_filter:
-            allowed_names = static_filter["allowed_tool_names"]
-            filtered_tools = [t for t in filtered_tools if t.name in allowed_names]
-
-        # Apply blocked_tool_names filter (blacklist)
-        if "blocked_tool_names" in static_filter:
-            blocked_names = static_filter["blocked_tool_names"]
-            filtered_tools = [t for t in filtered_tools if t.name not in blocked_names]
-
-        return filtered_tools
-
-    async def _apply_dynamic_tool_filter(
-        self,
-        tools: list[MCPTool],
-        run_context: RunContextWrapper[Any],
-        agent: AgentBase,
-    ) -> list[MCPTool]:
-        """Apply dynamic tool filtering using a callable filter function."""
-
-        # Ensure we have a callable filter
-        if not callable(self.tool_filter):
-            raise ValueError("Tool filter must be callable for dynamic filtering")
-        tool_filter_func = self.tool_filter
-
-        # Create filter context
-        filter_context = ToolFilterContext(
-            run_context=run_context,
-            agent=agent,
-            server_name=self.name,
-        )
-
-        filtered_tools = []
-        for tool, detached in zip(tools, _snapshot_tools(tools), strict=True):
-            try:
-                # Inspect a detached copy so a mutating filter cannot corrupt the cache.
-                result = tool_filter_func(filter_context, detached)
-
-                if inspect.isawaitable(result):
-                    should_include = await result
-                else:
-                    should_include = result
-
-                if should_include:
-                    filtered_tools.append(tool)
-            except Exception as e:
-                if _debug.DONT_LOG_TOOL_DATA:
-                    message = "Error applying MCP tool filter"
-                else:
-                    server_name = get_mcp_server_log_name(self.name)
-                    message = (
-                        f"Error applying MCP tool filter to tool '{tool.name}' "
-                        f"on server '{server_name}'"
-                    )
-                log_tool_action_error(logger, message, e)
-                # On error, exclude the tool for safety
-                continue
-
-        return filtered_tools
 
     @abc.abstractmethod
     def create_streams(

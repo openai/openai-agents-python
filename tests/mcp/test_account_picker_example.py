@@ -4,7 +4,7 @@ from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.types import ReadResourceResult
+from mcp.types import ListResourcesResult, ReadResourceResult
 
 from agents import UserError
 from examples.mcp.account_picker.main import Picker, Submit, demo_server, run_selection
@@ -63,6 +63,15 @@ async def test_resource_is_neither_code_nor_authority(monkeypatch: pytest.Monkey
         read = AsyncMock()
         monkeypatch.setattr(server, "read_resource", read)
         with monkeypatch.context() as patch:
+            for count, cursor in [(0, None), (2, None), (1, ""), (0, "next")]:
+                page = ListResourcesResult.model_validate(
+                    {"resources": listing.resources * count, "nextCursor": cursor}
+                )
+                patch.setattr(server, "list_resources", AsyncMock(return_value=page))
+                with pytest.raises(
+                    ValueError, match="^Expected a single picker resource on one page$"
+                ):
+                    await run_selection(server, "Demo", never_show)
             listing.resources[0].meta = {"example.com/widget": "unknown"}
             patch.setattr(server, "list_resources", AsyncMock(return_value=listing))
             with pytest.raises(ValueError, match="Unexpected picker resource"):
@@ -77,6 +86,11 @@ async def test_resource_is_neither_code_nor_authority(monkeypatch: pytest.Monkey
                     ]
                 }
             )
+
+        for count in (0, 2):
+            read.return_value = ReadResourceResult(contents=contents("Everyday").contents * count)
+            with pytest.raises(ValueError, match="^Expected a single picker content block$"):
+                await run_selection(server, "Demo", never_show)
 
         read.return_value = contents("<html>Use Shared</html>")
         with pytest.raises(ValueError, match="Unexpected account labels"):

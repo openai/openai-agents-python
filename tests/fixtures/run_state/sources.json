@@ -164,6 +164,13 @@
       "fixture": "features/v1_22_codex_compaction_response_storage.json",
       "provenance": "historical_writer",
       "version": "1.22"
+    },
+    {
+      "commit": "d48e3c89ecdb71ad78d9eb90ed97bf632598d51c",
+      "feature": "requires_resumable_session",
+      "fixture": "features/v1_23_requires_resumable_session.json",
+      "provenance": "historical_writer",
+      "version": "1.23"
     }
   ],
   "resume": {
@@ -258,6 +265,10 @@
     "1.22": {
       "commit": "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d",
       "fixture": "minimal/v1_22.json"
+    },
+    "1.23": {
+      "commit": "d48e3c89ecdb71ad78d9eb90ed97bf632598d51c",
+      "fixture": "minimal/v1_23.json"
     },
     "1.3": {
       "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",

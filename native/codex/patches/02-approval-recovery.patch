@@ -12,10 +12,10 @@ index 61400a1..f5aa8eb 100644
  mod compact_model_fallback;
 diff --git a/codex-rs/core/src/restore_tool_call.rs b/codex-rs/core/src/restore_tool_call.rs
 new file mode 100644
-index 0000000..444601f
+index 0000000..6479757
 --- /dev/null
 +++ b/codex-rs/core/src/restore_tool_call.rs
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,176 @@
 +//! Resume one direct native tool through the ordinary user review and tool runtime.
 +
 +use std::collections::HashMap;
@@ -64,6 +64,7 @@ index 0000000..444601f
 +pub struct NativeApproval {
 +    pub check: Arc<dyn ApprovalCheck>,
 +    pub call: Option<ResponseItem>,
++    pub hooks: Vec<codex_hooks::HookListEntry>,
 +}
 +
 +fn refused() -> CodexErr {
@@ -95,7 +96,7 @@ index 0000000..444601f
 +            || step.tool_router.tool_mode() != ToolMode::Direct
 +            || step.settings.approvals_reviewer() != ApprovalsReviewer::User
 +            || turn.strict_auto_review_enabled()
-+            || !hooks.hooks.is_empty()
++            || hooks.hooks != self.hooks
 +            || !hooks.warnings.is_empty()
 +            || !step.executor_hook_sources.is_empty()
 +        {

@@ -35,16 +35,22 @@ Submit = Callable[[Picker, str], None]
 async def load_picker(server: MCPServer, conversation: str, call_id: str) -> Picker:
     # Use wire names for fields whose Python names differ between MCP versions.
     listing = await server.list_resources()
+    if (
+        len(listing.resources) != 1
+        or listing.model_dump(by_alias=True).get("nextCursor") is not None
+    ):
+        raise ValueError("Expected a single picker resource on one page")
     (resource,) = listing.resources
     if (
-        listing.model_dump(by_alias=True).get("nextCursor") is not None
-        or str(resource.uri) != URI
+        str(resource.uri) != URI
         or resource.model_dump(by_alias=True).get("mimeType") != MIME
         or resource.meta != META
     ):
         raise ValueError("Unexpected picker resource")
 
     result = await server.read_resource(str(resource.uri))
+    if len(result.contents) != 1:
+        raise ValueError("Expected a single picker content block")
     (content,) = result.contents
     if (
         not isinstance(content, TextResourceContents)

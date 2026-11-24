@@ -6,6 +6,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar, cast
 
+from .._redaction import hook_payload_diagnostics, redact_payload
 from ..exceptions import UserError
 
 TContext = TypeVar("TContext")
@@ -15,6 +16,7 @@ CustomDataExtractor = Callable[
 ]
 
 
+@hook_payload_diagnostics("Invalid custom tool data.", redact_by_default=False)
 def normalize_custom_data(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Return a JSON-compatible copy of custom tool-output data."""
     if value is None:
@@ -28,7 +30,7 @@ def normalize_custom_data(value: Mapping[str, Any] | None) -> dict[str, Any] | N
 
     copied = copy.deepcopy(dict(value))
     try:
-        return cast(dict[str, Any], json.loads(json.dumps(copied, allow_nan=False)))
+        return redact_payload(cast(dict[str, Any], json.loads(json.dumps(copied, allow_nan=False))))
     except (TypeError, ValueError) as exc:
         raise UserError("custom_data_extractor must return JSON-compatible data.") from exc
 
@@ -41,9 +43,10 @@ async def maybe_extract_custom_data(
     if extractor is None:
         return None
 
-    result = extractor(context)
-    if inspect.isawaitable(result):
-        result = await result
+    with hook_payload_diagnostics("Custom tool data extraction failed.", redact_by_default=False):
+        result = extractor(context)
+        if inspect.isawaitable(result):
+            result = await result
     return normalize_custom_data(result)
 
 
