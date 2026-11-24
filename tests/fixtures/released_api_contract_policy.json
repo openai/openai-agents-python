@@ -739,6 +739,16 @@
       ]
     },
     {
+      "class_name": "NativeMCPResult",
+      "module": "agents",
+      "names": [
+        "content",
+        "structuredContent",
+        "isError",
+        "_meta"
+      ]
+    },
+    {
       "class_name": "ModelStepSpec",
       "module": "agents.testing.model",
       "names": [

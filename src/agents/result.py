@@ -57,6 +57,7 @@ from .stream_events import ApprovedText, RunCompleted, StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .tracing.traces import TraceState
+from .usage import Usage
 from .util._pretty_print import (
     pretty_print_result,
     pretty_print_run_result_streaming,
@@ -456,6 +457,11 @@ class RunResultBase(abc.ABC):
         # RunResult objects are runtime values; schema generation should treat them as instances
         # instead of recursively traversing internal dataclass annotations.
         return core_schema.is_instance_schema(cls)
+
+    @property
+    def usage(self) -> Usage:
+        """Reported request and token counts for this run, updated as the run progresses."""
+        return self.context_wrapper.usage
 
     @property
     @abc.abstractmethod

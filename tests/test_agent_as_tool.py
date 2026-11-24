@@ -780,6 +780,7 @@ async def test_agent_as_tool_fallback_uses_current_run_items_only(
 
     class DummyResult:
         def __init__(self) -> None:
+            self.last_agent = agent
             self.final_output = ""
             self.output_guardrail_results: list[Any] = []
             self.new_items = [
@@ -874,6 +875,7 @@ async def test_agent_as_tool_fallback_returns_most_recent_current_run_output(
 
     class DummyResult:
         def __init__(self) -> None:
+            self.last_agent = agent
             self.final_output = ""
             self.output_guardrail_results: list[Any] = []
             self.new_items = [

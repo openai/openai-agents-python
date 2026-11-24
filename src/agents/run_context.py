@@ -157,6 +157,7 @@ class _ToolInvocationRecord:
     fingerprint: str
     executed: bool = False
     completed: bool = False
+    requires_text_transform: bool = field(default=False, kw_only=True)
     # The input admitted under this ID, paired with the digest of the original proposal.
     input_rewrite: tuple[str, dict[str, Any]] | None = None
     requires_declaration: bool = False
@@ -1651,6 +1652,11 @@ class RunContextWrapper(Generic[TContext]):
                 )
             if not isinstance(serialized_invocation, Mapping):
                 raise validation_error_factory("RunState tool invocation must be a mapping.")
+            requires_edit = serialized_invocation.get("requires_text_transform", False)
+            if not isinstance(requires_edit, bool):
+                raise validation_error_factory(
+                    "RunState tool text transform requirement is invalid."
+                )
             invocation_type = serialized_invocation.get("type")
             approval_scope = serialized_invocation.get("approval_scope")
             fingerprint = serialized_invocation.get("fingerprint")
@@ -1692,6 +1698,7 @@ class RunContextWrapper(Generic[TContext]):
                 invocation_type=invocation_type,
                 approval_scope=approval_scope,
                 fingerprint=fingerprint,
+                requires_text_transform=requires_edit,
                 executed=executed,
                 completed=completed,
                 input_rewrite=input_rewrite,

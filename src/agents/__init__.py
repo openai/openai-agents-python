@@ -10,6 +10,7 @@ from .agent import (
     Agent,
     AgentBase,
     AgentToolStreamEvent,
+    ContinueWithFeedback,
     ProposedFinalOutput,
     StopAtTools,
     ToolsToFinalOutputFunction,
@@ -117,6 +118,8 @@ from .retry import (
 from .run import (
     ModelSelectionData,
     ModelSelector,
+    NativeMCPResult,
+    NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -131,6 +134,7 @@ from .run import (
     ToolNotFoundBehavior,
 )
 from .run_budget import RunBudget, RunBudgetError
+from .run_config import MCPTextTransform
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
     RunErrorData,
@@ -379,6 +383,7 @@ __all__ = [
     "Agent",
     "AgentBase",
     "AgentToolStreamEvent",
+    "ContinueWithFeedback",
     "ProposedFinalOutput",
     "StopAtTools",
     "ToolsToFinalOutputFunction",
@@ -507,9 +512,12 @@ __all__ = [
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
+    "NativeMCPResult",
+    "NativeMCPResultTransform",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",

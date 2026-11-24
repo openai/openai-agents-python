@@ -6,6 +6,7 @@ import functools
 import hashlib
 import inspect
 import json
+import weakref
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -60,6 +61,14 @@ if TYPE_CHECKING:
 
     from ..agent import AgentBase
     from .server import MCPServer
+
+
+class _FilteredTools(list["MCPTool"]):
+    """Visible tools with raw-name evidence from the same complete discovery."""
+
+    def __init__(self, tools: list[MCPTool], names: frozenset[str]) -> None:
+        super().__init__(tools)
+        self._raw_names = names
 
 
 _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
@@ -386,7 +395,14 @@ class MCPUtil:
             )
             for index, tool in enumerate(tools)
         ]
+        # Share one snapshot from this discovery, before agent-level omissions.
+        names: frozenset[str] | None
+        if isinstance(tools, _FilteredTools):
+            names = tools._raw_names
+        else:
+            names = frozenset(t.name for t in tools) if server.tool_filter is None else None
         for function_tool in function_tools:
+            function_tool._mcp_raw_names = names
             assert function_tool._mcp_tool_binding is not None
             server_name, raw_tool_name, _ = function_tool._mcp_tool_binding
             function_tool._mcp_tool_binding = (server_name, raw_tool_name, server_index)
@@ -611,6 +627,7 @@ class MCPUtil:
                 mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
+        function_tool._mcp_server_ref = weakref.ref(server)
         function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
         require_clean_function(function_tool)
@@ -764,6 +781,10 @@ class MCPUtil:
 
                 invoke = check_and_call
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
+            if isinstance(context, ToolContext) and context._edit_text is not None:
+                from ..tool import _protect_selected_task
+
+                invoke = functools.partial(_protect_selected_task, invoke)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
             call_task = asyncio.create_task(invoke())
             try:
@@ -789,6 +810,8 @@ class MCPUtil:
             # will format them into model-visible tool errors when appropriate.
             raise
         except Exception as e:
+            if isinstance(context, ToolContext) and context._edit_text is not None:
+                raise
             if isinstance(e, MCPError):
                 # An MCP-level error (e.g. upstream HTTP 4xx/5xx, tool not found, etc.)
                 # is not a programming error – re-raise so the FunctionTool failure
@@ -818,6 +841,13 @@ class MCPUtil:
                 f"Error invoking MCP tool {tool_name_for_display} on server "
                 f"'{get_mcp_server_log_name(server.name)}': {e}"
             ) from e
+
+        if isinstance(context, ToolContext) and context._edit_text is not None:
+            from ..run_internal.tool_text import edit_mcp_result
+
+            result = await edit_mcp_result(
+                context._edit_text, result, server.use_structured_content
+            )
 
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("MCP tool completed.")
