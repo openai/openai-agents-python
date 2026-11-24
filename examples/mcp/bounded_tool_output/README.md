@@ -21,7 +21,7 @@ At the tool boundary, the budget covers the sum of UTF-8 text bytes per result, 
 
 ## Retrieve privately
 
-Create one `Reports` instance per run. Load the owner from a trusted application record. Pass only the authenticated requester as the run context. Never accept either identity from tool arguments or a reference. The reader uses only summaries and references issued by this store. It ignores tool output, including short reports, errors and text that looks like a reference. Without an authorized saved report, it prints a fixed message.
+Create one `Reports` instance per run. Load the owner's nonblank string ID from a trusted application record. The store compares IDs exactly. Pass only the authenticated requester as the run context. Never accept either identity from tool arguments or a reference. The reader uses only summaries and references issued by this store. It ignores tool output, including short reports, errors and text that looks like a reference. Without an authorized saved report, it prints a fixed message.
 
 After the run, inside the `closing` block, application code can read the first page of each saved text part. Keep these pages out of tool results and model input.
 

@@ -369,6 +369,26 @@ async def test_reader_ignores_pass_through_and_forged_references(monkeypatch, ca
         assert lines == ["No saved reports available."]
 
 
+@pytest.mark.parametrize("owner", [None, 0, "", " \t\n"])
+def test_reports_require_a_nonblank_string_owner(owner):
+    with pytest.raises(ValueError, match="nonblank string"):
+        recipe.Reports(owner)
+
+
+@pytest.mark.asyncio
+async def test_reader_requires_exact_owner():
+    owner = f" {OWNER} "
+    with closing(recipe.Reports(owner)) as reports:
+        text = "WARN: " * 25
+        await reports.bound((text,))
+        ((reference, _, _),) = reports.saved(owner)
+        assert reports.fetch(owner, reference) == text[:64]
+        for requester in (None, OWNER):
+            assert reports.saved(requester) == ()
+            with pytest.raises(PermissionError, match="Report unavailable"):
+                reports.fetch(requester, reference)
+
+
 @pytest.mark.asyncio
 async def test_reader_requires_live_owner(capsys):
     with closing(recipe.Reports(OWNER)) as reports:

@@ -37,6 +37,8 @@ class Reports:
     """Private storage for one owner and one run. Never put this object in SDK context."""
 
     def __init__(self, owner: str):
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("Report owner must be a nonblank string")
         self._owner = owner
         self._reports: dict[str, tuple[str, tuple[str, ...]]] | None = {}
 
