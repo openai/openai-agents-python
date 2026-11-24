@@ -398,7 +398,7 @@ def _get_turn_input(
     if run_state is not None and run_state._task_input_ids == ():
         # The caller withdrew the follow-up. Do not revive the previous task.
         return []
-    if run_state is not None and run_state._task_input_ids:
+    if run_state is not None and isinstance(run_state._task_input_ids, tuple):
         # An approval can pause the run before the server accepts the whole
         # task. Restore its order from pending input and the agent's history.
         visible: dict[str, TResponseInputItem | None] = dict.fromkeys(run_state._task_input_ids)

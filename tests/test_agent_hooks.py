@@ -703,13 +703,14 @@ async def test_cleared_pending_input_cannot_rejoin_follow_up_by_position(streame
 
 
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("serialize", [False, True], ids=["in-memory", "json"])
 @pytest.mark.parametrize(
     "server_managed,omission",
     [(False, None), (True, None), (True, "all"), (True, "partial")],
     ids=["local", "server", "server-withheld", "server-partly-withheld"],
 )
 async def test_follow_up_turn_input_survives_approval_resume(
-    streamed: bool, server_managed: bool, omission: str | None
+    streamed: bool, serialize: bool, server_managed: bool, omission: str | None
 ) -> None:
     inbox = RunInbox()
     hooks = AgentHooksWithTurnInput()
@@ -754,6 +755,8 @@ async def test_follow_up_turn_input_survives_approval_resume(
     )
     assert len(paused.interruptions) == 1 and not effects
     state = paused.to_state()
+    if serialize:
+        state = await RunState.from_string(agent, state.to_string())
     outcomes = [await receipt.wait() for receipt in receipts]
     if omission:
         assert [item.get("content") for item in state.pending_input] == task[:1]
@@ -881,19 +884,33 @@ async def test_delayed_approval_checkpoint_isolated_from_reused_context(streamed
 
 
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("filtered", [False, True])
-async def test_follow_up_turn_input_respects_handoff_filter(streamed: bool, filtered: bool) -> None:
+@pytest.mark.parametrize(
+    "filter_mode,serialize",
+    [("none", True), ("replace", True), ("repeat", False), ("repeat", True)],
+)
+async def test_follow_up_turn_input_respects_handoff_filter(
+    streamed: bool, filter_mode: str, serialize: bool
+) -> None:
     inbox = RunInbox()
     hooks = AgentHooksWithTurnInput()
-    destination = Agent(
-        name="destination", model=ScriptedModel([[get_text_message("done")]]), hooks=hooks
-    )
+    tool_inputs: list[list[Any]] = []
+
+    @function_tool(needs_approval=True)
+    async def work(ctx: RunContextWrapper[Any]) -> str:
+        tool_inputs.append(list(ctx.turn_input))
+        return "done"
+
+    model = ScriptedModel([[get_function_tool_call("work", "{}")], [get_text_message("done")]])
+    destination = Agent(name="destination", model=model, hooks=hooks, tools=[work])
 
     def first_answer(call: ModelCall) -> list[Any]:
         inbox.queue("second task")
         return [get_text_message("first answer")]
 
     def filter_input(data: HandoffInputData) -> HandoffInputData:
+        if filter_mode == "repeat":
+            items = data.pre_handoff_items
+            return data.clone(pre_handoff_items=(*items, items[-1]))
         return replace(data, input_history="public summary", pre_handoff_items=())
 
     source = Agent(
@@ -901,12 +918,32 @@ async def test_follow_up_turn_input_respects_handoff_filter(streamed: bool, filt
         model=ScriptedModel(
             [ModelStep.respond(first_answer), [get_handoff_tool_call(destination, args="{}")]]
         ),
-        handoffs=[handoff(destination, input_filter=filter_input if filtered else None)],
+        handoffs=[
+            handoff(destination, input_filter=None if filter_mode == "none" else filter_input)
+        ],
     )
-    await _run_with_inbox(source, inbox, streamed)
-    content = "public summary" if filtered else "second task"
+    paused = await _run_with_inbox(source, inbox, streamed)
+    content = "public summary" if filter_mode == "replace" else "second task"
     expected = [[{"role": "user", "content": content}]]
-    assert hooks.captured_turn_inputs == hooks.end_inputs == expected
+    assert hooks.captured_turn_inputs == expected
+    assert len(paused.interruptions) == 1 and not tool_inputs
+    state = paused.to_state()
+    if serialize:
+        context = RunContextWrapper(context=None)
+        state = await RunState.from_string(source, state.to_string(), context_override=context)
+        assert context.turn_input == expected[0]
+    state.approve(state.get_interruptions()[0])
+    resumed = await _run_with_inbox(source, RunInbox(), streamed, value=state)
+    assert resumed.final_output == "done"
+    assert tool_inputs == hooks.end_inputs == expected
+    if filter_mode == "replace":
+        assert [
+            item.get("content") for item in model.calls[-1].input if item.get("role") == "user"
+        ] == ["public summary"]
+    elif filter_mode == "repeat":
+        assert [
+            item.get("content") for item in model.calls[-1].input if item.get("role") == "user"
+        ] == ["first task", "second task", "second task"]
 
 
 @pytest.mark.asyncio

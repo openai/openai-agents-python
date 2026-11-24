@@ -129,9 +129,9 @@ class RunInbox:
     For a paused run, use RunState.add_input before resuming with a fresh inbox.
     Do not wait for a receipt inside a tool that must finish before delivery.
 
-    If approval pauses a follow-up that depends on context.turn_input, resume
-    the RunState in memory. Serialized checkpoints preserve the conversation
-    but omit the boundary between tasks.
+    If approval pauses a follow-up, the checkpoint identifies the active task
+    so guardrails see the same input after resume. It does not save the inbox
+    or messages still waiting in the queue.
 
     Callbacks should propagate CancelledError after cleanup. On Python 3.10,
     Runner.run cannot detect cancellation if a callback suppresses that exception.

@@ -497,7 +497,7 @@ class RunResultBase(abc.ABC):
         default_factory=list, init=False, repr=False
     )
     """Pending input preserved when a non-streaming result is converted back to RunState."""
-    _task_input_ids_for_state: tuple[str, ...] | None = field(
+    _task_input_ids_for_state: tuple[str, ...] | Literal["handoff"] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _pending_input_ids_for_state: tuple[str, ...] = field(

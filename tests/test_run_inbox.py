@@ -29,11 +29,14 @@ from agents import (
     RunState,
     ToolCallOutputItem,
     ToolExecutionConfig,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
     ToolsToFinalOutputResult,
     UserError,
     function_tool,
     handoff,
     output_guardrail,
+    tool_input_guardrail,
 )
 from agents.decorators import tool
 from agents.models.interface import ModelProvider
@@ -941,10 +944,145 @@ async def test_server_filtered_input_survives_approval_state_roundtrip(
         await finish(task, release)
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("serialize", [False, True], ids=["in-memory", "json"])
+async def test_approved_tool_guardrail_checks_follow_up_after_resume(
+    streamed: bool, serialize: bool
+) -> None:
+    inbox = RunInbox()
+    checked: list[list[str]] = []
+    effects: list[str] = []
+
+    def first_answer(call):
+        inbox.queue("Review the private draft.")
+        return [assistant_message("Public draft reviewed.")]
+
+    @tool_input_guardrail
+    def check_publication(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        task = messages(data.context.turn_input)
+        checked.append(task)
+        if task == ["Review the public draft."]:
+            return ToolGuardrailFunctionOutput.allow()
+        return ToolGuardrailFunctionOutput.reject_content("Publication blocked.")
+
+    @function_tool(needs_approval=True, tool_input_guardrails=[check_publication])
+    async def publish() -> str:
+        effects.append("published")
+        return "Published."
+
+    model = ScriptedModel(
+        [
+            ModelStep.respond(first_answer),
+            [function_call("publish", "{}", call_id="publish-draft")],
+            [assistant_message("Review complete.")],
+        ]
+    )
+    agent = Agent(name="editor", model=model, tools=[publish])
+    paused = await drive(streamed, agent, "Review the public draft.", inbox=inbox)
+    assert len(paused.interruptions) == 1
+    assert checked == effects == []
+    state = paused.to_state()
+    if serialize:
+        state = await RunState.from_string(agent, state.to_string())
+    state.approve(state.get_interruptions()[0])
+    await drive(streamed, agent, state)
+
+    assert checked == [["Review the private draft."]]
+    assert effects == []
+    assert model.calls[-1].input[-1]["output"] == "Publication blocked."
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "missing-field-generated",
+        "missing-field-pending",
+        "missing-item-id",
+        "unknown-id",
+        "ambiguous-id",
+        "duplicate-id",
+        "duplicate-position",
+        "boolean-position",
+        "negative-position",
+        "out-of-range-position",
+        "non-list",
+        "older-schema",
+    ],
+)
+async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
+    inbox = RunInbox()
+    effects: list[str] = []
+
+    def first_answer(call):
+        inbox.steer("Review the private draft.")
+        inbox.steer("Do not publish it.")
+        return [assistant_message("Public draft reviewed.")]
+
+    @function_tool(needs_approval=True)
+    async def publish() -> str:
+        effects.append("published")
+        return "Published."
+
+    model = ScriptedModel()
+    if invalid != "missing-field-pending":
+        model.enqueue(ModelStep.respond(first_answer))
+    model.enqueue([function_call("publish", "{}", call_id="publish-draft")])
+    agent = Agent(name="editor", model=model, tools=[publish])
+    paused = await drive(False, agent, "Review the public draft.", inbox=inbox)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    if invalid != "missing-field-generated":
+        state.add_input("One more instruction.")
+    payload = state.to_json()
+    if invalid.startswith("missing-field"):
+        payload.pop("task_input_refs", None)
+        with pytest.raises(UserError):
+            await RunState.from_json(agent, payload)
+        assert effects == []
+        return
+    first, second = [
+        item["input_id"] for item in payload["generated_items"] if item["type"] == "input_item"
+    ]
+    if invalid in {"missing-item-id", "ambiguous-id"}:
+        for history in ("generated_items", "session_items"):
+            for item in payload[history]:
+                if item.get("input_id") == second:
+                    if invalid == "missing-item-id":
+                        del item["input_id"]
+                    else:
+                        item["input_id"] = first
+        payload["task_input_refs"] = [second if invalid == "missing-item-id" else first]
+    elif invalid == "older-schema":
+        payload["$schemaVersion"] = "1.26"
+        payload.pop("task_input_refs", None)
+        # The intermediate writer omitted follow-up identity. It cannot resume safely.
+        with pytest.raises(UserError, match="schema version is not supported"):
+            await RunState.from_json(agent, payload)
+        payload["$schemaVersion"] = "1.25"
+        # The older label alone is valid. It cannot carry a newer task selection.
+        await RunState.from_json(agent, payload)
+        payload["task_input_refs"] = [first, second]
+    else:
+        payload["task_input_refs"] = {
+            "unknown-id": ["missing"],
+            "duplicate-id": [first, first],
+            "duplicate-position": [0, 0],
+            "boolean-position": [False],
+            "negative-position": [-1],
+            "out-of-range-position": [1],
+            "non-list": first,
+        }[invalid]
+
+    with pytest.raises(UserError):
+        await RunState.from_json(agent, payload)
+    assert effects == []
+
+
 @pytest.mark.parametrize("resume_streamed", [False, True])
 @pytest.mark.parametrize("replace_pending", [False, True], ids=["retained", "replaced"])
+@pytest.mark.parametrize("serialized", [False, True])
 async def test_follow_up_survives_session_append_failure(
-    resume_streamed: bool, replace_pending: bool
+    resume_streamed: bool, replace_pending: bool, serialized: bool
 ) -> None:
     class Session(SimpleListSession):
         failed = False
@@ -994,9 +1132,13 @@ async def test_follow_up_survives_session_append_failure(
     assert messages(await session.get_items()) == ["first task"]
 
     state = stream.to_state()
+    if serialized:
+        state = await RunState.from_string(agent, state.to_string())
     assert messages(state.pending_input) == ["second task"]
     if replace_pending:
         state.clear_pending_input()
+        if serialized:
+            state = await RunState.from_json(agent, state.to_json())
         state.add_input("replacement")
     expected = "replacement" if replace_pending else "second task"
 
@@ -1840,6 +1982,45 @@ async def test_immediate_cancel_prevents_effects_from_late_response(
             "resp-first",
             "resp-late",
         ]
+
+
+@pytest.mark.skipif(not hasattr(asyncio.Task, "cancelling"), reason="Requires Task.cancelling")
+async def test_awaited_cancel_prevents_tool_from_late_queued_response() -> None:
+    inbox = RunInbox()
+    entered = asyncio.Event()
+    effects: list[str] = []
+    receipts: list[MessageReceipt] = []
+
+    @tool
+    async def work() -> str:
+        effects.append("tool")
+        return "unexpected"
+
+    def first(call):
+        receipts.append(inbox.queue("next"))
+        return [assistant_message("first")]
+
+    async def late_response(call):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return [function_call("work", "{}", call_id="late-call")]
+
+    model = ScriptedModel([ModelStep.respond(first), ModelStep.respond(late_response)])
+    agent = Agent(name="worker", model=model, tools=[work], tool_use_behavior="stop_on_first_tool")
+    task = asyncio.create_task(
+        Runner.run(agent, "start", inbox=inbox, run_config=RunConfig(tracing_disabled=True))
+    )
+    try:
+        await wait(entered)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+        assert effects == []
+        assert (await receipts[0].wait()).status == "submitted"
+    finally:
+        await finish(task)
 
 
 async def test_immediate_cancel_during_input_filter_never_dispatches() -> None:

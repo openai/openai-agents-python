@@ -717,7 +717,8 @@ async def test_nested_specialist_uses_fresh_context_and_owns_approval(stream):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("clear_pending", [False, True], ids=["retained", "cleared"])
-async def test_specialist_resume_checks_current_follow_up_input(stream, clear_pending):
+@pytest.mark.parametrize("serialized", [False, True])
+async def test_specialist_resume_checks_current_follow_up_input(stream, clear_pending, serialized):
     inbox = RunInbox()
     effects = []
 
@@ -774,6 +775,13 @@ async def test_specialist_resume_checks_current_follow_up_input(stream, clear_pe
     assert [item.get("content") for item in state.pending_input] == ["include blue"]
     if clear_pending:
         state.clear_pending_input()
+    if serialized:
+        if clear_pending:
+            with pytest.raises(UserError, match="specialist unavailable"):
+                await RunState.from_json(source, state.to_json(), context_override={})
+            assert not effects
+            return
+        state = await RunState.from_json(source, state.to_json(), context_override={})
     state.approve(state.get_interruptions()[0])
     if clear_pending:
         with pytest.raises(UserError, match="specialist unavailable"):

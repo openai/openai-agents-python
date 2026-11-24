@@ -266,7 +266,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.26"
+CURRENT_SCHEMA_VERSION = "1.27"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -335,7 +335,11 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
     "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
-    "1.26": "Requires an exact text editor when resuming selected tool calls.",
+    # Replace the unreleased 1.26 writer. It would ignore the active task on resume.
+    "1.27": (
+        "Preserves the active task across approval resumes and requires an exact text "
+        "editor when resuming selected tool calls."
+    ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -929,9 +933,10 @@ class RunState(Generic[TContext, TAgent]):
     _pending_input: list[TResponseInputItem] = field(default_factory=list)
     """Input staged for admission immediately before the next resumed model call."""
 
-    # None selects the original task. An empty tuple means the caller withdrew
+    # None selects the original task. "handoff" selects the replacement input
+    # supplied by a handoff filter. An empty tuple means the caller withdrew
     # the whole follow-up. The next admitted input becomes its replacement.
-    _task_input_ids: tuple[str, ...] | None = field(
+    _task_input_ids: tuple[str, ...] | Literal["handoff"] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     # Input stays pending until the session saves it or the server acknowledges it.
@@ -1082,6 +1087,70 @@ class RunState(Generic[TContext, TAgent]):
             from .run_internal.turn_resolution import _get_turn_input
 
             context.turn_input = _get_turn_input(self, self._original_input, self._generated_items)
+
+    def _visible_task_input_ids(
+        self,
+        ids: set[str],
+        validation_error_factory: RunStateValidationErrorFactory,
+    ) -> set[str]:
+        # A handoff filter may repeat an occurrence. Its ID still identifies one
+        # task message as long as all visible copies have the same content.
+        visible: dict[str, InputItem] = {}
+        for item in self._generated_items:
+            if not isinstance(item, InputItem) or item.input_id not in ids:
+                continue
+            previous = visible.setdefault(item.input_id, item)
+            if previous is not item and json.dumps(
+                _serialize_raw_item_value(previous.raw_item), sort_keys=True
+            ) != json.dumps(_serialize_raw_item_value(item.raw_item), sort_keys=True):
+                raise validation_error_factory("Invalid active task input references.", UserError)
+        return set(visible)
+
+    def _task_input_refs(self) -> list[str | int] | Literal["handoff"] | None:
+        """Reference only input visible to the current agent, without copying its text."""
+        if not isinstance(self._task_input_ids, tuple):
+            return self._task_input_ids
+        pending = {key: index for index, key in enumerate(self._pending_input_ids)}
+        visible = self._visible_task_input_ids(
+            set(self._task_input_ids), _default_run_state_validation_error
+        )
+        refs = [
+            pending.get(key, key)
+            for key in self._task_input_ids
+            if key in pending or key in visible
+        ]
+        # A handoff can replace the entire task with the receiving agent's input.
+        # An explicitly withdrawn task stays empty instead.
+        return refs if refs or not self._task_input_ids else "handoff"
+
+    def _restore_task_input_refs(
+        self, refs: object, validation_error_factory: RunStateValidationErrorFactory
+    ) -> None:
+        if refs is None:
+            return
+
+        def invalid() -> RunStateValidationError:
+            return validation_error_factory("Invalid active task input references.", UserError)
+
+        if refs == "handoff":
+            self._task_input_ids = "handoff"
+            return
+        if not isinstance(refs, list):
+            raise invalid()
+        visible = self._visible_task_input_ids(
+            {ref for ref in refs if isinstance(ref, str)}, validation_error_factory
+        )
+        ids: list[str] = []
+        for ref in refs:
+            if isinstance(ref, str) and ref and ref in visible:
+                ids.append(ref)
+            elif type(ref) is int and 0 <= ref < len(self._pending_input):
+                ids.append(self._track_pending_input()[ref])
+            else:
+                raise invalid()
+        if len(ids) != len(set(ids)):
+            raise invalid()
+        self._task_input_ids = tuple(ids)
 
     async def _check_pending_specialists(
         self, root: Agent[Any], context: RunContextWrapper[Any]
@@ -1289,7 +1358,7 @@ class RunState(Generic[TContext, TAgent]):
 
     def clear_pending_input(self) -> None:
         """Remove all input staged for the next resumed model call."""
-        if self._task_input_ids and self._pending_input_ids:
+        if isinstance(self._task_input_ids, tuple) and self._pending_input_ids:
             withdrawn = set(self._pending_input_ids)
             self._task_input_ids = tuple(
                 input_id for input_id in self._task_input_ids if input_id not in withdrawn
@@ -1695,7 +1764,7 @@ class RunState(Generic[TContext, TAgent]):
                 "executed": invocation.executed,
                 "completed": invocation.completed,
             }
-            # Schema 1.26 retains the requirement, never the editor or selector objects.
+            # The checkpoint retains the requirement, never the editor or selector objects.
             if invocation.requires_text_transform and not invocation.completed:
                 record["requires_text_transform"] = True
             if invocation.input_rewrite is not None:
@@ -2253,6 +2322,7 @@ class RunState(Generic[TContext, TAgent]):
             "current_agent": current_agent_entry,
             "original_input": original_input_serialized,
             "pending_input": self._serialize_input(self._pending_input),
+            "task_input_refs": self._task_input_refs(),
             "model_responses": model_responses,
             "context": context_entry,
             "tool_use_tracker": copy.deepcopy(self._tool_use_tracker_snapshot),
@@ -2856,8 +2926,11 @@ def _validate_pending_approvals(
     required_children: set[int],
     *,
     nested: bool = False,
-) -> tuple[bool, bool]:
-    """Check pending approvals and propagate budget and editor requirements to ancestors."""
+) -> tuple[bool, bool, bool]:
+    """Propagate the requirements of pending approvals to their ancestors."""
+    if state.get("$schemaVersion") == CURRENT_SCHEMA_VERSION and "task_input_refs" not in state:
+        raise validation_error_factory("Missing active task input references.", UserError)
+    requires_task = state.get("task_input_refs") is not None
     context = state.get("context")
     requires_budget = isinstance(context, dict) and "budget" in context
     invocations = context.get("tool_invocations") if isinstance(context, dict) else None
@@ -2885,26 +2958,32 @@ def _validate_pending_approvals(
             child = entry.get("agent_run_state") if isinstance(entry, dict) else None
             if not isinstance(child, dict):
                 continue
-            budget, editor = _validate_pending_approvals(
+            budget, editor, task = _validate_pending_approvals(
                 child, validation_error_factory, required_children, nested=True
             )
-            if budget or editor:
+            if budget or editor or task:
                 # Track the exact child snapshot until its pending run is registered.
                 required_children.add(id(child))
                 requires_budget |= budget
                 requires_editor |= editor
-    if requires_budget or requires_editor:
+                requires_task |= task
+    # A 1.26 child lacks the marker that would otherwise make its restoration mandatory.
+    if requires_budget or requires_editor or requires_task or state.get("$schemaVersion") == "1.26":
         version = _validate_run_state_schema_version(
             state, validation_error_factory=validation_error_factory
         )
         schema = tuple(map(int, version.split(".")))
-        if requires_editor and schema < (1, 26):
+        if requires_task and schema < (1, 27):
             raise validation_error_factory(
-                "Tool text transforms require RunState schema 1.26.", UserError
+                "Active task input requires RunState schema 1.27.", UserError
+            )
+        if requires_editor and schema < (1, 27):
+            raise validation_error_factory(
+                "Tool text transforms require RunState schema 1.27.", UserError
             )
         if requires_budget and schema < (1, 25):
             raise _BudgetCheckpointError("Run budgets require schema 1.25 or later.")
-    return requires_budget, requires_editor
+    return requires_budget, requires_editor, requires_task
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -4897,17 +4976,21 @@ async def _build_run_state_from_json(
         [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
     )
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
-    state._check_specialist(
-        initial_agent,
-        context if context_override is not None else None,
-        restore_error=validation_error_factory,
-    )
     serialized_generated_items = state_json.get("generated_items", [])
     state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
         serialized_generated_items,
         agent_map,
         agent_identity_map=agent_identity_map,
         validation_error_factory=validation_error_factory,
+    )
+
+    # Authorization checks, including those for nested tools, need the current task.
+    state._restore_task_input_refs(state_json.get("task_input_refs"), validation_error_factory)
+    state._restore_task_input(context)
+    state._check_specialist(
+        initial_agent,
+        context if context_override is not None else None,
+        restore_error=validation_error_factory,
     )
 
     last_processed_response_data = state_json.get("last_processed_response")
@@ -6121,6 +6204,9 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             "Start a new run with unique agent names; the saved hook ordering is unavailable."
         ),
         "Run state pending_input must be a list",
+        "Missing active task input references.",
+        "Invalid active task input references.",
+        "Active task input requires RunState schema 1.27.",
         "Run state pending Session write is invalid",
         "Invalid tool output guardrail result boundary",
         "Run state tool output guardrail result boundary requires schema 1.20.",
@@ -6161,7 +6247,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         _REQUIRED_CHILD_MISSING,
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
-        "Tool text transforms require RunState schema 1.26.",
+        "Tool text transforms require RunState schema 1.27.",
         "RunState tool text transform requirement is invalid.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",

@@ -4506,6 +4506,7 @@ class TestSerializationRoundTrip:
         # Create state JSON with original_input containing dict items that should be normalized.
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
+            "task_input_refs": None,
             "current_turn": 0,
             "current_agent": {"name": "TestAgent"},
             "original_input": [
@@ -11101,6 +11102,7 @@ class TestDeserializeItemsEdgeCases:
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
+            "task_input_refs": None,
             "current_turn": 0,
             "current_agent": {"name": "TestAgent"},
             "original_input": [
@@ -11129,6 +11131,7 @@ class TestDeserializeItemsEdgeCases:
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
+            "task_input_refs": None,
             "current_turn": 0,
             "current_agent": {"name": "TestAgent"},
             "original_input": "string_input",  # String - tests line 762-763
@@ -11213,6 +11216,7 @@ class TestDeserializeItemsEdgeCases:
 
         state_json = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
+            "task_input_refs": None,
             "current_turn": 0,
             "current_agent": {"name": "TestAgent"},
             "original_input": [

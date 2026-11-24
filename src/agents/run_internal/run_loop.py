@@ -3188,6 +3188,10 @@ async def run_single_turn(
     response_accepted = False
     if on_response_accepted is not None:
         response_accepted = on_response_accepted(new_response, None)
+    # Keep the accepted response and its usage, even if the adapter suppressed cancellation.
+    inbox = current_inbox()
+    if inbox is not None:
+        inbox._check_owner_cancellation()
 
     async def after_invocation_validation(
         _processed_response: ProcessedResponse | None,
@@ -3196,6 +3200,8 @@ async def run_single_turn(
             require_clean_run_items(original_input, session_items, _processed_response.new_items)
         if response_accepted and on_response_accepted is not None:
             on_response_accepted(new_response, _processed_response)
+        if inbox is not None:
+            inbox._check_owner_cancellation()
         if response_accepted and on_response_hooks_started is not None:
             on_response_hooks_started()
         await gather_with_cancel(
@@ -3206,6 +3212,8 @@ async def run_single_turn(
             ),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),
         )
+        if inbox is not None:
+            inbox._check_owner_cancellation()
         return response_accepted
 
     return await get_single_step_result_from_response(
