@@ -159,17 +159,16 @@ class ToolCallHookContext(Generic[TContext]):
     """
 
 
-# Evaluate NotRequired now so runtime introspection also sees the optional keys.
-NativeMCPResult = TypedDict(  # noqa: UP013
-    "NativeMCPResult",
-    {
-        "content": list[dict[str, Any]],
-        "structuredContent": NotRequired[Any],
-        "isError": NotRequired[bool | None],
-        "_meta": NotRequired[dict[str, Any] | None],
-    },
-)
-"""A native MCP result. Content blocks may include peer-specific fields."""
+class _NativeMCPContent(TypedDict):
+    content: list[dict[str, Any]]
+
+
+class NativeMCPResult(_NativeMCPContent, total=False):
+    """A native MCP result. Only content is required. Blocks may include peer-specific fields."""
+
+    structuredContent: Any
+    isError: bool | None
+    _meta: dict[str, Any] | None
 
 
 @dataclass(frozen=True)
