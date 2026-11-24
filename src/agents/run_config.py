@@ -178,6 +178,28 @@ class ToolDeclaration:
     mcp_tool_name: str | None = None
 
 
+_TextEditor = Callable[
+    [ToolCallHookContext[Any], tuple[str, ...]], Awaitable[list[str] | tuple[str, ...]]
+]
+
+
+@dataclass(frozen=True, kw_only=True)
+class MCPTextTransform:
+    """Edit only text from a Runner MCP tool on the exact connected server object."""
+
+    server: MCPServer
+    tool_name: str
+    edit: _TextEditor
+
+    def __post_init__(self) -> None:
+        from .mcp import MCPServer
+
+        if not isinstance(self.server, MCPServer):
+            raise ValueError("MCPTextTransform requires an MCP server object, not a server name.")
+        if not isinstance(self.tool_name, str) or not self.tool_name or not callable(self.edit):
+            raise ValueError("MCPTextTransform requires a raw tool name and an async editor.")
+
+
 @dataclass
 class ToolExecutionConfig:
     """Configure tool execution and run-wide preparation callbacks.
@@ -188,9 +210,9 @@ class ToolExecutionConfig:
     outside the client hook lifecycle.
 
     For Runner tools, use `tool_text_transforms` with `(report, edit_text)` for a
-    `FunctionTool` or `((server, "lookup"), edit_text)` for MCP. Select the server
-    object and use the raw tool name. The async editor replaces text parts and
-    keeps the original media.
+    `FunctionTool` or `MCPTextTransform(server=peer, tool_name="lookup", edit=edit_text)`
+    for MCP. Use the server object and raw tool name. The async editor replaces
+    text parts and keeps the original media.
 
     Supply the same callbacks when resuming a run in another process.
     """
@@ -267,12 +289,9 @@ class ToolExecutionConfig:
     Raw provider stream events and provider-managed history may contain the original proposal.
     """
 
-    tool_text_transforms: Sequence[
-        tuple[
-            FunctionTool | tuple[MCPServer, str],
-            Callable[[ToolCallHookContext[Any], tuple[str, ...]], Awaitable[tuple[str, ...]]],
-        ]
-    ] = field(default=(), kw_only=True)
+    tool_text_transforms: Sequence[tuple[FunctionTool, _TextEditor] | MCPTextTransform] = field(
+        default=(), kw_only=True
+    )
     """Experimental. Edit selected Runner tool results before output hooks, traces and history.
 
     Register the exact function in the agent's tools or the MCP server and raw tool name.
@@ -290,8 +309,8 @@ class ToolExecutionConfig:
     If a registered raw name is absent from this server object's unfiltered
     discovery, the Runner blocks calls on that server without an exact editor.
     An exact editor takes precedence and may return its input unchanged.
-    A temporarily missing name can block other calls. With a tool filter or no
-    discovery list, unrelated misspellings can go undetected. If you add an
+    A temporarily missing name can block other calls. Built-in clients check names before filtering.
+    Custom peers with filtered or missing catalogs may miss unrelated typos. If you add an
     editor for a previously unselected MCP call on restore and no catalog is
     available yet, an unknown raw name may fail only after the session claim.
 
@@ -299,15 +318,18 @@ class ToolExecutionConfig:
     `agent.mcp_servers`, and `lookup` is the raw MCP tool name.
 
     ```python
-    async def edit_text(call, texts: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(text.replace("internal draft", "[hidden]") for text in texts)
+    from agents import MCPTextTransform, ToolExecutionConfig
 
-    target = (server, "lookup")
-    config = ToolExecutionConfig(tool_text_transforms=[(target, edit_text)])
-    # For a local function, use [(report, edit_text)].
+    async def edit_text(call, texts):
+        return [text.replace("internal draft", "[hidden]") for text in texts]
+
+    config = ToolExecutionConfig(tool_text_transforms=[
+        (report, edit_text),
+        MCPTextTransform(server=server, tool_name="lookup", edit=edit_text),
+    ])
     ```
 
-    The editor receives a tuple of strings. Return a tuple of strings of the same
+    The editor receives a tuple of strings. Return a list or tuple of strings of the same
     length, with one replacement per text slot in the original order.
     Images and function file parts stay in place. A typed function result uses one JSON
     slot. The caller receives the accepted JSON object as a dictionary. Unchanged text
@@ -361,39 +383,33 @@ class ToolExecutionConfig:
             raise ValueError("tool_execution.sdk_only_tool_hooks must be a bool")
         invalid = (
             "For tool_text_transforms, use (function_tool, edit_text) or "
-            "((server, raw_tool_name), edit_text) with a local FunctionTool or "
-            "an MCP server object and a nonempty raw tool name."
+            "MCPTextTransform(server=peer, tool_name=raw_name, edit=edit_text) "
+            "with the MCP server object."
         )
         try:
             self.tool_text_transforms = tuple(self.tool_text_transforms)
         except TypeError:
             raise ValueError(invalid) from None
         if self.tool_text_transforms:
-            from .mcp import MCPServer
             from .tool import FunctionTool
 
             seen: set[tuple[int, str | None]] = set()
-            for pair in self.tool_text_transforms:
-                try:
-                    target, edit = pair
-                except (TypeError, ValueError):
-                    raise ValueError(invalid) from None
+            for entry in self.tool_text_transforms:
                 key: tuple[int, str | None]
-                if isinstance(target, FunctionTool):
-                    if target._is_agent_tool or target._is_codex_tool or target._mcp_tool_binding:
+                if isinstance(entry, MCPTextTransform):
+                    key = (id(entry.server), entry.tool_name)
+                elif isinstance(entry, tuple) and len(entry) == 2:
+                    target, edit = entry
+                    if (
+                        not isinstance(target, FunctionTool)
+                        or target._is_agent_tool
+                        or target._is_codex_tool
+                        or target._mcp_tool_binding
+                        or not callable(edit)
+                    ):
                         raise ValueError(invalid)
                     key = (id(target), None)
-                elif (
-                    isinstance(target, tuple)
-                    and len(target) == 2
-                    and isinstance(target[0], MCPServer)
-                    and isinstance(target[1], str)
-                    and target[1]
-                ):
-                    key = (id(target[0]), target[1])
                 else:
-                    raise ValueError(invalid)
-                if not callable(edit):
                     raise ValueError(invalid)
                 if key in seen:
                     raise ValueError("Each tool_text_transforms target requires one editor.")
@@ -787,7 +803,7 @@ class RunConfig:
     """
 
     budget: RunBudget | None = None
-    """Optional limits on root model admissions and observed response usage."""
+    """Optional limits on root model calls and observed tokens."""
 
     if TYPE_CHECKING:
 
@@ -926,6 +942,7 @@ __all__ = [
     "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",

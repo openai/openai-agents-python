@@ -1,13 +1,8 @@
-"""Limits on model admissions and observed response usage in a Runner run."""
+"""Limits on logical model calls and observed tokens in a Runner run."""
 
 from __future__ import annotations
 
-import copy
-import inspect
-import math
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
-from fractions import Fraction
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from ._redaction import current_redactor, protected_error
@@ -21,11 +16,8 @@ from .exceptions import (
 from .usage import Usage
 
 if TYPE_CHECKING:
-    from openai.types.responses.response_prompt_param import ResponsePromptParam
-
     from .agent import Agent
     from .memory import Session
-    from .model_settings import ModelSettings
     from .models.interface import Model
     from .result import RunResultStreaming
     from .run_config import RunConfig
@@ -37,108 +29,49 @@ def _valid_limit(value: object) -> bool:
     return type(value) is int and 0 <= value <= 2**53 - 1
 
 
-def _usd(value: float) -> Fraction:
-    # Sum decimal amounts exactly, without rounding each response to a currency unit.
-    if type(value) is int and value >= 0:
-        return Fraction(value)
-    if type(value) is float and math.isfinite(value) and value >= 0:
-        return Fraction(str(value))
-    raise ValueError("RunBudget.max_estimated_cost_usd must be a finite nonnegative int or float.")
-
-
 @dataclass(frozen=True, kw_only=True)
 class RunBudget:
     """Limits for one Python Runner root, including handoffs and approval resumes.
 
-    Set at least one limit. Request and token limits accept integers from zero
-    through 2**53 - 1. Zero blocks the first
-    admission. A response may finish above a limit. The next admission then fails.
+    Pass the same limits and missing-usage policy on resume::
 
-    Each new regular model invocation counts once, including follow-ups and corrections.
-    Runner and transport retries, compaction, approval replies and replay add no admissions.
-    Agent tools and other nested runs have independent budgets. Native sampling through
-    CodexProvider and hosted multi-agent orchestration are unsupported. Independent
-    Runner calls, guardrails, sandbox memory, and tool-owned clients are outside the
-    root. These limits cannot bound physical sends or billing.
+        from agents import RunBudget, RunConfig
 
-    Tokens and estimated cost use completed root responses and reported session compactions.
-    Failed attempts, child responses and cumulative snapshots are excluded. Only usage
-    visible to the SDK counts. Adapters that replace missing totals with explicit zeros
-    make those totals indistinguishable from measured zero. Before the next
-    admission, the synchronous estimator receives the model name and Usage
-    for each completion. The name is the resolved adapter's string ``model``,
-    the selected model string if unavailable, or None. Compactions use their
-    own request model. OpenAI request body overrides take precedence. When
-    a stored prompt selects the model, use the reported model if present. These identifiers
-    describe Runner selections, with no visibility into provider routing.
+        config = RunConfig(budget=RunBudget(max_model_calls=3, max_tokens=4000))
 
-    A positive cost limit requires an estimator. An estimator requires a cost
-    limit. Both amounts use finite, nonnegative int or float values in USD.
-    The Runner sums their decimal representations without rounding to cents.
-    Missing or negative totals and unknown estimates (None) block the next
-    admission by default. Set missing_usage="continue" to use only known values.
+    Set one or both limits to integers from zero through 2**53 - 1. Zero
+    blocks the first call. A response can exceed the token limit and still
+    finish the run. Limits block the next call. Requested tools may still run.
+    Since max_turns (default 10) wins a tie, pass max_turns=None to Runner
+    when a finite max_model_calls should determine when the run stops.
 
-    This example uses synthetic USD rates per million tokens. Cached tokens
-    are part of the input count and get the same rate as other input tokens.
-    The Runner checks the limit before each regular model request. A single
-    request can take the estimated cost above the $0.01 limit::
+    Each admitted model call counts, including follow-ups and corrections.
+    Retries, approval replies, replay and session compaction add no calls.
+    Tokens count completed root responses and compactions, excluding failed attempts.
+    With a token limit, missing or negative totals block the next call.
+    Set missing_usage="continue" to count only known totals. A provider
+    that reports zero for missing usage makes it indistinguishable from zero.
 
-        from agents import RunBudget, Usage
-
-        def estimate(model: str | None, usage: Usage) -> float | None:
-            if model != "example":
-                return None
-            inputs, outputs = usage.input_tokens, usage.output_tokens
-            if not 0 <= usage.input_tokens_details.cached_tokens <= inputs or outputs < 0:
-                return None
-            if inputs + outputs != usage.total_tokens:
-                return None
-            return (2 * inputs + 5 * outputs) / 1_000_000
-
-        budget = RunBudget(max_estimated_cost_usd=0.01, estimate_cost_usd=estimate)
-
-    Pass the budget to RunConfig(budget=...) on each call, including resume. RunBudgetError
-    identifies a blocked admission. Estimated-cost budgets support in-memory
-    continuation only. ResumableSession and redact_text require portable checkpoints
-    and reject cost limits anywhere in the agent graph. Protected runs can replace
-    budget errors with generic exceptions.
-    A paused child budget requires a unique, enabled binding in its parent's tools.
-    Keep the tool graph and policies stable during each invocation.
-    Child budget errors follow the agent tool's error policy. An unhandled tool failure
-    leaves a durable session active for reconciliation. A new run starts with fresh counters.
+    Agent tools and independent runs need their own budgets. A paused child
+    requires the same unique, enabled tool and budget on resume. Child errors
+    follow the tool's error policy. Check completed work before retrying.
+    Native sampling through CodexProvider and hosted multi-agent orchestration
+    are unsupported. These limits cannot bound physical sends or billing.
+    Text redaction can replace RunBudgetError with a generic error.
     """
 
-    max_requests: int | None = None
+    max_model_calls: int | None = None
     max_tokens: int | None = None
-    max_estimated_cost_usd: float | None = None
-    estimate_cost_usd: Callable[[str | None, Usage], float | None] | None = None
     missing_usage: Literal["stop", "continue"] = "stop"
 
     def __post_init__(self) -> None:
-        limits = (self.max_requests, self.max_tokens)
-        if self.max_estimated_cost_usd is not None:
-            _usd(self.max_estimated_cost_usd)
-        elif all(limit is None for limit in limits):
+        limits = (self.max_model_calls, self.max_tokens)
+        if all(limit is None for limit in limits):
             raise ValueError("RunBudget requires at least one limit.")
         if any(limit is not None and not _valid_limit(limit) for limit in limits):
-            raise ValueError(
-                "RunBudget request and token limits must be integers from zero through 2**53 - 1."
-            )
+            raise ValueError("RunBudget limits must be integers from zero through 2**53 - 1.")
         if self.missing_usage not in ("stop", "continue"):
             raise ValueError("RunBudget.missing_usage must be 'stop' or 'continue'.")
-        if self.max_estimated_cost_usd is None and self.estimate_cost_usd is not None:
-            raise ValueError("RunBudget.estimate_cost_usd requires max_estimated_cost_usd.")
-        if (
-            self.max_estimated_cost_usd is not None
-            and self.max_estimated_cost_usd > 0
-            and self.estimate_cost_usd is None
-        ):
-            raise ValueError("A positive max_estimated_cost_usd requires estimate_cost_usd.")
-        if self.estimate_cost_usd is not None and (
-            not callable(self.estimate_cost_usd)
-            or inspect.iscoroutinefunction(self.estimate_cost_usd)
-        ):
-            raise TypeError("RunBudget.estimate_cost_usd must be a synchronous callable.")
 
 
 class _BudgetCheckpointError(UserError):
@@ -146,66 +79,28 @@ class _BudgetCheckpointError(UserError):
 
 
 class RunBudgetError(AgentsException):
-    """A blocked admission. The code identifies the reason.
+    """A blocked model call. Check code for the reason and limit for the ceiling.
 
-    For run_budget_exceeded, limit identifies the first reached ceiling.
-    The Runner checks "requests", then "tokens", then "estimated_cost".
-    For other codes, limit is None.
+    For run_budget_exceeded, model_calls takes precedence over tokens.
+    For run_budget_usage_unavailable, limit is None.
     """
 
     def __init__(
         self,
-        code: Literal[
-            "run_budget_exceeded", "run_budget_usage_unavailable", "run_budget_invalid_estimate"
-        ],
+        code: Literal["run_budget_exceeded", "run_budget_usage_unavailable"],
         *,
-        limit: Literal["requests", "tokens", "estimated_cost"] | None = None,
+        limit: Literal["model_calls", "tokens"] | None = None,
     ):
         self.limit = limit
         self.code = code
-        super().__init__(code)
-
-
-def _pricing_model(
-    model: Model,
-    agent: Agent[Any],
-    config: RunConfig,
-    settings: ModelSettings,
-    prompt: ResponsePromptParam | None,
-) -> str | None:
-    if config.budget is None or config.budget.estimate_cost_usd is None:
-        return None
-    from .models.openai_chatcompletions import OpenAIChatCompletionsModel
-    from .models.openai_responses import OpenAIResponsesModel
-
-    if isinstance(model, (OpenAIResponsesModel, OpenAIChatCompletionsModel)):
-        body = settings.extra_body
-        if isinstance(body, Mapping) and "model" in body:
-            name = body["model"]
-            return name if isinstance(name, str) else None
-
-    if isinstance(model, OpenAIResponsesModel) and model._prompt_owns_model(prompt):
-        # A stored prompt can replace the adapter's implicit default.
-        override = (settings.extra_args or {}).get("model")
-        return override if isinstance(override, str) else None
-    name = getattr(model, "model", None)
-    if isinstance(name, str):
-        return name
-    selected = config.model if config.model is not None else agent.model
-    return selected if isinstance(selected, str) else None
-
-
-def _estimate(
-    estimator: Callable[[str | None, Usage], float | None], model: str | None, usage: Usage
-) -> Fraction | None:
-    try:
-        value = estimator(model, usage)
-        if inspect.iscoroutine(value):
-            value.close()
-        return None if value is None else _usd(value)
-    except Exception:
-        pass
-    raise RunBudgetError("run_budget_invalid_estimate")
+        if code == "run_budget_usage_unavailable":
+            message = 'Unknown usage. Use missing_usage="continue" to count only known totals.'
+        else:
+            ceiling = "max_model_calls" if limit == "model_calls" else "max_tokens"
+            message = (
+                f"RunBudget.{ceiling} reached. Check completed work before starting a new run."
+            )
+        super().__init__(f"{code}: {message}")
 
 
 @dataclass
@@ -214,12 +109,9 @@ class _BudgetState:
     requests: int = 0
     tokens: int = 0
     unavailable: bool = False
-    cost: Fraction = Fraction(0)
-    pending: list[tuple[str | None, Usage]] = field(default_factory=list)
 
-    def observe(self, model: str | None, usage: Usage | None) -> None:
-        limits = self.limits
-        if limits.max_tokens is None and limits.max_estimated_cost_usd is None:
+    def observe(self, usage: Usage | None) -> None:
+        if self.limits.max_tokens is None:
             return
         if (
             usage is None
@@ -229,45 +121,20 @@ class _BudgetState:
             self.unavailable = True
             return
         self.tokens += usage.total_tokens
-        if limits.estimate_cost_usd is not None:
-            if model is None and isinstance(usage._reported_model, str):
-                model = usage._reported_model
-            self.pending.append((model, copy.deepcopy(usage)))
 
     def check(self) -> None:
         limits = self.limits
-        if limits.max_requests is not None and self.requests >= limits.max_requests:
-            raise RunBudgetError("run_budget_exceeded", limit="requests")
+        if limits.max_model_calls is not None and self.requests >= limits.max_model_calls:
+            raise RunBudgetError("run_budget_exceeded", limit="model_calls")
         if limits.max_tokens is not None and self.tokens >= limits.max_tokens:
             raise RunBudgetError("run_budget_exceeded", limit="tokens")
-        ceiling = (
-            _usd(limits.max_estimated_cost_usd)
-            if limits.max_estimated_cost_usd is not None
-            else None
-        )
-        if ceiling is not None and self.cost >= ceiling:
-            raise RunBudgetError("run_budget_exceeded", limit="estimated_cost")
         if self.unavailable and limits.missing_usage == "stop":
             raise RunBudgetError("run_budget_usage_unavailable")
-        while self.pending:
-            assert limits.estimate_cost_usd is not None
-            assert ceiling is not None
-            estimate = _estimate(limits.estimate_cost_usd, *self.pending[0])
-            self.pending.pop(0)
-            if estimate is None:
-                self.unavailable = True
-                if limits.missing_usage == "stop":
-                    raise RunBudgetError("run_budget_usage_unavailable")
-            else:
-                self.cost += estimate
-                if self.cost >= ceiling:
-                    raise RunBudgetError("run_budget_exceeded", limit="estimated_cost")
 
     def checkpoint(self) -> dict[str, Any]:
-        if self.limits.max_estimated_cost_usd is not None:
-            raise _BudgetCheckpointError("Cannot serialize an estimated-cost budget.")
+        # Schema 1.25 stores logical model calls as requests.
         return {
-            "max_requests": self.limits.max_requests,
+            "max_requests": self.limits.max_model_calls,
             "max_tokens": self.limits.max_tokens,
             "missing_usage": self.limits.missing_usage,
             "requests": self.requests,
@@ -293,7 +160,7 @@ class _BudgetState:
             raise _BudgetCheckpointError("Invalid run budget consumption.")
         try:
             limits = RunBudget(
-                max_requests=data["max_requests"],
+                max_model_calls=data["max_requests"],
                 max_tokens=data["max_tokens"],
                 missing_usage=data["missing_usage"],
             )
@@ -318,37 +185,21 @@ def _tool_config(tool: Tool) -> RunConfig | None:
     return getattr(impl, "__agents_run_config__", None)
 
 
-def _check_portable(limits: RunBudget | None) -> None:
-    if limits is not None and limits.max_estimated_cost_usd is not None:
-        raise UserError(
-            "ResumableSession and redact_text cannot checkpoint an estimated-cost budget."
-        )
-
-
-def _check_tools(tools: Iterable[Tool]) -> None:
-    for tool in tools:
-        if (config := _tool_config(tool)) is not None:
-            _check_portable(config.budget)
-
-
 async def _admit(
     budget: _BudgetState | None,
     model: Model,
     session: Session | None,
-    tools: Iterable[Tool],
     *,
     streamed_result: RunResultStreaming | None = None,
 ) -> None:
+    if budget is None:
+        return
     from .run_internal.resumable_session import ResumableRun, checkpoint_streamed_result
 
     try:
-        if isinstance(session, ResumableRun) or current_redactor() is not None:
-            # Include tools resolved dynamically after the initial graph check.
-            _check_tools(tools)
-        if budget is not None:
-            _check_model(model)
-            budget.check()
-            budget.requests += 1
+        _check_model(model)
+        budget.check()
+        budget.requests += 1
     except (RunBudgetError, UserError) as error:
         if streamed_result is not None:
             from .run_internal.guardrails import input_guardrail_tripwire_triggered_for_stream
@@ -384,23 +235,16 @@ def _check_resumed_budget(state: RunState[Any], limits: RunBudget | None) -> boo
 
 
 def _prepare_budget(
-    config: RunConfig, agent: Agent[Any], state: RunState[Any] | None, session: Session | None
+    config: RunConfig, agent: Agent[Any], state: RunState[Any] | None
 ) -> _BudgetState | None:
     from .models.interface import Model
-    from .run_internal.resumable_session import ResumableRun
 
     limits = config.budget
+    if limits is None:
+        return None
     current = (
         state._current_agent if state is not None and state._current_agent is not None else agent
     )
-    if isinstance(session, ResumableRun) or current_redactor() is not None:
-        from ._run_state_agent_identity import _iter_agent_graph
-
-        _check_portable(limits)
-        for reachable in _iter_agent_graph(current):
-            _check_tools(reachable.tools)
-    if limits is None:
-        return None
     model = config.model if config.model is not None else current.model
     _check_model(model if isinstance(model, Model) else config.model_provider)
     if state is not None:

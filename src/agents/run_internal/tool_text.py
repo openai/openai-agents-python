@@ -17,7 +17,7 @@ from ..exceptions import (
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
-from ..run_config import ToolCallHookContext
+from ..run_config import MCPTextTransform, ToolCallHookContext
 from ..tool import (
     FunctionTool,
     ToolOriginType,
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from ..agent import Agent
     from ..mcp import MCPServer
-    from ..run_config import ToolExecutionConfig
+    from ..run_config import ToolExecutionConfig, _TextEditor
     from ..run_context import RunContextWrapper, _ToolInvocationRecord
     from ..run_state import RunState
     from ..tool_context import ToolContext
@@ -65,42 +65,45 @@ def bind_text_transform(
 
             server, raw_name, exposed = deferred_mcp
             binding = (get_mcp_server_log_name(server.name), raw_name, None)
-        for index, (target, _) in enumerate(settings.tool_text_transforms):
-            if isinstance(target, tuple):
+        for index, entry in enumerate(settings.tool_text_transforms):
+            if isinstance(entry, MCPTextTransform):
                 if binding is None:
                     continue
-                if server is not target[0]:
+                if server is not entry.server:
                     from ..mcp._logging import get_mcp_server_log_name
 
                     # Use the same credential-free identity as discovery and restore.
-                    if binding[0] != get_mcp_server_log_name(target[0].name):
+                    if binding[0] != get_mcp_server_log_name(entry.server.name):
                         continue
-                if target[1] != binding[1]:
+                if entry.tool_name != binding[1]:
                     from ..mcp.util import MCPUtil
 
-                    if server is target[0] and tool is not None:
+                    if server is entry.server and tool is not None:
                         names = tool._mcp_raw_names
-                        ambiguous |= names is not None and target[1] not in names
-                    # A filtered catalog cannot prove absence. A visible alias can
+                        ambiguous |= names is not None and entry.tool_name not in names
+                    # A partial catalog cannot prove absence. A visible alias can
                     # signal a mistake, but only the exact raw name can select.
-                    ambiguous |= target[1] in (
+                    ambiguous |= entry.tool_name in (
                         exposed,
                         MCPUtil._safe_tool_name_part(binding[1], "tool"),
                         MCPUtil._build_prefixed_tool_base_name(binding[0], binding[1]),
                     )
                     continue
-                if server is not target[0]:
+                if server is not entry.server:
                     ambiguous = True
                     continue
-            elif target is not tool:
+            elif entry[0] is not tool:
                 if (
                     tool is not None
                     and binding is None
                     and not tool._is_agent_tool
                     and not tool._is_codex_tool
                 ):
+                    ambiguous |= (
+                        tool._namespace_source is not None and tool._namespace_source() is entry[0]
+                    )
                     ambiguous |= get_function_tool_lookup_key_for_tool(
-                        target
+                        entry[0]
                     ) == get_function_tool_lookup_key_for_tool(tool)
                 continue
             if record is not None:
@@ -108,9 +111,9 @@ def bind_text_transform(
             return index
     if ambiguous or (record is not None and record.requires_text_transform):
         raise UserError(
-            "Missing exact tool_text_transforms target. Register the FunctionTool in the agent's "
-            "tools or the connected MCP server and original tool name. Each object sharing "
-            "a selected key needs its own editor, including on resume."
+            "Missing exact tool_text_transforms target. Register the agent's FunctionTool "
+            "(the copy returned by tool_namespace) or the connected MCP server "
+            "and original tool name, including on resume."
         )
     return None
 
@@ -202,12 +205,13 @@ async def validate_pending_text_transforms(
             key = item.tool_lookup_key
             if key is None and tool is not None:
                 key = get_function_tool_lookup_key_for_tool(tool)
+            original = tool._namespace_source() if tool and tool._namespace_source else None
             if not record.requires_text_transform and not (
                 settings
                 and any(
-                    isinstance(target, FunctionTool)
-                    and key in get_function_tool_lookup_keys(target)
-                    for target, _ in settings.tool_text_transforms
+                    not isinstance(entry, MCPTextTransform)
+                    and (original is entry[0] or key in get_function_tool_lookup_keys(entry[0]))
+                    for entry in settings.tool_text_transforms
                 )
             ):
                 continue
@@ -244,7 +248,8 @@ def select_text_editor(
     index = bind_text_transform(settings, tool, context._tool_invocations.get(context.tool_call_id))
     if index is None or settings is None:
         return None
-    target, editor = settings.tool_text_transforms[index]
+    entry = settings.tool_text_transforms[index]
+    editor = entry.edit if isinstance(entry, MCPTextTransform) else entry[1]
     call = ToolCallHookContext(
         context,
         agent,
@@ -252,26 +257,31 @@ def select_text_editor(
         context.tool_call_id,
         context.tool_namespace,
         _parse_function_tool_json_input(tool_name=tool.name, input_json=arguments),
-        mcp_target=target if isinstance(target, tuple) else None,
+        mcp_target=(entry.server, entry.tool_name) if isinstance(entry, MCPTextTransform) else None,
     )
 
-    return partial(_validated_edit, partial(editor, call), tool.name)
+    return partial(_validated_edit, editor, call, tool.name)
 
 
 class _InvalidTextEdit(ValueError):
     """The editor returned a value with the wrong shape."""
 
 
-async def _validated_edit(edit: _Edit, name: str, texts: tuple[str, ...]) -> tuple[str, ...]:
+async def _validated_edit(
+    edit: _TextEditor, call: ToolCallHookContext[Any], name: str, texts: tuple[str, ...]
+) -> tuple[str, ...]:
     async def invoke() -> tuple[str, ...] | None:
-        result = await _protect_selected_task(partial(edit, texts))
+        result = await _protect_selected_task(partial(edit, call, texts))
         # Refuse arbitrary objects before the hook takes ownership with deepcopy.
-        if type(result) is not tuple or any(type(text) is not str for text in result):
+        if type(result) not in (list, tuple):
             return None
-        return result
+        frozen = tuple(result)
+        if len(frozen) != len(texts) or any(type(text) is not str for text in frozen):
+            return None
+        return frozen
 
     result = await _await_hook(invoke, "tool_text_transforms", name)
-    if result is None or len(result) != len(texts):
+    if result is None:
         raise _InvalidTextEdit()
     for text in result:
         text.encode("utf-8")
@@ -302,7 +312,7 @@ async def invoke_selected_tool(
         safe_error = _prepare_data_redacted_error(error, trusted_error_message=_PEER_ERROR)
         if isinstance(safe_error, Exception) and not isinstance(safe_error, UserError):
             safe_error = UserError(
-                "The tool_text_transforms editor must return a same-length tuple of strings."
+                "Text editors must return a same-length list or tuple of strings."
                 if type(error) is _InvalidTextEdit
                 else "Selected tool execution failed."
             )

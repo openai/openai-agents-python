@@ -63,6 +63,14 @@ if TYPE_CHECKING:
     from .server import MCPServer
 
 
+class _FilteredTools(list["MCPTool"]):
+    """Visible tools with raw-name evidence from the same complete discovery."""
+
+    def __init__(self, tools: list[MCPTool], names: frozenset[str]) -> None:
+        super().__init__(tools)
+        self._raw_names = names
+
+
 _MCP_FUNCTION_TOOL_NAME_MAX_LENGTH = 64
 _MCP_FUNCTION_TOOL_HASH_LENGTH = 8
 
@@ -388,7 +396,11 @@ class MCPUtil:
             for index, tool in enumerate(tools)
         ]
         # Share one snapshot from this discovery, before agent-level omissions.
-        names = frozenset(t.name for t in tools) if server.tool_filter is None else None
+        names: frozenset[str] | None
+        if isinstance(tools, _FilteredTools):
+            names = tools._raw_names
+        else:
+            names = frozenset(t.name for t in tools) if server.tool_filter is None else None
         for function_tool in function_tools:
             function_tool._mcp_raw_names = names
             assert function_tool._mcp_tool_binding is not None

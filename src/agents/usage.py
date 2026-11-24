@@ -239,7 +239,6 @@ class Usage:
     """
 
     _total_missing = False
-    _reported_model = cast("str | None", None)
 
     @model_validator(mode="wrap")
     @classmethod

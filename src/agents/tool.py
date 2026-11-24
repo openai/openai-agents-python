@@ -583,6 +583,10 @@ class FunctionTool:
     _tool_namespace_description: str | None = field(default=None, kw_only=True, repr=False)
     """Internal namespace description used when serializing grouped function tools."""
 
+    _namespace_source: Callable[[], FunctionTool | None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
     _mcp_title: str | None = field(default=None, kw_only=True, repr=False)
     """Internal MCP display title used for ToolCallItem metadata."""
 
@@ -1751,6 +1755,8 @@ def tool_namespace(
     for tool in tools:
         validate_function_tool_namespace_shape(tool.name, namespace_name)
         namespaced_tool = copy.copy(tool)
+        if tool._tool_namespace is None:
+            namespaced_tool._namespace_source = weakref.ref(tool)
         namespaced_tool._tool_namespace = namespace_name
         namespaced_tool._tool_namespace_description = normalized_description
         namespaced_tools.append(namespaced_tool)

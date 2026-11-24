@@ -2051,7 +2051,6 @@ class RunState(Generic[TContext, TAgent]):
                 "Use unique agent names before starting a persistable run."
             )
 
-        budget = self._context._budget.checkpoint() if self._context._budget is not None else None
         approvals_dict = self._serialize_approvals()
         tool_invocations = self._serialize_tool_invocations()
         hosted_mcp_approvals = self._serialize_hosted_mcp_approvals()
@@ -2070,8 +2069,8 @@ class RunState(Generic[TContext, TAgent]):
             # Preserve metadata so deserialization can warn when context types were erased.
             "context_meta": context_meta,
         }
-        if budget is not None:
-            context_entry["budget"] = budget
+        if self._context._budget is not None:
+            context_entry["budget"] = self._context._budget.checkpoint()
         tool_input = self._serialize_tool_input(self._context.tool_input)
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
@@ -3212,8 +3211,6 @@ def _serialize_pending_nested_agent_tool_runs(
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
-        except _BudgetCheckpointError:
-            raise
         except Exception:
             if strict_context:
                 raise

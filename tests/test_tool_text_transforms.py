@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, TypeAdapter, field_validator
 
 from agents import (
     Agent,
+    MCPTextTransform,
     RunConfig,
     RunHooks,
     Runner,
@@ -79,7 +80,9 @@ def model_for(name):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("detail", [None, "content"])
 @pytest.mark.parametrize("route", ["function", "mcp"])
-@pytest.mark.parametrize("outcome", ["edit", "throw", "cancel", "invalid", "short", "list"])
+@pytest.mark.parametrize(
+    "outcome", ["edit", "list", "throw", "cancel", "invalid", "short", "string"]
+)
 async def test_selected_output_before_publication(
     detail, route, outcome, exporter, caplog, monkeypatch
 ):
@@ -113,7 +116,6 @@ async def test_selected_output_before_publication(
 
     source = Source(custom_data_extractor=extract, tool_output_guardrails=[guard])
     local = route == "function"
-    target = report if local else (source, "read.report")
     model = model_for("report" if local else "mcp_Reports__read_report")
     agent = Agent(
         name="reports",
@@ -133,18 +135,27 @@ async def test_selected_output_before_publication(
             raise asyncio.CancelledError(RAW)
         if outcome == "short":
             return ()
-        if outcome == "list":
-            return list(texts)
+        if outcome == "string":
+            return RAW
         if outcome == "invalid":
-            return (RAW, 42)
-        return tuple(SAFE if t else "" for t in texts)
+            return [IMAGE] * len(texts)
+        replacements = [SAFE if t else "" for t in texts]
+        if outcome == "list":
+            asyncio.get_running_loop().call_soon(replacements.clear)
+            return replacements
+        return tuple(replacements)
 
     async def legacy(*args):
         pytest.fail("selected call reached the generic editor")
 
     config = RunConfig(
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[(target, edit)], prepare_tool_output=legacy
+            tool_text_transforms=[
+                (report, edit)
+                if local
+                else MCPTextTransform(server=source, tool_name="read.report", edit=edit)
+            ],
+            prepare_tool_output=legacy,
         ),
         tracing={"operation_detail": detail} if detail else {},
         trace_include_sensitive_data=True,
@@ -163,7 +174,7 @@ async def test_selected_output_before_publication(
                 ):
                     events.append(event.item)
 
-        if outcome == "edit":
+        if outcome in {"edit", "list"}:
             await collect()
             (item,) = events
             assert item.raw_item["call_id"] == "one"
@@ -190,8 +201,8 @@ async def test_selected_output_before_publication(
         else:
             with pytest.raises(asyncio.CancelledError if outcome == "cancel" else UserError) as exc:
                 await collect()
-            assert ("same-length tuple of strings" in str(exc.value)) == (
-                outcome in {"invalid", "short", "list"}
+            assert ("same-length list or tuple of strings" in str(exc.value)) == (
+                outcome in {"invalid", "short", "string"}
             )
             error: BaseException | None = exc.value
             seen = set()
@@ -212,13 +223,13 @@ async def test_selected_output_before_publication(
             assert RAW not in str(await session.get_items())
         assert effects + source.tool_calls == (["local"] if local else ["read.report"])
         [(call_id, mcp_target, slots, live)] = edits
-        assert call_id == "one" and mcp_target == (None if local else target)
+        assert call_id == "one" and mcp_target == (None if local else (source, "read.report"))
         assert slots == ((RAW,) if local else (json.dumps({"draft": RAW}), ""))
         spans = [span.export() for span in fetch_ordered_spans()]
         otel = [span.to_json() for span in exporter.get_finished_spans()]
         assert spans and otel
         assert RAW not in str((spans, otel, live, caplog.text))
-        if outcome == "edit":
+        if outcome in {"edit", "list"}:
             assert SAFE in str(spans)
             if detail:
                 assert SAFE in str(otel)
@@ -261,7 +272,11 @@ async def test_selected_failures_never_become_success(
     config = RunConfig(
         tracing={"operation_detail": detail} if detail else {},
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[(report if local else (source, "read.report"), forbidden)],
+            tool_text_transforms=[
+                (report, forbidden)
+                if local
+                else MCPTextTransform(server=source, tool_name="read.report", edit=forbidden)
+            ],
             prepare_tool_output=forbidden,
         ),
     )
@@ -372,7 +387,10 @@ async def test_unselected_peer_with_same_tool_name_keeps_legacy_behavior():
     agent = Agent(name="reports", mcp_servers=[other], model=model)
     config = RunConfig(
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[((selected, "read.report"), edit)], prepare_tool_output=legacy
+            tool_text_transforms=[
+                MCPTextTransform(server=selected, tool_name="read.report", edit=edit)
+            ],
+            prepare_tool_output=legacy,
         )
     )
     await Runner.run(agent, "go", run_config=config)
@@ -396,7 +414,9 @@ async def test_selected_image_only_result_keeps_media_position(structured):
     model = model_for("read.report")
     agent = Agent(name="reports", mcp_servers=[peer], model=model)
     config = RunConfig(
-        tool_execution=ToolExecutionConfig(tool_text_transforms=[((peer, "read.report"), edit)])
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[MCPTextTransform(server=peer, tool_name="read.report", edit=edit)]
+        )
     )
     result = await Runner.run(agent, "go", run_config=config)
     item = next(item for item in result.new_items if item.type == "tool_call_output_item")
@@ -411,20 +431,39 @@ def test_invalid_or_duplicate_registration():
     async def edit(call, texts):
         return texts
 
+    @function_tool
+    def report() -> str:
+        return RAW
+
+    entry = MCPTextTransform(server=peer, tool_name="read.report", edit=edit)
     settings = TypeAdapter(ToolExecutionConfig).validate_python(
-        {"tool_text_transforms": [((peer, "read.report"), edit)]}
+        {"tool_text_transforms": [entry, (report, edit)]}
     )
-    assert settings.tool_text_transforms[0][0][0] is peer
+    assert settings.tool_text_transforms[0] is entry
+    assert settings.tool_text_transforms[1][0] is report
+    with pytest.raises(AttributeError):
+        entry.tool_name = "other"
+    with pytest.raises(TypeError):
+        MCPTextTransform(peer, "read.report", edit)  # pyright: ignore[reportCallIssue]
     with pytest.raises(ValueError, match="MCP server object") as error:
-        ToolExecutionConfig(tool_text_transforms=[(("example-server", "read.report"), edit)])
+        MCPTextTransform(server="example-server", tool_name="read.report", edit=edit)
     assert "example-server" not in str(error.value) and "read.report" not in str(error.value)
-    for malformed in [None, [None], [(peer, RAW, edit)], [(peer, RAW), edit]]:
+    for malformed in [
+        None,
+        [None],
+        [(peer, RAW, edit)],
+        [(peer, RAW), edit],
+        [((peer, RAW), edit)],
+    ]:
         with pytest.raises(ValueError) as error:
             ToolExecutionConfig(tool_text_transforms=malformed)
         assert "(function_tool, edit_text)" in str(error.value)
-        assert "((server, raw_tool_name), edit_text)" in str(error.value)
+        assert "MCPTextTransform(" in str(error.value)
         assert RAW not in str(error.value)
-    for entries in [[("read.report", edit)], [((peer, "read.report"), edit)] * 2]:
+    for entries in [
+        [("read.report", edit)],
+        [MCPTextTransform(server=peer, tool_name="read.report", edit=edit)] * 2,
+    ]:
         with pytest.raises(ValueError, match="tool_text_transforms"):
             ToolExecutionConfig(tool_text_transforms=entries)
 
@@ -446,7 +485,11 @@ async def test_cancelled_run_discards_a_late_edit(exporter):
     agent = Agent(name="reports", model=model, mcp_servers=[source])
     config = RunConfig(
         tracing={"operation_detail": "content"},
-        tool_execution=ToolExecutionConfig(tool_text_transforms=[((source, "read.report"), edit)]),
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[
+                MCPTextTransform(server=source, tool_name="read.report", edit=edit)
+            ]
+        ),
     )
     attempt = asyncio.create_task(Runner.run(agent, "go", run_config=config))
     await asyncio.wait_for(started.wait(), timeout=5)
@@ -561,7 +604,11 @@ async def test_empty_mcp_object_withholds_fallback_text():
 
     model = model_for("read.report")
     config = RunConfig(
-        tool_execution=ToolExecutionConfig(tool_text_transforms=[((server, "read.report"), edit)])
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[
+                MCPTextTransform(server=server, tool_name="read.report", edit=edit)
+            ]
+        )
     )
     result = await Runner.run(
         Agent(name="reports", model=model, mcp_servers=[server]), "go", run_config=config
@@ -650,7 +697,11 @@ def _check_selected_exit(route):
     config = RunConfig(
         tracing_disabled=True,
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[((peer, "read.report") if remote else report, edit)]
+            tool_text_transforms=[
+                MCPTextTransform(server=peer, tool_name="read.report", edit=edit)
+                if remote
+                else (report, edit)
+            ]
         ),
     )
     loop = asyncio.new_event_loop()
@@ -711,7 +762,11 @@ async def test_invalid_peer_result_stops_before_editing(invalid):
     server = Invalid()
     model = model_for("read.report")
     config = RunConfig(
-        tool_execution=ToolExecutionConfig(tool_text_transforms=[((server, "read.report"), edit)])
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[
+                MCPTextTransform(server=server, tool_name="read.report", edit=edit)
+            ]
+        )
     )
     with pytest.raises(UserError):
         await Runner.run(
@@ -837,7 +892,9 @@ async def test_pending_mcp_edit_requires_current_exact_selector(restored, select
     def config(server):
         return RunConfig(
             tool_execution=ToolExecutionConfig(
-                tool_text_transforms=[((server, "read.report"), edit)]
+                tool_text_transforms=[
+                    MCPTextTransform(server=server, tool_name="read.report", edit=edit)
+                ]
             )
         )
 
@@ -920,7 +977,7 @@ async def test_reconnected_server_with_same_name_needs_its_own_editor(rotate):
         assert call.mcp_target == (current, "read.report")
         return tuple(SAFE for _ in texts)
 
-    selected = ((stale, "read.report"), edit)
+    selected = MCPTextTransform(server=stale, tool_name="read.report", edit=edit)
     agent = Agent(name="reports", mcp_servers=[current], model=model_for("read.report"))
     config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[selected]))
 
@@ -935,7 +992,10 @@ async def test_reconnected_server_with_same_name_needs_its_own_editor(rotate):
     agent.mcp_servers = [current]
     agent.model = model_for("read.report")
     config.tool_execution = ToolExecutionConfig(
-        tool_text_transforms=[selected, ((current, "read.report"), edit)]
+        tool_text_transforms=[
+            selected,
+            MCPTextTransform(server=current, tool_name="read.report", edit=edit),
+        ]
     )
     result = await Runner.run(agent, "go", run_config=config)
     assert RAW not in result.to_state().to_string()
@@ -970,9 +1030,14 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
     worker = Agent(name="reports", tools=[report], mcp_servers=[peer], model=model)
 
     def config(target):
-        return RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(target, edit)]))
+        entry = (
+            MCPTextTransform(server=target, tool_name="read.report", edit=edit)
+            if mcp
+            else (target, edit)
+        )
+        return RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[entry]))
 
-    correct = config((peer, "read.report") if mcp else report)
+    correct = config(peer if mcp else report)
     namespace = "team" if route == "namespaced" else None
     parent = Agent(
         name="parent",
@@ -1035,7 +1100,7 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
         assert not effects and len(model.calls) == 1
         worker.tools = [report]
 
-    stale = config((Source(), "read.report")) if mcp else RunConfig()
+    stale = config(Source()) if mcp else RunConfig()
     with pytest.raises(UserError, match="exact tool_text_transforms target"):
         await resume(stale)
     assert store.records[session.session_id] == saved
@@ -1069,7 +1134,9 @@ async def test_mcp_wrong_name_cannot_silently_skip_an_editor(streamed, selector)
         pytest.fail("An alias must never bind an editor")
 
     config = RunConfig(
-        tool_execution=ToolExecutionConfig(tool_text_transforms=[((peer, selector), forbidden)])
+        tool_execution=ToolExecutionConfig(
+            tool_text_transforms=[MCPTextTransform(server=peer, tool_name=selector, edit=forbidden)]
+        )
     )
     with pytest.raises(UserError, match="original tool name"):
         if streamed:
@@ -1104,7 +1171,9 @@ async def test_mcp_wrong_name_added_on_resume_leaves_approval_retryable(selector
 
     def config(name):
         return RunConfig(
-            tool_execution=ToolExecutionConfig(tool_text_transforms=[((peer, name), edit)])
+            tool_execution=ToolExecutionConfig(
+                tool_text_transforms=[MCPTextTransform(server=peer, tool_name=name, edit=edit)]
+            )
         )
 
     with pytest.raises(UserError, match="original tool name"):
@@ -1126,7 +1195,9 @@ async def test_mcp_raw_names_win_over_alias_collisions():
     names = ("read_report", "read.report")
     config = RunConfig(
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[((peer, name), edit) for name in names]
+            tool_text_transforms=[
+                MCPTextTransform(server=peer, tool_name=name, edit=edit) for name in names
+            ]
         )
     )
     for name in names:
@@ -1158,7 +1229,7 @@ async def test_rotated_mcp_url_requires_current_server(streamed, transport, sele
         assert call.mcp_target == (current, "read.report")
         return tuple(SAFE for _ in texts)
 
-    stale = ((previous, selector), edit)
+    stale = MCPTextTransform(server=previous, tool_name=selector, edit=edit)
     model = model_for("read.report")
     agent = Agent(name="reports", model=model, mcp_servers=[current])
 
@@ -1175,7 +1246,9 @@ async def test_rotated_mcp_url_requires_current_server(streamed, transport, sele
         await run([stale])
     assert not source.tool_calls and len(model.calls) == 1
     agent.model = model = model_for("read.report")
-    result = await run([stale, ((current, "read.report"), edit)])
+    result = await run(
+        [stale, MCPTextTransform(server=current, tool_name="read.report", edit=edit)]
+    )
     assert source.tool_calls == ["read.report"]
     assert SAFE in repr(model.calls[-1].input)
     assert RAW not in repr(model.calls[-1].input) + result.to_state().to_string()
@@ -1211,7 +1284,11 @@ async def test_redact_text_after_selected_edit_on_approval_resume(streamed, remo
         redact_text=lambda text: text.replace(secret, SAFE),
         tracing={"operation_detail": "content"},
         tool_execution=ToolExecutionConfig(
-            tool_text_transforms=[((peer, "read.report") if remote else report, edit)]
+            tool_text_transforms=[
+                MCPTextTransform(server=peer, tool_name="read.report", edit=edit)
+                if remote
+                else (report, edit)
+            ]
         ),
     )
     store = MemoryStore()
@@ -1266,7 +1343,7 @@ async def test_mcp_missing_name_check_uses_this_servers_unfiltered_discovery():
     async def edit(call, texts):
         return tuple(SAFE for _ in texts)
 
-    entries = [((peer, "sibling"), edit)]
+    entries = [MCPTextTransform(server=peer, tool_name="sibling", edit=edit)]
 
     async def dispatch(server):
         model = model_for("read.report")
@@ -1284,7 +1361,7 @@ async def test_mcp_missing_name_check_uses_this_servers_unfiltered_discovery():
     with pytest.raises(UserError, match="original tool name"):
         await dispatch(peer)
     assert peer.tool_calls == ["read.report"] * 2
-    entries.append(((peer, "read.report"), edit))
+    entries.append(MCPTextTransform(server=peer, tool_name="read.report", edit=edit))
     accepted = await dispatch(peer)
     assert SAFE in accepted and RAW not in accepted
 
@@ -1491,7 +1568,7 @@ async def test_local_editor_preflight_keeps_approved_calls_retryable(
         context = {"allowed": allowed, "delegate": delegate}
         recipient = alternate if switch and not delegate else settings
         if change == "new_child_budget" and not delegate:
-            recipient.budget = RunBudget(max_requests=2)
+            recipient.budget = RunBudget(max_model_calls=2)
         else:
             recipient.tool_execution = config(target).tool_execution
         if streamed:
@@ -1534,3 +1611,73 @@ async def test_local_editor_preflight_keeps_approved_calls_retryable(
     assert RAW not in result.to_state().to_string() + repr(model.calls[-1].input)
     if session:
         assert RAW not in store.records[session.session_id]
+
+
+@pytest.mark.asyncio
+async def test_namespace_copy_requires_exact_registration_for_its_source():
+    effects = []
+
+    @function_tool
+    def report() -> str:
+        effects.append("called")
+        return RAW
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    (named,) = tool_namespace(name="desk", description="Reports", tools=[report])
+
+    async def dispatch(entries):
+        model = ScriptedModel([[function_call("report", {}, namespace="desk", call_id="c")]])
+        agent = Agent(
+            name="reports", tools=[named], model=model, tool_use_behavior="stop_on_first_tool"
+        )
+        config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=entries))
+        return (await Runner.run(agent, "go", run_config=config)).final_output
+
+    with pytest.raises(UserError, match="tool_namespace"):
+        await dispatch([(report, edit)])
+    assert not effects
+    assert await dispatch([(report, edit), (named, edit)]) == SAFE
+    assert await dispatch([(replace(report), edit)]) == RAW
+
+
+@pytest.mark.asyncio
+async def test_filtered_stdio_catalog_distinguishes_hidden_name_from_typo():
+    import sys
+    from pathlib import Path
+
+    from agents.mcp import MCPServerStdio
+
+    calls = []
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    async with MCPServerStdio(
+        params={
+            "command": sys.executable,
+            "args": [str(Path(__file__).parent / "mcp/servers/paginated.py")],
+        },
+        tool_filter={"allowed_tool_names": ["first_page_tool"]},
+        tool_meta_resolver=lambda call: calls.append(call.tool_name),
+    ) as peer:
+
+        async def dispatch(name):
+            model = model_for("first_page_tool")
+            agent = Agent(name="reports", mcp_servers=[peer], model=model)
+            config = RunConfig(
+                tool_execution=ToolExecutionConfig(
+                    tool_text_transforms=[MCPTextTransform(server=peer, tool_name=name, edit=edit)]
+                )
+            )
+            run = Runner.run_streamed(agent, "go", run_config=config)
+            async for _ in run.stream_events():
+                pass
+            return repr(model.calls[-1].input)
+
+        with pytest.raises(UserError, match="original tool name"):
+            await dispatch("first_page_typo")
+        assert not calls
+        assert "called:first_page_tool" in await dispatch("second_page_tool")
+        assert calls == ["first_page_tool"]

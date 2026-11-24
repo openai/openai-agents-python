@@ -129,6 +129,7 @@ from .run import (
     ToolNotFoundBehavior,
 )
 from .run_budget import RunBudget, RunBudgetError
+from .run_config import MCPTextTransform
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
     RunErrorData,
@@ -503,6 +504,7 @@ __all__ = [
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
