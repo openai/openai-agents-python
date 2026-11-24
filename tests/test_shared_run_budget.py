@@ -128,6 +128,61 @@ async def test_parent_tool_policy_reaches_child():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("restrict_child", [False, True], ids=["inherited", "child-deny"])
+async def test_child_can_deny_a_name_allowed_in_the_parent(streamed, restrict_child):
+    started = []
+
+    @tool(name_override="lookup")
+    def parent_lookup() -> str:
+        started.append("parent")
+        return "public"
+
+    @tool(name_override="lookup")
+    def child_lookup() -> str:
+        started.append("child")
+        return "private"
+
+    child = Agent(
+        name="child",
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("lookup", call_id="child-lookup")],
+                [get_text_message("child done")],
+            ]
+        ),
+        tools=[child_lookup],
+    )
+    delegate = child.as_tool(
+        "ask",
+        "Ask child",
+        run_config={"budget": RunBudget(allowed_tools=())} if restrict_child else None,
+        failure_error_function=None,
+    )
+    parent = Agent(
+        name="parent",
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("lookup", call_id="parent-lookup")],
+                [get_function_tool_call("ask", '{"input":"go"}', call_id="ask")],
+                [get_text_message("done")],
+            ]
+        ),
+        tools=[parent_lookup, delegate],
+    )
+
+    budget = RunBudget(allowed_tools=("lookup", "ask"))
+    if restrict_child:
+        with pytest.raises(RunBudgetError) as caught:
+            await execute(parent, budget, streamed=streamed)
+        assert caught.value.limit == "tools"
+        assert started == ["parent"]
+    else:
+        await execute(parent, budget, streamed=streamed)
+        assert started == ["parent", "child"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("dotted_parent", [False, True])
 async def test_allowlist_cannot_confuse_bare_and_namespaced_tools(streamed, dotted_parent):
     started = []

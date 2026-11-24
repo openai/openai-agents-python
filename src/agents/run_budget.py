@@ -68,7 +68,11 @@ class RunBudget:
 
     allowed_tools uses bare SDK function names or namespace.name for namespaced
     functions, including agent-tool wrappers. Rename tools or namespaces containing
-    literal dots before using an allowlist. Every ancestor must allow a tool.
+    literal dots before using an allowlist. A grant applies to that name in every
+    agent sharing the budget. If a parent and child register different handlers
+    as lookup, allowing lookup covers both. Give handlers with different permissions
+    distinct names or namespaces, or pass a narrower budget to Agent.as_tool.
+    Each call must pass the local allowlist and every ancestor's allowlist.
     Restricted runs reject opaque prompt IDs, raw tool or prompt overrides,
     non-function tools and deferred/tool-search routes.
     max_tool_starts counts SDK FunctionTool starts, including Agent.as_tool wrappers.
