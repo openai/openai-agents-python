@@ -48,7 +48,9 @@ class _DecisionHandoff(Handoff[TContext, Agent[TContext]]):
     _can_restore: Callable[[RunContextWrapper[TContext] | None, str], bool]
 
 
-def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
+def _iter_agent_graph(
+    initial_agent: Agent[Any], *, include_tools: bool = True
+) -> Iterator[Agent[Any]]:
     """Yield agents reachable from the starting agent in breadth-first order."""
     queue: deque[Agent[Any]] = deque([initial_agent])
     seen_agent_ids: set[int] = set()
@@ -117,6 +119,8 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
             if handoff_agent is not None and handoff_agent_name:
                 queue.append(cast(Agent[Any], handoff_agent))
 
+        if not include_tools:
+            continue
         # Include agent-as-tool instances so nested approvals can be restored.
         tools = getattr(current, "tools", None)
         if tools:

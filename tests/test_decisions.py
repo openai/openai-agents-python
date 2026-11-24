@@ -20,7 +20,7 @@ from agents import (
     SQLiteSession,
     handoff,
 )
-from agents.decisions import DecisionError, decision_handoff
+from agents.decisions import DecisionError, OpenAIDecisions, decision_handoff
 from agents.decorators import tool
 from agents.exceptions import UserError
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
@@ -49,7 +49,16 @@ class Peer:
         self.requests.append(json.loads(request.content))
         if self.value == "transport":
             return httpx2.Response(500, json={})
-        answer = {"name": "decision", "type": "choice", "choice": self.value}
+        answer: dict[str, Any] = {
+            "name": "decision",
+            "type": "choice",
+            "choice": self.value,
+            "confidence": 1.0,
+            "probabilities": [
+                {"value": c["value"], "probability": float(c["value"] == self.value)}
+                for c in self.requests[-1]["questions"][0]["choices"]
+            ],
+        }
         if self.value == "refusal":
             answer = {"name": "decision", "type": "refusal", "refusal": "private"}
         return httpx2.Response(
@@ -146,13 +155,8 @@ async def run(source, stream, value="history", **kwargs):
 def test_openai_single_target_suggests_ordinary_handoff():
     source = source_agent()
     with pytest.raises(ValueError, match=r"handoff\(target\)"):
-        decision_handoff(
-            source,
-            client=Peer().client,
-            model="fixture",
-            question="Which?",
-            targets={"blue": Agent(name="Blue")},
-        )
+        source.decisions = OpenAIDecisions(client=Peer().client)
+        decision_handoff(source, question="Which?", targets={"blue": Agent(name="Blue")})
     assert not source.handoffs
 
 
@@ -167,10 +171,9 @@ async def test_input_filter_changes_specialist_history_only(stream, routed):
     provider = Peer("blue")
     if routed:
         source = source_agent()
+        source.decisions = OpenAIDecisions(client=provider.client)
         route = decision_handoff(
             source,
-            client=provider.client,
-            model="fixture",
             question="Which?",
             targets={"blue": target, "red": Agent(name="Red")},
             input_filter=summary,
@@ -195,10 +198,9 @@ async def test_openai_handoff_catalog_uses_permitted_choice_count(count):
     source = Agent(name="Source", model=model)
     targets = {str(i): Agent(name=str(i)) for i in range(max(2, count))}
     client = Peer().client
+    source.decisions = OpenAIDecisions(client=client)
     route = decision_handoff(
         source,
-        client=client,
-        model="fixture",
         question="Which?",
         targets=targets,
         is_available=lambda ctx, label: int(label) < count,
@@ -218,11 +220,8 @@ async def test_openai_handoff_revoked_after_catalog_skips_provider(stream, monke
             del targets["red"]
 
     provider = Peer()
-    source.handoffs.append(
-        decision_handoff(
-            source, client=provider.client, model="fixture", question="Which?", targets=targets
-        )
-    )
+    source.decisions = OpenAIDecisions(client=provider.client)
+    source.handoffs.append(decision_handoff(source, question="Which?", targets=targets))
     with pytest.raises(ValueError, match="unavailable"):
         await run(source, stream, hooks=Hooks())
     assert not provider.requests
@@ -256,10 +255,9 @@ async def test_runner_preserves_context_call_identity_and_specialist_permissions
     source = source_agent()
     provider = Peer("blue")
     targets = {"red": red, "blue": blue}
+    source.decisions = OpenAIDecisions(client=provider.client)
     route = decision_handoff(
         source,
-        client=provider.client,
-        model="fixture",
         question="Which?",
         targets=targets,
         is_available=lambda ctx, label: label == "red" or ctx.context["allowed"] == label,
@@ -279,7 +277,7 @@ async def test_runner_preserves_context_call_identity_and_specialist_permissions
     ] == ["transfer"]
     assert [t.name for t in model.calls[0].tools] == ["gated"]
     assert not effects and len(result.interruptions) == 1
-    assert result.context_wrapper.usage.total_tokens == 7
+    assert result.context_wrapper.usage.total_tokens == 0
     saved = result.to_state().to_string()
     with pytest.raises(UserError):
         await RunState.from_string(source, saved)
@@ -322,13 +320,10 @@ async def test_restore_rebuilt_roster_binds_label_and_agent_without_reselection(
             tool_use_behavior="stop_on_first_tool",
             model=ScriptedModel([[function_call("record", {}, call_id="write")]]),
         )
+        source.decisions = OpenAIDecisions(client=provider.client)
         source.handoffs.append(
             decision_handoff(
-                source,
-                client=provider.client,
-                model="fixture",
-                question="Which?",
-                targets={label: target, "red": Agent(name="Red")},
+                source, question="Which?", targets={label: target, "red": Agent(name="Red")}
             )
         )
         return source, target
@@ -367,11 +362,10 @@ async def test_no_transfer_after_revocation_failure_or_cancellation(case, monkey
     timeout = before_dispatch or case == "timeout"
     if timeout:
         provider.expire_deadline(monkeypatch, before_dispatch=before_dispatch)
+    source.decisions = OpenAIDecisions(client=provider.client)
     source.handoffs.append(
         decision_handoff(
             source,
-            client=provider.client,
-            model="fixture",
             timeout=0.01 if timeout else 30,
             question="Which?",
             targets=targets,
@@ -416,11 +410,10 @@ async def test_no_transfer_after_revocation_failure_or_cancellation(case, monkey
 async def test_model_cannot_extend_routing_input(arguments):
     source = source_agent(arguments)
     provider = Peer("blue")
+    source.decisions = OpenAIDecisions(client=provider.client)
     source.handoffs.append(
         decision_handoff(
             source,
-            client=provider.client,
-            model="fixture",
             question="Which?",
             targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
         )
@@ -451,12 +444,9 @@ async def test_handoff_error_redaction(
 
     provider = Peer("refusal" if failure == "refusal" else "unknown")
 
+    source.decisions = OpenAIDecisions(client=provider.client)
     handoff = decision_handoff(
-        source,
-        client=provider.client,
-        model="fixture",
-        question="Which?",
-        targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
+        source, question="Which?", targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")}
     )
     source.handoffs.append(handoff)
     errors: list[Exception] = []
@@ -493,11 +483,10 @@ async def test_immediate_stream_cancellation_drains_late_selection():
     source = source_agent()
     model = ScriptedModel()
     provider = BlockingPeer()
+    source.decisions = OpenAIDecisions(client=provider.client)
     source.handoffs.append(
         decision_handoff(
             source,
-            client=provider.client,
-            model="fixture",
             question="Which?",
             targets={"blue": Agent(name="Blue", model=model), "red": Agent(name="Red")},
         )
@@ -531,12 +520,9 @@ async def test_primary_can_answer_without_selection_and_clones_need_their_own_ro
     )
     source = Agent(name="Source", model=model)
     original = Agent(name="Blue", model=ScriptedModel([[assistant_message("original")]]))
+    source.decisions = OpenAIDecisions(client=provider.client)
     route = decision_handoff(
-        source,
-        question="Which?",
-        targets={"blue": original, "red": Agent(name="Red")},
-        client=provider.client,
-        model="fixture",
+        source, question="Which?", targets={"blue": original, "red": Agent(name="Red")}
     )
     source.handoffs.append(route)
     shallow = source.clone()
@@ -548,13 +534,10 @@ async def test_primary_can_answer_without_selection_and_clones_need_their_own_ro
 
     clone = source.clone(handoffs=[])
     alternate = Agent(name="Blue", model=ScriptedModel([[assistant_message("alternate")]]))
+    clone.decisions = OpenAIDecisions(client=provider.client)
     clone.handoffs.append(
         decision_handoff(
-            clone,
-            question="Which?",
-            targets={"blue": alternate, "red": Agent(name="Red")},
-            client=provider.client,
-            model="fixture",
+            clone, question="Which?", targets={"blue": alternate, "red": Agent(name="Red")}
         )
     )
     assert source.handoffs == [route]
@@ -572,18 +555,15 @@ async def test_explicit_recovery_returns_to_caller_without_transferring():
     )
     source = Agent(name="Source", model=model)
     provider = Peer("unknown")
+    source.decisions = OpenAIDecisions(client=provider.client)
     route = decision_handoff(
-        source,
-        client=provider.client,
-        model="fixture",
-        question="Which?",
-        targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
+        source, question="Which?", targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")}
     )
     route.failure_error_function = lambda ctx, error: "Transfer unavailable"
     source.handoffs.append(route)
     result = await run(source, False)
     assert result.last_agent is source and result.final_output == "direct"
-    assert result.context_wrapper.usage.total_tokens == 7 and len(provider.requests) == 1
+    assert result.context_wrapper.usage.total_tokens == 0 and len(provider.requests) == 1
     assert any(
         i.get("output") == "Transfer unavailable" and i.get("call_id") == "transfer"
         for i in model.calls[1].input
@@ -637,11 +617,10 @@ async def test_selection_failure_keeps_completed_tool_receipt(
         ),
     )
     specialist = ScriptedModel()
+    source.decisions = OpenAIDecisions(client=peer.client)
     source.handoffs.append(
         decision_handoff(
             source,
-            client=peer.client,
-            model="fixture",
             timeout=0.01 if timeout else 30,
             question="Which?",
             targets={"blue": Agent(name="Blue", model=specialist), "red": Agent(name="Red")},
@@ -697,10 +676,9 @@ async def test_nested_specialist_uses_fresh_context_and_owns_approval(stream):
         tool_use_behavior="stop_on_first_tool",
         model=ScriptedModel([[function_call("record", {}, call_id="effect")]]),
     )
+    source.decisions = OpenAIDecisions(client=provider.client)
     route = decision_handoff(
         source,
-        client=provider.client,
-        model="fixture",
         question="Which?",
         targets={"blue": target, "red": Agent(name="Red")},
         is_available=lambda ctx, label: label == "red" or ctx.context["allowed"] == label,
@@ -759,13 +737,9 @@ async def test_resume_rechecks_only_selected_grant_before_any_effect(stream, mod
     targets = {"blue": blue, "red": Agent(name="Red")}
     peer = Peer()
     grants = {"blue", "red"}
+    source.decisions = OpenAIDecisions(client=peer.client)
     route = decision_handoff(
-        source,
-        client=peer.client,
-        model="fixture",
-        question="Which?",
-        targets=targets,
-        is_available=lambda ctx, label: label in grants,
+        source, question="Which?", targets=targets, is_available=lambda ctx, label: label in grants
     )
     source.handoffs.append(route)
     root = source
@@ -819,10 +793,9 @@ async def test_shared_specialist_rejected_before_primary_inference(stream, other
     blue = Agent(name="Blue")
 
     def route(name):
+        source.decisions = OpenAIDecisions(client=peer.client)
         return decision_handoff(
             source,
-            client=peer.client,
-            model="fixture",
             question="Which?",
             tool_name=name,
             targets={"blue": blue, "red": Agent(name="Red")},
@@ -843,13 +816,11 @@ def test_invalid_permanent_configuration(monkeypatch):
     blue = Agent(name="Blue")
     targets = {"blue": blue, "red": Agent(name="Red")}
 
-    def build(model="fixture", roster=targets):
-        return decision_handoff(
-            source_agent(), client=client, model=model, question="Which?", targets=roster
-        )
+    def build(roster=targets):
+        source = source_agent()
+        source.decisions = OpenAIDecisions(client=client)
+        return decision_handoff(source, question="Which?", targets=roster)
 
-    with pytest.raises(ValueError, match="model"):
-        build(" ")
     with pytest.raises(ValueError, match="separate"):
         build(roster={"a": blue, "b": blue})
     with pytest.raises(ValueError, match="255"):
@@ -864,13 +835,10 @@ async def test_transport_error_has_no_retry():
 
     peer = Peer("transport")
     source = source_agent()
+    source.decisions = OpenAIDecisions(client=peer.client)
     source.handoffs.append(
         decision_handoff(
-            source,
-            client=peer.client,
-            model="fixture",
-            question="Which?",
-            targets={"a": Agent(name="A"), "b": Agent(name="B")},
+            source, question="Which?", targets={"a": Agent(name="A"), "b": Agent(name="B")}
         )
     )
     with pytest.raises(InternalServerError):
@@ -883,11 +851,10 @@ async def test_selector_names_must_be_unique_before_inference(stream):
     source = source_agent()
     peer = Peer()
     for _ in range(2):
+        source.decisions = OpenAIDecisions(client=peer.client)
         source.handoffs.append(
             decision_handoff(
                 source,
-                client=peer.client,
-                model="fixture",
                 question="Which?",
                 targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
             )
@@ -896,3 +863,29 @@ async def test_selector_names_must_be_unique_before_inference(stream):
         await run(source, stream)
     assert isinstance(source.model, ScriptedModel)
     assert not source.model.calls and not peer.requests
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_inconsistent_distribution_cannot_transfer(stream):
+    class Inconsistent(Peer):
+        async def respond(self, request):
+            data = (await super().respond(request)).json()
+            for entry in data["answers"][0]["probabilities"]:
+                entry["probability"] = 0.9
+            return httpx2.Response(200, json=data)
+
+    peer = Inconsistent()
+    source = source_agent()
+    model = ScriptedModel()
+    source.decisions = OpenAIDecisions(client=peer.client)
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            question="Which?",
+            targets={label: Agent(name=label, model=model) for label in ("blue", "red")},
+        )
+    )
+    with pytest.raises(DecisionError) as caught:
+        await run(source, stream)
+    assert caught.value.reason == "invalid_response"
+    assert len(peer.requests) == 1 and not model.calls

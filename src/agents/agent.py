@@ -9,13 +9,15 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Seque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
+from itertools import chain
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeAlias, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
 from . import _debug
+from ._decision_types import DecisionProvider, _Decider
 from ._tool_identity import get_tool_approval_item_call_id
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
@@ -83,7 +85,14 @@ class _AgentToolStreamOverflow(UserError):
 
 
 @dataclass(frozen=True)
-class ProposedFinalOutput(Generic[TContext]):
+class ContinueWithFeedback:
+    """Continue with one application-authored user message on the next model turn."""
+
+    message: str
+
+
+@dataclass(frozen=True)
+class ProposedFinalOutput(_Decider, Generic[TContext]):
     """A proposed final output from one SDK model turn. Treat its contents as read-only."""
 
     agent: Agent[TContext]
@@ -332,7 +341,7 @@ class AgentBase(Generic[TContext]):
 
 
 @dataclass
-class Agent(AgentBase, Generic[TContext]):
+class Agent(AgentBase, _Decider, Generic[TContext]):
     """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
 
     We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
@@ -436,6 +445,11 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+    decisions: Annotated[DecisionProvider | None, Field(exclude=True)] = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
+    """Borrowed provider for typed decisions on this agent and its callbacks."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -467,6 +481,8 @@ class Agent(AgentBase, Generic[TContext]):
                 | ToolsToFinalOutputFunction
             ) = "run_llm_again",
             reset_tool_choice: bool = True,
+            *,
+            decisions: DecisionProvider | None = None,
         ) -> None: ...
 
     def __post_init__(self):
@@ -693,9 +709,12 @@ class Agent(AgentBase, Generic[TContext]):
             tool_description: The description of the tool, which should indicate what it does and
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the final output is used. When output guardrails ran, empty final
-                outputs are preserved; otherwise, empty final outputs fall back to the latest
-                nonempty message or tool output from the nested run. Nested run results expose
+                provided, the final output is used. Output guardrails preserve empty outputs.
+                Empty text is also preserved if the finishing agent or any agent represented
+                in the nested run's `new_items` has a final output policy, even if the
+                policy was never invoked.
+                Otherwise, empty outputs fall back to the latest nonempty message or tool
+                output from the nested run. Nested run results expose
                 `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
@@ -983,6 +1002,9 @@ class Agent(AgentBase, Generic[TContext]):
                     resume_state._context.usage = context.usage
 
             if run_result is None:
+                from .decisions import _delegate_decisions
+
+                _delegate_decisions(self, context, nested_context)
                 if on_stream is not None:
                     stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(
@@ -1145,6 +1167,16 @@ class Agent(AgentBase, Generic[TContext]):
             # Output guardrails validated the final output, not intermediate run items.
             if run_result.output_guardrail_results:
                 return run_result.final_output
+
+            # An earlier agent may have continued past a draft before handing off.
+            if run_result.final_output == "":
+                agents = chain(
+                    (run_result.last_agent,), (item.agent for item in run_result.new_items)
+                )
+                if any(
+                    a.hooks is not None and a.hooks.final_output_policy is not None for a in agents
+                ):
+                    return run_result.final_output
 
             for item in reversed(run_result.new_items):
                 if isinstance(item, MessageOutputItem):

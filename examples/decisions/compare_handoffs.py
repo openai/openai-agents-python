@@ -8,7 +8,7 @@ import httpx2
 from openai import AsyncOpenAI
 
 from agents import Agent, RunConfig, Runner, handoff
-from agents.decisions import decision_handoff
+from agents.decisions import OpenAIDecisions, decision_handoff
 from agents.testing import ScriptedModel, assistant_message, function_call
 
 # Each row records the input, expected route, expected answer and two scripted predictions.
@@ -28,7 +28,21 @@ async def compare() -> None:
         calls += 1
         choice = predictions[json.loads(request.content)["input"]]
         return httpx2.Response(
-            200, json={"answers": [{"type": "choice", "name": "decision", "choice": choice}]}
+            200,
+            json={
+                "answers": [
+                    {
+                        "type": "choice",
+                        "name": "decision",
+                        "choice": choice,
+                        "confidence": 1.0,
+                        "probabilities": [
+                            {"value": c["value"], "probability": float(c["value"] == choice)}
+                            for c in json.loads(request.content)["questions"][0]["choices"]
+                        ],
+                    }
+                ]
+            },
         )
 
     async with AsyncOpenAI(
@@ -55,12 +69,9 @@ async def compare() -> None:
                     )
                     call = function_call(primary, {}, call_id="transfer")
                 else:
+                    source.decisions = OpenAIDecisions(client=client)
                     route = decision_handoff(
-                        source,
-                        client=client,
-                        model="fixture",
-                        question="Which team can help?",
-                        targets=targets,
+                        source, question="Which team can help?", targets=targets
                     )
                     source.handoffs.append(route)
                     call = function_call(route.tool_name, {"input": text}, call_id="transfer")

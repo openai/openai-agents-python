@@ -75,8 +75,12 @@ async def maybe_filter_model_input(
             agent=agent,
             context=context_wrapper.context,
         )
-        maybe_updated = run_config.call_model_input_filter(filter_payload)
-        updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
+        from .._public_agent import get_public_agent
+        from ..decisions import _bind_decisions
+
+        async with _bind_decisions(filter_payload, get_public_agent(agent)):
+            maybe_updated = run_config.call_model_input_filter(filter_payload)
+            updated = await maybe_updated if inspect.isawaitable(maybe_updated) else maybe_updated
         if not isinstance(updated, ModelInputData):
             raise UserError("call_model_input_filter must return a ModelInputData instance")
         return updated

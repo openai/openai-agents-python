@@ -1,5 +1,52 @@
 # Decisions in the Python Agents SDK
 
+## Ask a typed question
+
+Set `Agent.decisions` once. Each call sends only the question, explicit input and requested output schema. This example makes paid requests when invoked.
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel
+
+from agents import Agent, AgentHooks, OpenAIDecisions, Runner, function_tool
+from agents.tool_context import ToolContext
+
+
+class Ticket(BaseModel):
+    urgent: bool
+    team: Literal["billing", "support"]
+
+
+@function_tool
+async def classify(ctx: ToolContext[None], report: str) -> str:
+    return await ctx.decide("Which team?", input=report, choices=["billing", "support"])
+
+
+async def check(run, proposal):
+    ready = await proposal.decide("Does the reply include a next step?", input=proposal.output)
+    return "finish" if ready else "continue"
+
+
+async def answer_ticket(text: str):
+    async with OpenAIDecisions() as provider:
+        agent = Agent(
+            name="Help",
+            decisions=provider,
+            tools=[classify],
+            hooks=AgentHooks(final_output_policy=check),
+        )
+        ticket = await agent.decide("Classify this request.", input=text, output_type=Ticket)
+        reply = await Runner.run(agent, text, max_turns=3)
+        return ticket, reply.final_output
+```
+
+Without `choices` or `output_type`, the result is a boolean. The built-in provider uses a probability threshold of 0.5. Choose one output form per call. Supported types include finite scalar choices, required nested records, integers spanning up to 255 values and floats with integer bounds up to 9 apart. Unsupported schemas fail before dispatch. Input can be text or model input items. The SDK adds no conversation history or instructions.
+
+Within one run, a handoff target inherits the root provider unless it declares its own. Nested runs, including agents as tools, start with their own provider. Within a function tool, a model input filter or a final output policy, call `decide` on the live `ToolContext`, `CallModelData` or `ProposedFinalOutput` respectively. Use `provider=...` for a single call or implement `DecisionProvider.get_decision` for another backend. An answer grants no permissions.
+
+Use `async with OpenAIDecisions()` or call `aclose()` for the default client. With `OpenAIDecisions(client=client)`, the caller owns the client. The built-in adapter needs an OpenAI client version with Decisions support and disables retries. Decision calls and tokens are outside Runner usage and budgets. With tracing enabled, the `decision.usage` span records available metadata without the question, input or answer. Missing usage is unknown.
+
 ## Let the primary model request a specialist
 
 Use `agents.decisions.decision_handoff` when the primary model should decide **when** to transfer. Decisions chooses **which** specialist from the labels your application currently allows. If the primary model answers directly, there is no Decisions request.
@@ -12,17 +59,21 @@ uv run python examples/decisions/compare_handoffs.py
 
 The example compares direct and Decisions handoffs on the same three labeled inputs. Both paths use the same scripted specialists and settings. Route accuracy measures the fraction routed correctly. Task completion measures the fraction with the expected final answer. Each row also reports total elapsed time inside Runner and request counts. Estimated cost is unknown (`null`). The predictions include deliberate mistakes. These fixtures check the workflow and scoring. They provide no evidence of live accuracy, latency or cost.
 
-For live requests, pass a caller-owned `AsyncOpenAI` client and a supported Decisions model. This function makes paid calls when invoked.
+For live requests, configure a provider on the source agent. This function makes paid calls when invoked.
 
 ```python
 from openai import AsyncOpenAI
 
-from agents import Agent, Runner
+from agents import Agent, OpenAIDecisions, Runner
 from agents.decisions import decision_handoff
 
 
-async def answer(client: AsyncOpenAI, decisions_model: str, text: str):
-    source = Agent(name="Triage", instructions="Transfer requests that need a specialist.")
+async def answer(client: AsyncOpenAI, text: str):
+    source = Agent(
+        name="Triage",
+        instructions="Transfer requests that need a specialist.",
+        decisions=OpenAIDecisions(client=client),
+    )
     targets = {
         "billing": Agent(name="Billing", instructions="Help with invoices."),
         "account": Agent(name="Account", instructions="Help with account settings."),
@@ -31,8 +82,6 @@ async def answer(client: AsyncOpenAI, decisions_model: str, text: str):
         source,
         question="Which team can help?",
         targets=targets,
-        client=client,
-        model=decisions_model,
     )
     source.handoffs.append(route)
     return await Runner.run(source, text)
@@ -61,7 +110,7 @@ state = await RunState.from_string(source, saved, context_override=current_conte
 
 Use a separate specialist instance for each label and ordinary handoff. A saved specialist identifies one route. Both loading and resuming check the active specialist, including pending agent tools. Missing bindings or denied access stop the resume before dispatch. Decisions does not run again. Review each pending call in `state.get_interruptions()`, then approve or reject it and resume with `await Runner.run(source, state)`.
 
-Keep the graph and grants current. If selection fails after a tool has run, keep the updated `RunState` and inspect completed results before retrying. Reported Decisions usage contributes to aggregate usage. A Decisions request is separate from regular Runner model calls and their budget.
+Keep the graph and grants current. If selection fails after a tool has run, keep the updated `RunState` and inspect completed results before retrying.
 
 ### Evaluate routing separately
 

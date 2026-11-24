@@ -262,7 +262,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.25"
+CURRENT_SCHEMA_VERSION = "1.26"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -331,6 +331,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
     "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
+    "1.26": "Requires an exact text editor when resuming selected tool calls.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1613,6 +1614,9 @@ class RunState(Generic[TContext, TAgent]):
                 "executed": invocation.executed,
                 "completed": invocation.completed,
             }
+            # Schema 1.26 retains the requirement, never the editor or selector objects.
+            if invocation.requires_text_transform and not invocation.completed:
+                record["requires_text_transform"] = True
             if invocation.input_rewrite is not None:
                 fingerprint, arguments = invocation.input_rewrite
                 record["input_rewrite"] = {
@@ -2761,10 +2765,15 @@ def _validate_pending_approvals(
     required_children: set[int],
     *,
     nested: bool = False,
-) -> bool:
-    """Validate before best-effort child restoration and report whether a budget is required."""
+) -> tuple[bool, bool]:
+    """Check pending approvals and propagate budget and editor requirements to ancestors."""
     context = state.get("context")
     requires_budget = isinstance(context, dict) and "budget" in context
+    invocations = context.get("tool_invocations") if isinstance(context, dict) else None
+    requires_editor = isinstance(invocations, dict) and any(
+        isinstance(record, dict) and "requires_text_transform" in record
+        for record in invocations.values()
+    )
     response = state.get("last_processed_response")
     if not isinstance(response, dict):
         response = {}
@@ -2783,19 +2792,28 @@ def _validate_pending_approvals(
     if isinstance(functions, list):
         for entry in functions:
             child = entry.get("agent_run_state") if isinstance(entry, dict) else None
-            if isinstance(child, dict) and _validate_pending_approvals(
+            if not isinstance(child, dict):
+                continue
+            budget, editor = _validate_pending_approvals(
                 child, validation_error_factory, required_children, nested=True
-            ):
+            )
+            if budget or editor:
                 # Track the exact child snapshot until its pending run is registered.
                 required_children.add(id(child))
-                requires_budget = True
-    if requires_budget:
+                requires_budget |= budget
+                requires_editor |= editor
+    if requires_budget or requires_editor:
         version = _validate_run_state_schema_version(
             state, validation_error_factory=validation_error_factory
         )
-        if tuple(map(int, version.split("."))) < (1, 25):
+        schema = tuple(map(int, version.split(".")))
+        if requires_editor and schema < (1, 26):
+            raise validation_error_factory(
+                "Tool text transforms require RunState schema 1.26.", UserError
+            )
+        if requires_budget and schema < (1, 25):
             raise _BudgetCheckpointError("Run budgets require schema 1.25 or later.")
-    return requires_budget
+    return requires_budget, requires_editor
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -6027,6 +6045,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         _REQUIRED_CHILD_MISSING,
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
+        "Tool text transforms require RunState schema 1.26.",
+        "RunState tool text transform requirement is invalid.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",

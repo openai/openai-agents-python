@@ -74,6 +74,7 @@ from .util import (
     ToolFilter,
     ToolFilterContext,
     ToolFilterStatic,
+    _FilteredTools,
 )
 
 
@@ -1561,14 +1562,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     self._cache_dirty = False
                     self._tools_last_published_refresh_sequence = refresh_sequence
 
-            # Filter tools based on tool_filter
-            filtered_tools = tools
+            # Snapshot even filtered schemas to isolate callers from the cache.
             if self.tool_filter is not None:
-                filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
-            # Always deep-copy tools. Even when filters build a new list, the Tool
-            # objects (and nested input schemas) would otherwise remain shared with
-            # the cache and let callers corrupt required-parameter validation.
-            return _snapshot_tools(filtered_tools)
+                names = frozenset(tool.name for tool in tools)
+                filtered_tools = await self._apply_tool_filter(tools, run_context, agent)
+                return _FilteredTools(_snapshot_tools(filtered_tools), names)
+            return _snapshot_tools(tools)
         except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(

@@ -10,6 +10,7 @@ from .agent import (
     Agent,
     AgentBase,
     AgentToolStreamEvent,
+    ContinueWithFeedback,
     ProposedFinalOutput,
     StopAtTools,
     ToolsToFinalOutputFunction,
@@ -18,6 +19,14 @@ from .agent import (
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .decisions import (
+    DecisionError,
+    DecisionInput,
+    DecisionProvider,
+    DecisionRequest,
+    DecisionResponse,
+    OpenAIDecisions,
+)
 from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
@@ -115,6 +124,8 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    NativeMCPResult,
+    NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -129,6 +140,7 @@ from .run import (
     ToolNotFoundBehavior,
 )
 from .run_budget import RunBudget, RunBudgetError
+from .run_config import MCPTextTransform
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
     RunErrorData,
@@ -374,9 +386,16 @@ def enable_verbose_stdout_logging() -> None:
 
 
 __all__ = [
+    "DecisionError",
+    "DecisionInput",
+    "DecisionProvider",
+    "DecisionRequest",
+    "DecisionResponse",
+    "OpenAIDecisions",
     "Agent",
     "AgentBase",
     "AgentToolStreamEvent",
+    "ContinueWithFeedback",
     "ProposedFinalOutput",
     "StopAtTools",
     "ToolsToFinalOutputFunction",
@@ -503,9 +522,12 @@ __all__ = [
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
+    "NativeMCPResult",
+    "NativeMCPResultTransform",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
