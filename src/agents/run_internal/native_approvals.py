@@ -86,8 +86,8 @@ def validate_native_restore_hooks(processed: Any, bindings: ModelToolHooks) -> N
         checkpoint = native_approval_checkpoint(processed.native_approvals[0].raw_item)
         assert checkpoint is not None
         _validate_native_restore([], bindings, checkpoint)
-        assert bindings.restore_config is not None
-        model = get_model(bindings.agent, bindings.restore_config)
+        assert bindings.run_config is not None
+        model = get_model(bindings.agent, bindings.run_config)
         if isinstance(model, _CodexModel):
             model._provider._check_workspace_approval()
 

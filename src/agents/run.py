@@ -777,7 +777,7 @@ class AgentRunner:
                         context_wrapper,
                         hooks,
                         run_config.tool_execution,
-                        restore_config=run_config,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -798,7 +798,11 @@ class AgentRunner:
                 await session.begin(
                     input,
                     ModelToolHooks(
-                        starting_agent, context_wrapper, hooks, run_config.tool_execution
+                        starting_agent,
+                        context_wrapper,
+                        hooks,
+                        run_config.tool_execution,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -3044,7 +3048,7 @@ class AgentRunner:
                                 context_wrapper,
                                 hooks,
                                 run_config.tool_execution,
-                                restore_config=run_config,
+                                run_config=run_config,
                             ),
                             run_config.tool_not_found_behavior,
                         )

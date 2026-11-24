@@ -117,7 +117,7 @@ class CodexProvider(ModelProvider):
     that count. Limits reset on each native invocation and do not cap model
     requests, tokens or cost.
     This profile disables workspace tools and Code Mode. Enabled MCP servers,
-    SDK tools, handoffs, SDK sandboxes, native tool hooks and saved
+    SDK tools, handoffs, SDK sandboxes, update_plan, native tool hooks and saved
     workspace approvals are incompatible. Core can still accept structured inputs and read local
     context under the parent's permissions. Core owns child results and joins
     the tree when the request ends. Child IDs cannot resume in another request.
@@ -277,6 +277,46 @@ def _pending_native_call(
     ):
         return CodexPendingCustomCall(**wire, checkpoint=checkpoint)
     raise UserError("This Codex approval cannot safely be resumed on another worker.")
+
+
+_CHILD_TOOL_CONFLICT = "Native children cannot use SDK tools, handoffs, or tool hooks."
+
+
+def _validate_static_children(bindings: ModelToolHooks) -> None:
+    """Reject known conflicts before a fresh checkpoint claim, without discovery."""
+    from ..agent import Agent
+    from ..run_internal.tool_declarations import _covered
+    from ..tool import FunctionTool
+
+    config, agent = bindings.run_config, bindings.agent
+    if config is None or type(agent) is not Agent:
+        return
+    selected = config.model if config.model is not None else agent.model
+    if type(selected) is _CodexModel:
+        provider, name = selected._provider, selected._name
+    elif not isinstance(selected, Model) and type(config.model_provider) is CodexProvider:
+        provider, name = config.model_provider, selected
+    else:
+        return
+    if provider._children is None:
+        return
+    settings = agent.model_settings.resolve(config.model_settings)
+    if settings.tool_choice == "required":
+        raise UserError("Native children cannot require an SDK tool. Use tool_choice='auto'.")
+    policy = config.tool_execution.prepare_tool_declaration if config.tool_execution else None
+    if (
+        any(
+            not isinstance(t, FunctionTool)
+            or (t.is_enabled is True and (policy is None or not _covered(t)))
+            for t in agent.tools
+        )
+        or any(isinstance(h, Agent) or h.is_enabled is True for h in agent.handoffs)
+        or _uses_sdk_workspace([], bindings)
+        or CodexToolHooks.for_run(bindings, set()) is not None
+    ):
+        raise UserError(_CHILD_TOOL_CONFLICT)
+    if not name or not name.strip():
+        raise UserError("Native children require an exact V1 model slug from `codex debug models`.")
 
 
 def _uses_sdk_workspace(tools: list[Tool], bindings: ModelToolHooks | None) -> bool:
@@ -481,7 +521,7 @@ class _CodexModel(Model):
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         children = provider._children
         if children is not None and (tools or handoffs or sdk_sandbox or native_hooks):
-            raise UserError("Native children cannot use SDK tools, handoffs, or tool hooks.")
+            raise UserError(_CHILD_TOOL_CONFLICT)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(

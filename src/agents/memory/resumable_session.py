@@ -330,7 +330,11 @@ class ResumableSession:
         self._validate_run(input)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
-        if self.is_paused:
+        if not self.is_paused:
+            from ..models.codex import _validate_static_children
+
+            _validate_static_children(tool_hooks)
+        else:
             from ..run_internal.native_approvals import validate_native_restore_hooks
             from ..run_internal.tool_planning import (
                 _check_approved_functions,

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ModelToolHooks:
-    restore_config: RunConfig | None = field(default=None, kw_only=True, repr=False)
+    run_config: RunConfig | None = field(default=None, kw_only=True, repr=False)
     agent: Agent[Any]
     context: RunContextWrapper[Any]
     lifecycle: RunHooks[Any]

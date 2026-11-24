@@ -10,8 +10,10 @@ from agents import (
     AgentsException,
     ModelRetrySettings,
     ModelSettings,
+    ResumableSession,
     RunConfig,
     Runner,
+    ToolExecutionConfig,
     UserError,
     function_tool,
 )
@@ -34,10 +36,17 @@ def test_invalid_child_role(name):
         CodexRole(name, "description", "instructions")
 
 
-@pytest.mark.parametrize("roles", [[], (), "editor", [None], [ROLE, ROLE]])
+@pytest.mark.parametrize("roles", [None, "editor", [None], [ROLE, ROLE]])
 def test_invalid_roles(roles):
     with pytest.raises(ValueError):
         CodexChildren(roles=roles, max_delegation_attempts=1)
+
+
+def test_builtin_roles_need_an_explicit_limit():
+    assert CodexChildren(max_delegation_attempts=1).roles == ()
+    assert CodexChildren(roles=[], max_delegation_attempts=1).roles == ()
+    with pytest.raises(TypeError):
+        CodexChildren()  # type: ignore[call-arg]
 
 
 def test_invalid_child_declarations():
@@ -50,6 +59,104 @@ def test_invalid_child_declarations():
             kwargs = {"max_delegation_attempts": 1, field: limit}
             with pytest.raises(ValueError, match="limits"):
                 CodexChildren(roles=(ROLE,), **kwargs)
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("conflict", ["specialist", "handoff", "hook", "missing_model", "required"])
+async def test_static_child_conflict_leaves_checkpoint_ready(streamed, conflict):
+    from agents.testing import ScriptedModel
+    from tests.memory.test_resumable_session import MemoryStore, run_agent
+    from tests.test_responses import get_text_message
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    before = await store.load(session.session_id)
+    provider = CodexProvider(children=PROFILE)
+    manager = Agent(name="manager", model=provider.get_model("v1"))
+    reviewer = Agent(name="reviewer")
+    config = RunConfig(tracing_disabled=True)
+    if conflict == "specialist":
+        manager.tools.append(reviewer.as_tool("review", "Check dates"))
+    elif conflict == "handoff":
+        config.model_provider = provider
+        config.model = "v1"
+        manager.handoffs.append(reviewer)
+    elif conflict == "required":
+        config.model_settings = ModelSettings(tool_choice="required")
+    elif conflict == "hook":
+        config.tool_execution = ToolExecutionConfig(prepare_tool_output=lambda call, out: out)
+    else:
+        config.model = provider.get_model(None)
+    with pytest.raises(UserError, match="Native children"):
+        await run_agent(manager, "Check", session, streamed, run_config=config)
+    assert await store.load(session.session_id) == before
+    reopened = await ResumableSession.resume(store, session.session_id)
+    override = RunConfig(model=ScriptedModel([[get_text_message("ok")]]), tracing_disabled=True)
+    result = await run_agent(manager, "Check", reopened, streamed, run_config=override)
+    assert result.final_output == "ok"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_child_session_respects_tool_choice_override_and_withheld_function(
+    tmp_path, monkeypatch, model_endpoint, catalog, streamed
+):
+    from tests.memory.test_resumable_session import MemoryStore, run_agent
+
+    @function_tool
+    def publish() -> str:
+        raise AssertionError("Withheld tool ran")
+
+    checks = []
+
+    async def omit(ctx, declaration):
+        checks.append(declaration.name)
+        return None
+
+    port, requests, items = model_endpoint
+    items.append(final_message())
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    manager = Agent(
+        name="manager",
+        model=provider.get_model("v1"),
+        tools=[publish],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+    config = RunConfig(
+        tracing_disabled=True,
+        model_settings=ModelSettings(tool_choice="auto"),
+        tool_execution=ToolExecutionConfig(prepare_tool_declaration=omit),
+    )
+    session = await ResumableSession.create(MemoryStore())
+    try:
+        result = await run_agent(manager, "Check", session, streamed, run_config=config)
+        assert result.final_output == "done"
+        assert checks == ["publish"]
+        assert len(requests) == 1
+        assert all(tool.get("name") != "publish" for tool in requests[0]["tools"])
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_dynamic_child_conflict_keeps_claim_after_enabling_once(streamed):
+    from tests.memory.test_resumable_session import MemoryStore, run_agent
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    checks = []
+
+    def enabled(ctx, agent):
+        checks.append(store.checkpoint(session.session_id)["status"])
+        return True
+
+    provider = CodexProvider(children=PROFILE)
+    tool = Agent(name="reviewer").as_tool("review", "Check dates", is_enabled=enabled)
+    manager = Agent(name="manager", model=provider.get_model("v1"), tools=[tool])
+    with pytest.raises(UserError, match="Native children"):
+        await run_agent(manager, "Check", session, streamed)
+    assert checks == ["active"]
+    assert store.checkpoint(session.session_id)["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -199,6 +306,7 @@ def outputs(request):
         ("v2", []),
         ("unknown", []),
         ("v1", ["agents.max_depth=2"]),
+        ("v1", ["tools.update_plan.enabled=true"]),
         ("v1", ["features.shell_tool=true"]),
         ("v1", ["features.multi_agent_v2=true"]),
     ],
@@ -212,7 +320,9 @@ async def test_unsupported_children_before_generation(
     try:
         with pytest.raises(RuntimeError) as exc:
             await ask(provider, model)
-        if extra:
+        if extra == ["tools.update_plan.enabled=true"]:
+            assert "tools.update_plan conflicts" in str(exc.value)
+        elif extra:
             assert "conflict" in str(exc.value)
         else:
             assert str(exc.value) == (
@@ -406,7 +516,9 @@ async def test_child_native_depth_two_and_live_tree_isolation(
 @pytest.mark.allow_call_model_methods
 async def test_child_close_does_not_refund(tmp_path, monkeypatch, model_endpoint, catalog):
     port, requests, items = model_endpoint
-    provider = codex_fixture(tmp_path, port, monkeypatch, catalog, children=PROFILE)
+    provider = codex_fixture(
+        tmp_path, port, monkeypatch, catalog, children=CodexChildren(max_delegation_attempts=1)
+    )
 
     def step(request):
         prompt = user_input(request)

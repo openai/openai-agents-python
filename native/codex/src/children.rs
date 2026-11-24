@@ -83,6 +83,9 @@ impl Children {
     }
 
     pub fn validate(&self, config: &Config) -> NativeResult<()> {
+        if config.update_plan_enabled {
+            return Err("tools.update_plan conflicts with bounded native children.".into());
+        }
         if !config.ephemeral
             || !config.agents_enabled
             || !config.features.enabled(Feature::Collab)
@@ -100,7 +103,6 @@ impl Children {
             || config.agent_max_threads != Some(self.max_delegation_attempts)
             || config.agent_max_depth != self.max_depth
             || config.experimental_request_user_input_enabled
-            || config.update_plan_enabled
             || config.web_search_mode.value() != WebSearchMode::Disabled
             || config.notify.as_ref().is_some_and(|args| !args.is_empty())
         {

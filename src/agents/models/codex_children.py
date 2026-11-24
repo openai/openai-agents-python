@@ -89,7 +89,8 @@ class CodexChildren:
 
     The SDK skips the model retry policy and never retries either refusal.
 
-    The SDK copies the roles into a tuple. They supply instructions and
+    Use `CodexChildren(max_delegation_attempts=1)` for built-in roles only.
+    The SDK copies any custom roles into a tuple. They supply instructions and
     supplement the built-in default, explorer and worker roles. The model
     chooses whether to delegate. Children inherit the parent's model and
     permissions. Closed threads have no saved history for reopening or
@@ -97,19 +98,17 @@ class CodexChildren:
     model requests, retries, tokens or cost.
     """
 
-    roles: tuple[CodexRole, ...] | list[CodexRole]
+    roles: tuple[CodexRole, ...] | list[CodexRole] = ()
     max_delegation_attempts: int
     max_depth: int = 1
 
     def __post_init__(self) -> None:
         if isinstance(self.roles, list):
             object.__setattr__(self, "roles", tuple(self.roles))
-        if (
-            not isinstance(self.roles, tuple)
-            or not self.roles
-            or any(not isinstance(role, CodexRole) for role in self.roles)
+        if not isinstance(self.roles, tuple) or any(
+            not isinstance(role, CodexRole) for role in self.roles
         ):
-            raise ValueError("Provide a nonempty list or tuple of CodexRole declarations.")
+            raise ValueError("Provide a list or tuple of CodexRole declarations.")
         if len({role.name.lower() for role in self.roles}) != len(self.roles):
             raise ValueError("Duplicate Codex role name.")
         for value in (self.max_delegation_attempts, self.max_depth):
