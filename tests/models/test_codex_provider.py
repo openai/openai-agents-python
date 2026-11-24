@@ -2298,9 +2298,16 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
         ("Review", "completed"),
         ("Review", "pending"),
     ]
+    record = store.checkpoint(session.session_id)
+    assert record["version"] == 3
+    record["version"] = 1  # Earlier writers stored checklists without a distinct version.
+    store.records[session.session_id] = json.dumps(record)
+    session = await ResumableSession.resume(store, session.session_id)
     await turn([])
+    assert store.checkpoint(session.session_id)["version"] == 3
     assert session.codex_checklist == saved
     await turn([clear])
+    assert store.checkpoint(session.session_id)["version"] == 3
     cleared = session.codex_checklist
     assert cleared is not None and cleared.plan == () and cleared.explanation is None
 
@@ -2384,8 +2391,20 @@ async def test_checklist_redacts_display_text_before_saving(tmp_path, threads, s
     else:
         await Runner.run(agent, "Go", session=session, run_config=cfg)
     assert marker not in store.records[session.session_id]
-    assert store.checkpoint(session.session_id)["version"] == 2
+    assert store.checkpoint(session.session_id)["version"] == 4
     reopened = await ResumableSession.resume(store, session.session_id)
     saved = reopened.codex_checklist
     assert saved is not None and saved.explanation == "[hidden]"
     assert [(s.step, s.status) for s in saved.plan] == [("Check [hidden]", "pending")]
+
+    with pytest.raises(UserError, match="redact_text"):
+        await Runner.run(agent, "Next", session=reopened, run_config=config(tmp_path))
+    record = store.checkpoint(session.session_id)
+    assert record["status"] == "ready"
+    record["version"] = 2
+    store.records[session.session_id] = json.dumps(record)
+    reopened = await ResumableSession.resume(store, session.session_id)
+    threads[0].append(PlanThread(events=[]))
+    await Runner.run(agent, "Next", session=reopened, run_config=cfg)
+    assert store.checkpoint(session.session_id)["version"] == 4
+    assert reopened.codex_checklist == saved

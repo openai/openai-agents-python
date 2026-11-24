@@ -132,7 +132,8 @@ class CodexChecklist(BaseModel):
 class _Checkpoint(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    version: Literal[1, 2]
+    # Versions 3 and 4 include a checklist. Versions 2 and 4 require redaction.
+    version: Literal[1, 2, 3, 4]
     revision: str = Field(min_length=1)
     status: Literal["ready", "paused", "active"]
     history: list[Any]
@@ -149,6 +150,8 @@ class _Checkpoint(BaseModel):
 
     @model_validator(mode="after")
     def validate_status(self) -> _Checkpoint:
+        if self.version in (3, 4) and self.codex_checklist is None:
+            raise ValueError("Checkpoint version requires a checklist.")
         if (self.status == "ready" and self.run_state is not None) or (
             self.status == "paused" and not self.run_state
         ):
@@ -445,7 +448,12 @@ class ResumableSession:
         return _ResumableSessionBinding(self, checkpoint.revision)
 
     async def _replace(self, checkpoint: _Checkpoint, *, expected: str | None) -> None:
-        if checkpoint.version == 2 and current_redactor() is None:
+        # Earlier checklist records used 1 or 2. Upgrade on write, including active claims.
+        if checkpoint.codex_checklist is not None and checkpoint.version in (1, 2):
+            checkpoint = checkpoint.model_copy(
+                update={"version": 4 if checkpoint.version == 2 else 3}
+            )
+        if checkpoint.version in (2, 4) and current_redactor() is None:
             error = UserError("Continuing this resumable session requires RunConfig.redact_text.")
             _mark_error_data_redacted(error)
             raise error
