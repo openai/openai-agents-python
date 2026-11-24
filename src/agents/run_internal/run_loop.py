@@ -2864,6 +2864,7 @@ async def run_single_turn_streamed(
                 tool_execution.prepare_tool_declaration is not None
                 or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
+                or tool_execution.tool_text_transforms
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
                 model_items = [

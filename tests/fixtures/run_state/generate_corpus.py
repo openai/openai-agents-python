@@ -48,6 +48,7 @@ RELEASED_1_22_WRITER = "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d"
 CODEX_1_22_WRITER = "448ae7a3d9c5ddbfa0656a04a021ffb3f3c16530"
 RESUMABLE_1_23_WRITER = "d48e3c89ecdb71ad78d9eb90ed97bf632598d51c"
 RELEASED_1_24_WRITER = "6463d16ca5b680107df2e37386ed94c1bbb8ff81"
+BUDGET_1_25_WRITER = "827149084e196f724035733e9146291bab7755ea"
 GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
@@ -613,6 +614,17 @@ state._context._tool_invocations["call"] = _ToolInvocationRecord(
 )
 """,
     ),
+    Scenario(
+        "1.25",
+        BUDGET_1_25_WRITER,
+        "run_budget",
+        """
+from agents import RunBudget
+from agents.run_budget import _BudgetState
+
+state._context._budget = _BudgetState(RunBudget(max_requests=3), requests=1)
+""",
+    ),
 )
 
 
@@ -662,6 +674,7 @@ MINIMAL_SCENARIOS = (
     Scenario("1.22", RELEASED_1_22_WRITER, "minimal", ""),
     Scenario("1.23", RESUMABLE_1_23_WRITER, "minimal", ""),
     Scenario("1.24", RELEASED_1_24_WRITER, "minimal", ""),
+    Scenario("1.25", BUDGET_1_25_WRITER, "minimal", ""),
 )
 
 
