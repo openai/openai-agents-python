@@ -4,7 +4,7 @@ from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.types import ListResourcesResult, ReadResourceResult
+from mcp.types import ListResourcesResult, ReadResourceResult, Resource
 
 from agents import UserError
 from examples.mcp.account_picker.main import Picker, Submit, demo_server, run_selection
@@ -50,6 +50,23 @@ async def test_resume_only_the_current_request() -> None:
         },
         {"type": "function_call_output", "call_id": "pick-1", "output": "Savings"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_reads_only_the_picker_on_a_mixed_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with demo_server() as server:
+        listing = await server.list_resources()
+        other = Resource.model_validate({"uri": "accounts://demo/other", "name": "Other"})
+        listing.resources.insert(0, other)
+        read = AsyncMock(wraps=server.read_resource)
+        monkeypatch.setattr(server, "list_resources", AsyncMock(return_value=listing))
+        monkeypatch.setattr(server, "read_resource", read)
+
+        result = await run_selection(
+            server, "Demo", lambda picker, submit: submit(picker, "Savings")
+        )
+        assert result is not None and result.final_output == "Savings"
+        read.assert_awaited_once_with("accounts://demo/picker")
 
 
 @pytest.mark.asyncio

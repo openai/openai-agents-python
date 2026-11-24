@@ -22,7 +22,7 @@ uv run pytest -q tests/mcp/test_account_picker_example.py
 ## Resource discovery and reads
 
 - **[Source](server.py)** — One fixed demo user on a private stdio connection. One plain-text resource with a permitted alias on each line.
-- **[Application](main.py)** — Use `MCPServerStdio.list_resources()` to find the descriptor. Match the URI, MIME type, and `_meta` before calling `read_resource()`. Check the returned URI, content type, and labels before display.
+- **[Application](main.py)** — Require one complete page from `list_resources()` with exactly one descriptor for `accounts://demo/picker`. Ignore other URIs. Check the descriptor's MIME type and `_meta` before reading the allowed URI. Check the returned URI, content type, and labels before display.
 - **UI metadata** — Keep the descriptor on `Picker.resource`. Treat `example.com/widget` as a local widget identifier with no authority to grant access. Keep the descriptor and raw body out of agent instructions and tool history.
 
 ## Rendering, approval, and authorization
