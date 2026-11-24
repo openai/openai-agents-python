@@ -132,6 +132,7 @@ from .run import (
 )
 from .run_budget import RunBudget, RunBudgetError
 from .run_context import AgentHookContext, RunContextWrapper, TContext
+from .run_control import RunControl, SteeringOutcome, SteeringReceipt
 from .run_error_handlers import (
     RunErrorData,
     RunErrorHandler,
@@ -503,6 +504,9 @@ __all__ = [
     "RunBudget",
     "RunBudgetError",
     "RunConfig",
+    "RunControl",
+    "SteeringOutcome",
+    "SteeringReceipt",
     "OutputGuardrailBlockedMessageArgs",
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",

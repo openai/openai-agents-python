@@ -82,6 +82,7 @@ from ..result import RunResultStreaming
 from ..run_budget import _admit
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
+from ..run_control import current_control
 from ..run_error_handlers import RunErrorHandlers
 from ..run_state import RunState
 from ..sandbox.runtime import SandboxRuntime
@@ -961,6 +962,9 @@ async def start_streaming(
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
+    control = current_control()
+    if control is not None and is_resumed_state:
+        control._accepting = True
     streamed_result._stream_started = True
     if streamed_result._approved_output is not None and session is not None:
         streamed_result._approved_output.session_id = session.session_id or None
@@ -1697,10 +1701,15 @@ async def start_streaming(
             if streamed_result.is_complete:
                 break
 
-            if run_state is not None and run_state._pending_input:
+            live_input = (
+                control._take(current_turn + 1)
+                if control is not None and (max_turns is None or current_turn < max_turns)
+                else []
+            )
+            if run_state is not None and (run_state._pending_input or live_input):
                 if run_state._current_step is None:
                     run_state._current_step = NextStepRunAgain()
-                pending_input = run_state.pending_input
+                pending_input = run_state.pending_input + deepcopy(live_input)
                 pending_guardrails = current_agent.input_guardrails + (
                     run_config.input_guardrails or []
                 )
@@ -1734,6 +1743,9 @@ async def start_streaming(
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store
+                if live_input and control is not None:
+                    run_state._pending_input.extend(live_input)
+                    control._retained = True
                 admission_items = await admit_pending_input(
                     run_state=run_state,
                     agent=current_agent,
@@ -1749,6 +1761,8 @@ async def start_streaming(
                 pending_input_admission_items = [
                     item for item in admission_items if isinstance(item, InputItem)
                 ]
+                if control is not None:
+                    control._admitted(pending_input_admission_items)
                 if not run_state._pending_input:
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
@@ -2579,6 +2593,9 @@ async def run_single_turn_streamed(
             reasoning_item_id_policy,
         )
 
+    control = current_control()
+    if control is not None:
+        control._before_filter(input, server_conversation_tracker)
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
@@ -2679,9 +2696,22 @@ async def run_single_turn_streamed(
             prompt=prompt_config,
         )
 
+    async def controlled_stream() -> AsyncIterator[TResponseStreamEvent]:
+        # Defer dispatch until the retry driver actually pulls the stream.
+        stream = get_model_stream()
+        assert control is not None
+        control._dispatch(filtered.input)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+
     await _admit(context_wrapper._budget, model, session, streamed_result=streamed_result)
     retry_stream = stream_response_with_retry(
-        get_stream=get_model_stream,
+        get_stream=controlled_stream if control is not None else get_model_stream,
         preview=(
             streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
             if streamed_result._approved_output is not None and current_redactor() is None
@@ -3080,6 +3110,9 @@ async def get_new_response(
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
+    control = current_control()
+    if control is not None:
+        control._before_filter(input, server_conversation_tracker)
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
@@ -3185,10 +3218,11 @@ async def get_new_response(
         ),
         record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
     ):
-        await _admit(context_wrapper._budget, model, session)
-        new_response = await get_response_with_retry(
-            budget=context_wrapper._budget,
-            get_response=lambda: model.get_response(
+
+        async def request_response() -> ModelResponse:
+            if control is not None:
+                control._dispatch(filtered.input)
+            return await model.get_response(
                 system_instructions=filtered.instructions,
                 input=filtered.input,
                 model_settings=model_settings,
@@ -3201,7 +3235,12 @@ async def get_new_response(
                 previous_response_id=previous_response_id,
                 conversation_id=conversation_id,
                 prompt=prompt_config,
-            ),
+            )
+
+        await _admit(context_wrapper._budget, model, session)
+        new_response = await get_response_with_retry(
+            budget=context_wrapper._budget,
+            get_response=request_response,
             rewind=rewind_model_request,
             retry_settings=model_settings.retry,
             reported_usage=reported_usage,

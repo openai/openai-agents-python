@@ -31,6 +31,7 @@ from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
 from .run_budget import RunBudget
 from .run_context import TContext
+from .run_control import RunControl
 from .run_error_handlers import RunErrorHandlers
 from .tracing import TracingConfig
 from .util._types import MaybeAwaitable
@@ -743,16 +744,16 @@ class RunConfig:
         ) -> None: ...
 
     def __post_init__(self) -> None:
-        if self.budget is not None:
-            self.budget = coerce_dataclass_config(
-                self.budget, RunBudget, parameter_name="run_config.budget"
-            )
         if self.model_selector is not None and not callable(self.model_selector):
             raise TypeError("model_selector must be callable or None")
         if self.redact_text is not None and (
             not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
         ):
             raise TypeError("redact_text must be a synchronous callable or None")
+        if self.budget is not None:
+            self.budget = coerce_dataclass_config(
+                self.budget, RunBudget, parameter_name="run_config.budget"
+            )
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message
@@ -798,6 +799,9 @@ class RunConfig:
 
 class RunOptions(TypedDict, Generic[TContext]):
     """Arguments for ``AgentRunner`` methods."""
+
+    control: NotRequired[RunControl | None]
+    """Optional input handle for one asynchronous run."""
 
     context: NotRequired[TContext | None]
     """The context for the run."""
