@@ -397,7 +397,10 @@ class OpenAIServerConversationTracker:
             return
 
         delivered_source_ids: set[int] = set()
-        initial_batch = not self.sent_items
+        # Index prior deliveries only when the batch is at least as large as the history.
+        sent_ids = (
+            {id(item) for item in self.sent_items} if len(items) >= len(self.sent_items) else None
+        )
         delivered_by_content: set[str] = set()
         for item in items:
             if item is None:
@@ -407,10 +410,10 @@ class OpenAIServerConversationTracker:
             if source_id in delivered_source_ids:
                 continue
             delivered_source_ids.add(source_id)
-            if initial_batch:
-                self.sent_items.append(source_item)
-            else:
+            if sent_ids is None:
                 _track_object_once(self.sent_items, source_item)
+            elif source_id not in sent_ids:
+                self.sent_items.append(source_item)
             fp = _fingerprint_for_tracker(source_item)
             if fp:
                 delivered_by_content.add(fp)
