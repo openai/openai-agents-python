@@ -15,6 +15,7 @@ from agents import (
     Runner,
     RunState,
     UserError,
+    tool_namespace,
 )
 from agents.decorators import tool
 from agents.models.codex import CodexProvider
@@ -122,6 +123,130 @@ async def test_parent_tool_policy_reaches_child():
         await execute(parent, RunBudget(allowed_tools=("ask",)))
     assert caught.value.limit == "tools"
     assert not started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("dotted_parent", [False, True])
+async def test_allowlist_cannot_confuse_bare_and_namespaced_tools(streamed, dotted_parent):
+    started = []
+
+    @tool(name_override="crm.lookup")
+    def bare() -> str:
+        started.append("bare")
+        return "bare"
+
+    @tool
+    def lookup() -> str:
+        started.append("namespaced")
+        return "namespaced"
+
+    namespaced = tool_namespace(name="crm", description="CRM", tools=[lookup])[0]
+    parent_tool, child_tool = (bare, namespaced) if dotted_parent else (namespaced, bare)
+    child_call = (
+        get_function_tool_call("lookup", namespace="crm")
+        if dotted_parent
+        else get_function_tool_call("crm.lookup")
+    )
+    child_model = ScriptedModel([[child_call], [get_text_message("child done")]])
+    child = Agent(name="child", model=child_model, tools=[child_tool])
+    parent_model = ScriptedModel(
+        [[get_function_tool_call("ask", '{"input":"go"}')], [get_text_message("done")]]
+    )
+    parent = Agent(
+        name="parent",
+        model=parent_model,
+        tools=[
+            parent_tool,
+            child.as_tool(
+                "ask",
+                "Ask child",
+                run_config=RunConfig(budget=RunBudget(max_tool_starts=1)),
+                failure_error_function=None,
+            ),
+        ],
+    )
+    with pytest.raises(UserError, match="RunBudget.allowed_tools"):
+        await execute(parent, RunBudget(allowed_tools=("ask", "crm.lookup")), streamed=streamed)
+    assert not started and not child_model.calls
+    assert len(parent_model.calls) == (0 if dotted_parent else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "namespace, name", [(None, "crm.lookup"), ("sales.crm", "lookup"), ("sales", "crm.lookup")]
+)
+async def test_allowlist_rejects_dots_in_namespace_components_only_when_restricted(namespace, name):
+    started = []
+
+    @tool(name_override=name)
+    def lookup() -> str:
+        started.append("lookup")
+        return "ok"
+
+    model = ScriptedModel(
+        [[get_function_tool_call(name, namespace=namespace)], [get_text_message("done")]]
+    )
+    agent = Agent(
+        name="worker",
+        model=model,
+        tools=tool_namespace(name=namespace, description="CRM", tools=[lookup])
+        if namespace
+        else [lookup],
+    )
+    with pytest.raises(UserError, match="RunBudget.allowed_tools"):
+        await execute(agent, RunBudget(allowed_tools=("other",)))
+    assert not model.calls and not started
+    assert (await execute(agent, RunBudget(max_tool_starts=1))).final_output == "done"
+    assert started == ["lookup"]
+
+
+@pytest.mark.asyncio
+async def test_namespaced_allowlist_survives_nested_approval_and_policy_check():
+    started = []
+
+    @tool(needs_approval=True)
+    def lookup() -> str:
+        started.append("child")
+        return "ok"
+
+    child_model = ScriptedModel(
+        [[get_function_tool_call("lookup", namespace="crm")], [get_text_message("child done")]]
+    )
+    child = Agent(
+        name="child",
+        model=child_model,
+        tools=tool_namespace(name="crm", description="Child CRM", tools=[lookup]),
+    )
+    parent = Agent(
+        name="parent",
+        model=ScriptedModel(
+            [[get_function_tool_call("ask", '{"input":"go"}')], [get_text_message("done")]]
+        ),
+        tools=[
+            *tool_namespace(name="crm", description="Parent CRM", tools=[lookup]),
+            child.as_tool("ask", "Ask child", failure_error_function=None),
+        ],
+    )
+    budget = RunBudget(allowed_tools=("ask", "crm.lookup"))
+    paused = (await execute(parent, budget)).to_state()
+    state = await RunState.from_json(parent, paused.to_json())
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(UserError, match="same RunBudget"):
+        await execute(parent, RunBudget(allowed_tools=("ask", "lookup")), input=state)
+
+    @tool(name_override="crm.lookup")
+    def ambiguous() -> str:
+        return "unreachable"
+
+    original = parent.tools[0]
+    parent.tools[0] = ambiguous
+    with pytest.raises(UserError, match="RunBudget.allowed_tools"):
+        await execute(parent, budget, input=state)
+    parent.tools[0] = original
+    assert not started and len(child_model.calls) == 1
+    assert (await execute(parent, budget, input=state)).final_output == "done"
+    assert started == ["child"]
 
 
 @pytest.mark.asyncio

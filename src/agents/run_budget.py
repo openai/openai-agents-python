@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .run_config import RunConfig
     from .run_context import RunContextWrapper
     from .run_state import RunState
-    from .tool import Tool
+    from .tool import FunctionTool, Tool
 
 
 def _valid_limit(value: object) -> bool:
@@ -66,9 +66,11 @@ class RunBudget:
     local flag is False. Children without an explicit budget inherit the parent policy.
     max_child_runs, max_delegation_depth and allowed_tools also enable shared children.
 
-    allowed_tools uses qualified SDK function names, including agent-tool wrapper
-    names. Every ancestor must allow a tool. Restricted runs reject opaque prompt IDs,
-    raw tool or prompt overrides, non-function and deferred/tool-search routes.
+    allowed_tools uses bare SDK function names or namespace.name for namespaced
+    functions, including agent-tool wrappers. Rename tools or namespaces containing
+    literal dots before using an allowlist. Every ancestor must allow a tool.
+    Restricted runs reject opaque prompt IDs, raw tool or prompt overrides,
+    non-function tools and deferred/tool-search routes.
     max_tool_starts counts SDK FunctionTool starts, including Agent.as_tool wrappers.
     It rejects uncounted SDK custom, local shell, computer and apply-patch handlers.
     Provider-owned tools remain outside this counter. Local MCP tools adapted to
@@ -218,11 +220,15 @@ class _BudgetState:
         for budget in self.lineage():
             budget.requests += 1
 
-    def reserve_tool(self, name: str, *, child: bool = False) -> None:
+    def reserve_tool(self, tool: FunctionTool) -> None:
         # Check and reserve without awaiting so sibling tasks cannot oversubscribe.
+        child = tool._is_agent_tool
         for budget in self.lineage():
             limits = budget.limits
-            if limits.allowed_tools is not None and name not in limits.allowed_tools:
+            if (
+                limits.allowed_tools is not None
+                and _allowlist_tool_name(tool) not in limits.allowed_tools
+            ):
                 raise RunBudgetError("run_budget_exceeded", limit="tools")
             if limits.max_tool_starts is not None and budget.tool_starts >= limits.max_tool_starts:
                 raise RunBudgetError("run_budget_exceeded", limit="tool_starts")
@@ -422,6 +428,26 @@ def _validate_explicit_tool_authority(
             raise UserError(f"{policy_name} cannot use raw tool or prompt overrides.")
 
 
+def _allowlist_tool_name(tool: Tool) -> str:
+    """Encode only identities that have a unique spelling in a string allowlist."""
+    from ._tool_identity import get_function_tool_lookup_key_for_tool
+    from .tool import FunctionTool
+
+    if not isinstance(tool, FunctionTool) or tool.defer_loading:
+        raise UserError(
+            "RunBudget.allowed_tools supports only SDK FunctionTool handlers without "
+            "deferred loading. Custom, shell, computer, apply-patch, hosted and tool-search "
+            "routes cannot enforce this policy."
+        )
+    key = get_function_tool_lookup_key_for_tool(tool)
+    if key is None or key[0] == "deferred_top_level" or any("." in part for part in key[1:]):
+        raise UserError(
+            "RunBudget.allowed_tools requires non-empty tool names and namespaces without "
+            "literal dots. Use name or namespace.name for each grant."
+        )
+    return ".".join(key[1:])
+
+
 def _check_restricted_tools(
     budget: _BudgetState | None,
     tools: Iterable[Tool],
@@ -432,7 +458,6 @@ def _check_restricted_tools(
         ApplyPatchTool,
         ComputerTool,
         CustomTool,
-        FunctionTool,
         LocalShellTool,
         ShellTool,
     )
@@ -443,12 +468,8 @@ def _check_restricted_tools(
     restricted = any(owner.limits.allowed_tools is not None for owner in budget.lineage())
     counted = any(owner.limits.max_tool_starts is not None for owner in budget.lineage())
     if restricted:
-        if any(not isinstance(tool, FunctionTool) or tool.defer_loading for tool in tools):
-            raise UserError(
-                "RunBudget.allowed_tools supports only SDK FunctionTool handlers without "
-                "deferred loading. Custom, shell, computer, apply-patch, hosted and tool-search "
-                "routes cannot enforce this policy."
-            )
+        for tool in tools:
+            _allowlist_tool_name(tool)
         from .model_settings import ModelSettings
 
         _validate_explicit_tool_authority(
@@ -618,6 +639,13 @@ def _prepare_budget(
             _check_model(model if isinstance(model, Model) else config.model_provider, owner.limits)
     if state is not None:
         assert state._context is not None
+        # A resumed approval can execute before the next model admission checks the tools.
+        if limits.allowed_tools is not None or (
+            inherited is not None
+            and any(owner.limits.allowed_tools is not None for owner in inherited.lineage())
+        ):
+            for tool in current.tools:
+                _allowlist_tool_name(tool)
         return state._context._budget
     budget = _BudgetState(limits)
     if inherited is not None:
