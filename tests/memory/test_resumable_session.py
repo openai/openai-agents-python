@@ -12,13 +12,16 @@ import pytest
 
 from agents import Agent, RunConfig, Runner, RunState, Session, SQLiteSession, ToolExecutionConfig
 from agents.decorators import tool
-from agents.exceptions import AgentsException, UserError
+from agents.exceptions import AgentsException, ModelBehaviorError, UserError
 from agents.memory.resumable_session import ResumableSession, ResumableSessionError
 from agents.result import RunResult, RunResultStreaming
 from agents.run import AgentRunner
+from agents.run_state import CURRENT_SCHEMA_VERSION
 from agents.testing import ScriptedModel, UnexpectedModelCall
+from agents.tool import ApplyPatchTool, ShellTool
 from tests.test_error_logging_redaction import _assert_secret_absent_from_agents_traceback
 from tests.test_responses import get_function_tool_call, get_text_message
+from tests.utils.hitl import RecordingEditor, make_apply_patch_dict, make_shell_call
 
 
 class MemoryStore:
@@ -133,9 +136,14 @@ async def test_saved_native_approval_cannot_become_an_sdk_tool_approval(
 
 
 async def run_agent(
-    agent: Agent[Any], input: Any, session: Session | ResumableSession | None, streamed: bool
+    agent: Agent[Any],
+    input: Any,
+    session: Session | ResumableSession | None,
+    streamed: bool,
+    *,
+    run_config: RunConfig = CONFIG,
 ) -> RunResult | RunResultStreaming:
-    options: dict[str, Any] = {"run_config": CONFIG}
+    options: dict[str, Any] = {"run_config": run_config}
     if session is not None:
         options["session"] = session
     if not streamed:
@@ -144,6 +152,74 @@ async def run_agent(
     async for _ in result.stream_events():
         pass
     return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_rejected_session_input_can_be_retried_on_a_fresh_handle(streamed: bool) -> None:
+    writes: list[str] = []
+
+    class RecordingStore(MemoryStore):
+        async def save(self, session_id: str, value: str, *, expected: str | None) -> bool:
+            writes.append(value)
+            return await super().save(session_id, value, expected=expected)
+
+    store = RecordingStore()
+    session = await ResumableSession.create(store)
+    model = ScriptedModel([[get_text_message("first reply")], [get_text_message("retry reply")]])
+    agent = Agent(name="assistant", model=model)
+    await run_agent(agent, "first question", session, streamed)
+    history = store.checkpoint(session.session_id)["history"]
+    secret = "synthetic-private-input"
+
+    async def reject(prior: Any, new: Any) -> Any:
+        prior[0]["content"] = new[0]["content"]
+        raise ValueError("scrubber unavailable")
+
+    config = RunConfig(tracing_disabled=True, session_input_callback=reject)
+    with pytest.raises(ValueError, match="scrubber unavailable"):
+        await run_agent(agent, secret, session, streamed, run_config=config)
+    assert len(model.calls) == 1
+    assert store.checkpoint(session.session_id)["history"] == history
+
+    def scrub(prior: Any, new: Any) -> Any:
+        new[0]["content"] = "[redacted]"
+        return prior + new
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    config.session_input_callback = scrub
+    result = await run_agent(agent, secret, fresh, streamed, run_config=config)
+    assert result.final_output == "retry reply"
+    assert len(model.calls) == 2
+    sent = json.dumps(model.calls[1].input)
+    assert "first reply" in sent and sent.count("[redacted]") == 1
+    assert secret not in sent and all(secret not in value for value in writes)
+    saved = store.checkpoint(session.session_id)["history"]
+    assert saved[:2] == history and len(saved) == 4
+    assert saved[2]["content"] == "[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_release_after_input_failure_keeps_claim() -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.fail_checkpoint = True
+    model = ScriptedModel()
+    secret = "synthetic-private-input"
+
+    def reject(prior: Any, new: Any) -> Any:
+        raise ValueError(new[0]["content"])
+
+    config = RunConfig(tracing_disabled=True, session_input_callback=reject)
+    with pytest.raises(ResumableSessionError) as failure:
+        await Runner.run(
+            Agent(name="assistant", model=model), secret, session=session, run_config=config
+        )
+    assert failure.value.reason == "unavailable"
+    _assert_secret_absent_from_agents_traceback(failure.value, secret)
+    assert not model.calls
+    assert secret not in store.records[session.session_id]
+    assert store.checkpoint(session.session_id)["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -222,6 +298,135 @@ async def test_fresh_handle_resolves_original_call_once(
         await run_agent(rebuilt, state, restored, streamed)
     assert effects == (["original"] if approved else [])
     assert len(resumed_model.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_missing_approved_python_tool_preserves_checkpoint_for_compatible_worker(
+    streamed: bool,
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    async def change() -> str:
+        effects.append("changed")
+        return "original result"
+
+    original = Agent(
+        name="assistant",
+        tools=[change],
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="saved-call")]]),
+    )
+    await run_agent(original, "start", session, streamed)
+    saved = store.records[session.session_id]
+    missing_model = ScriptedModel([])
+    missing = Agent(name="assistant", model=missing_model)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(missing)
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(ModelBehaviorError, match="Tool change not found"):
+        await run_agent(missing, state, recovered, streamed)
+    assert effects == [] and not missing_model.calls
+    assert store.records[session.session_id] == saved
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    compatible_model = ScriptedModel([[get_text_message("resolved")]])
+    compatible = Agent(name="assistant", model=compatible_model, tools=[change])
+    state = await fresh.load_state(compatible)
+    (pending,) = state.get_interruptions()
+    assert pending.call_id == "saved-call"
+    state.approve(pending)
+    result = await run_agent(compatible, state, fresh, streamed)
+    assert result.final_output == "resolved"
+    assert effects == ["changed"] and len(compatible_model.calls) == 1
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("missing", ["shell", "apply_patch"])
+async def test_missing_workspace_tool_preserves_both_pending_calls(
+    streamed: bool, missing: str
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    editor = RecordingEditor()
+    commands: list[str] = []
+
+    def execute(request: Any) -> str:
+        commands.extend(request.data.action.commands)
+        return "done"
+
+    original = Agent(
+        name="assistant",
+        tools=[
+            ShellTool(executor=execute, needs_approval=True),
+            ApplyPatchTool(editor=editor, needs_approval=True),
+        ],
+        model=ScriptedModel([[make_shell_call("command"), make_apply_patch_dict("edit")]]),
+    )
+    await run_agent(original, "start", session, False)
+    saved = store.records[session.session_id]
+    model = ScriptedModel([[get_text_message("done")]])
+    worker = original.clone(model=model, tools=[t for t in original.tools if t.name != missing])
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(worker)
+    for item in state.get_interruptions():
+        state.approve(item)
+    with pytest.raises(ModelBehaviorError, match=f"Tool {missing} not found"):
+        await run_agent(worker, state, recovered, streamed)
+    assert not model.calls and not commands and not editor.operations
+    assert store.records[session.session_id] == saved
+
+    fresh = await ResumableSession.resume(store, session.session_id)
+    compatible = original.clone(model=model)
+    state = await fresh.load_state(compatible)
+    assert {item.call_id for item in state.get_interruptions()} == {"command", "edit"}
+    for item in state.get_interruptions():
+        state.approve(item)
+    await run_agent(compatible, state, fresh, streamed)
+    assert commands == ["echo test"] and len(editor.operations) == 1
+    assert store.checkpoint(session.session_id)["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_missing_tool_after_approved_effect_keeps_active_without_replay(
+    streamed: bool,
+) -> None:
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    effects: list[str] = []
+
+    @tool(needs_approval=True)
+    async def change() -> str:
+        effects.append("changed")
+        return "effect completed"
+
+    original = Agent(
+        name="assistant",
+        tools=[change],
+        model=ScriptedModel([[get_function_tool_call("change", "{}", call_id="effect-call")]]),
+    )
+    await run_agent(original, "start", session, streamed)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    later_model = ScriptedModel(
+        [[get_function_tool_call("missing_later", "{}", call_id="later-call")]]
+    )
+    worker = Agent(name="assistant", tools=[change], model=later_model)
+    state = await recovered.load_state(worker)
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(ModelBehaviorError, match="Tool missing_later not found"):
+        await run_agent(worker, state, recovered, streamed)
+    assert effects == ["changed"] and len(later_model.calls) == 1
+    assert store.checkpoint(session.session_id)["status"] == "active"
+    with pytest.raises(ResumableSessionError, match="unknown outcome"):
+        await ResumableSession.resume(store, session.session_id)
+    with pytest.raises(ResumableSessionError):
+        await run_agent(worker, state, recovered, streamed)
+    assert effects == ["changed"] and len(later_model.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -451,11 +656,11 @@ async def test_delayed_stream_claim_uses_history_after_shared_handle_advances(mo
     release = asyncio.Event()
     original_begin = session._begin_run
 
-    async def gated_begin(input: Any, tool_hooks: Any) -> None:
+    async def gated_begin(input: Any, *args: Any) -> None:
         if input == "later":
             entered.set()
             await release.wait()
-        await original_begin(input, tool_hooks)
+        await original_begin(input, *args)
 
     # Suspend only the claim boundary so another public run can advance the same handle.
     monkeypatch.setattr(session, "_begin_run", gated_begin)
@@ -756,7 +961,7 @@ async def test_prepared_approval_survives_durable_restore(streamed: bool, approv
     assert json.loads(paused.interruptions[0].arguments) == {"text": "reviewed text"}
     checkpoint = store.checkpoint(session.session_id)
     snapshot = json.loads(checkpoint["run_state"])
-    assert snapshot["$schemaVersion"] == "1.23"
+    assert snapshot["$schemaVersion"] == CURRENT_SCHEMA_VERSION
     assert snapshot["requires_resumable_session"] is True
 
     restored = await ResumableSession.resume(store, session.session_id)

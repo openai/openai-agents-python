@@ -64,6 +64,7 @@ from ._function_tool_arguments import (
     arguments_unchanged,
     can_prepare_without_user_code,
 )
+from ._redaction import current_redactor
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
     tool_qualified_name,
@@ -798,6 +799,27 @@ def _build_wrapped_function_tool(
         ),
         failure_error_function,
     )
+
+
+def _builtin_tool_choice_name(choice: str) -> str:
+    """Resolve built-in selector aliases to their advertised SDK names."""
+    if choice == "web_search_preview":
+        return "web_search"
+    if choice in ("computer", "computer_use"):
+        return "computer_use_preview"
+    return choice
+
+
+async def _function_tool_enabled(
+    tool: FunctionTool, context: RunContextWrapper[Any], agent: AgentBase[Any]
+) -> bool:
+    from ._public_agent import get_public_agent
+
+    enabled = tool.is_enabled
+    if isinstance(enabled, bool):
+        return enabled
+    result = enabled(context, get_public_agent(agent))
+    return bool(await result if inspect.isawaitable(result) else result)
 
 
 def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:
@@ -2098,6 +2120,10 @@ def _coerce_tool_error_for_failure_error_function(error: BaseException) -> Excep
     return Exception(str(error) or error.__class__.__name__)
 
 
+class _ToolEligibilityError(UserError):
+    """Policy refusals must bypass tool failure formatters."""
+
+
 async def maybe_invoke_function_tool_failure_error_function(
     *,
     function_tool: FunctionTool,
@@ -2105,6 +2131,8 @@ async def maybe_invoke_function_tool_failure_error_function(
     error: BaseException,
 ) -> str | None:
     """Invoke the configured failure formatter, if one exists."""
+    if isinstance(error, _ToolEligibilityError):
+        return None
     failure_error_function = resolve_function_tool_failure_error_function(function_tool, context)
     if failure_error_function is None:
         return None
@@ -2850,7 +2878,7 @@ def function_tool(
                 result = None
                 raise
 
-            if _debug.DONT_LOG_TOOL_DATA:
+            if _debug.DONT_LOG_TOOL_DATA or current_redactor() is not None:
                 logger.debug("Tool %s completed.", tool_name)
             else:
                 logger.debug("Tool %s returned %s", tool_name, result)

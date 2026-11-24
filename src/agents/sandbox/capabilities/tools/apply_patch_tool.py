@@ -215,14 +215,6 @@ class SandboxApplyPatchTool(CustomTool):
                 "use needs_approval and RunState approval decisions."
             )
 
-        async def invoke(ctx: ToolContext[Any], arguments: str) -> str:
-            return await self._on_invoke_tool(ctx, json.loads(arguments)["patch"])
-
-        async def needs_approval(
-            ctx: RunContextWrapper[Any], arguments: dict[str, Any], call_id: str
-        ) -> bool:
-            return await self._needs_custom_approval(ctx, arguments["patch"], call_id)
-
         return FunctionTool(
             name=self.name,
             description=self.description.replace(
@@ -235,9 +227,17 @@ class SandboxApplyPatchTool(CustomTool):
                 "required": ["patch"],
                 "additionalProperties": False,
             },
-            on_invoke_tool=invoke,
-            needs_approval=needs_approval,
+            on_invoke_tool=self._invoke_function,
+            needs_approval=self._function_needs_approval,
         )
+
+    async def _invoke_function(self, ctx: ToolContext[Any], arguments: str) -> str:
+        return await self._on_invoke_tool(ctx, json.loads(arguments)["patch"])
+
+    async def _function_needs_approval(
+        self, ctx: RunContextWrapper[Any], arguments: dict[str, Any], call_id: str
+    ) -> bool:
+        return await self._needs_custom_approval(ctx, arguments["patch"], call_id)
 
     @property
     def operation_needs_approval(self) -> bool | ApplyPatchApprovalFunction:

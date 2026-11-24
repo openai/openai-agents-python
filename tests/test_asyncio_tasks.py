@@ -132,6 +132,55 @@ async def test_run_producer_consumer_cancels_producer_after_consumer_failure() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("producer_fails", [False, True])
+async def test_parent_cancellation_during_stream_teardown_joins_cleanup(
+    producer_fails: bool,
+) -> None:
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def fail() -> None:
+        await started.wait()
+        raise asyncio.QueueFull
+
+    async def run() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            cleaned.set()
+
+    closed = asyncio.Event()
+
+    async def close() -> None:
+        if producer_fails or cleaned.is_set():
+            closed.set()
+
+    producer, consumer = (fail, run) if producer_fails else (run, fail)
+    task = asyncio.create_task(
+        run_producer_consumer(
+            producer(), consumer(), fail_fast_exceptions=(asyncio.QueueFull,), close_producer=close
+        )
+    )
+    try:
+        await asyncio.wait_for(cleaning.wait(), timeout=2)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert cleaned.is_set()
+        assert closed.is_set()
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_run_producer_consumer_fail_fast_cancels_blocked_consumer() -> None:
     consumer_started = asyncio.Event()
     consumer_cancelled = asyncio.Event()

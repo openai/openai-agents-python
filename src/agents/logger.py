@@ -3,8 +3,10 @@ from collections.abc import Callable, Mapping
 from types import TracebackType
 
 from . import _debug
+from ._redaction import current_redactor
 
 logger = logging.getLogger("openai.agents")
+logger.addFilter(lambda record: current_redactor() is None)
 
 _DiagnosticExtra = Callable[[], Mapping[str, object]]
 _DiagnosticArgs = Callable[[], tuple[object, ...]]
@@ -38,7 +40,7 @@ def _log_action_error(
     diagnostic_extra: _DiagnosticExtra | None,
 ) -> None:
     """Log an action failure without inspecting a redacted exception."""
-    if redact:
+    if redact or current_redactor() is not None:
         target_logger.error("%s", message, stacklevel=stacklevel)
     else:
         target_logger.error(
@@ -61,7 +63,7 @@ def _log_action_at_level(
     diagnostic_extra: _DiagnosticExtra | None,
 ) -> None:
     """Log an action failure at a caller-selected level."""
-    if redact:
+    if redact or current_redactor() is not None:
         log_method("%s", message, stacklevel=stacklevel)
     else:
         log_method(

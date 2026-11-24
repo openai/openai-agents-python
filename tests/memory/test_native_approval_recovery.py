@@ -194,33 +194,40 @@ async def test_native_approval_round_trip_uses_original_runtime_only(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("kind", "streamed"), [("exec_command", False), ("apply_patch", True)])
+@pytest.mark.parametrize("saved_with_scrubber", [False, True])
 async def test_incompatible_hooks_leave_native_approval_pending(
-    tmp_path, monkeypatch, kind, streamed
+    tmp_path, monkeypatch, kind, streamed, saved_with_scrubber
 ):
     agent, store, session, config, pending, calls, requests = await setup_native(
         tmp_path, monkeypatch, kind
     )
+
+    def unexpected_hook(*args):
+        pytest.fail("Restoring the approval must not run a tool hook.")
+
+    mismatch = RunConfig(
+        tracing_disabled=True,
+        tool_execution=ToolExecutionConfig(prepare_tool_input=unexpected_hook),
+    )
+    # Input preparation alone also registers PostToolUse. It cannot replace an output scrubber.
+    if saved_with_scrubber:
+        config.tool_execution = ToolExecutionConfig(
+            prepare_tool_input=unexpected_hook, prepare_tool_output=unexpected_hook
+        )
+        pending.checkpoint.update(version=2, hooks=["prepare_tool_input", "prepare_tool_output"])
     await Runner.run(agent, "start", session=session, run_config=config)
     saved = store.records[session.session_id]
     recovered = await ResumableSession.resume(store, session.session_id)
     state = await recovered.load_state(agent)
     state.approve(state.get_interruptions()[0])
-
-    def unexpected_hook(*args):
-        pytest.fail("Restoring the approval must not run a tool hook.")
-
-    hooked = RunConfig(
-        tracing_disabled=True,
-        tool_execution=ToolExecutionConfig(prepare_tool_input=unexpected_hook),
-    )
     with monkeypatch.context() as patch, pytest.raises(UserError, match="native tool hooks"):
         patch.delattr(agent.model, "_run_approved_native_call")
         if streamed:
-            result = Runner.run_streamed(agent, state, run_config=hooked)
+            result = Runner.run_streamed(agent, state, run_config=mismatch)
             async for _ in result.stream_events():
                 pass
         else:
-            await Runner.run(agent, state, session=recovered, run_config=hooked)
+            await Runner.run(agent, state, session=recovered, run_config=mismatch)
 
     assert store.records[session.session_id] == saved
     assert not calls
@@ -230,13 +237,48 @@ async def test_incompatible_hooks_leave_native_approval_pending(
     (original,) = state.get_interruptions()
     if streamed:
         state.reject(original)
-        result = await Runner.run(agent, state, run_config=hooked)
+        result = await Runner.run(agent, state, run_config=mismatch)
         assert not calls
     else:
         state.approve(original)
         result = await Runner.run(agent, state, run_config=config)
         assert calls == [pending.checkpoint]
     assert result.final_output == "finished"
+
+
+@pytest.mark.asyncio
+async def test_missing_native_output_hook_result_stops_publication_and_replay(
+    tmp_path, monkeypatch, threads
+):
+    agent, store, session, config, pending, _, requests = await setup_native(tmp_path, monkeypatch)
+
+    async def scrub(call, output):
+        return "safe"
+
+    config.tool_execution = ToolExecutionConfig(prepare_tool_output=scrub)
+    pending.checkpoint.update(version=2, hooks=["prepare_tool_output"])
+    await Runner.run(agent, "start", session=session, run_config=config)
+    recovered = await ResumableSession.resume(store, session.session_id)
+    state = await recovered.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+
+    class LostHookThread(FakeThread):
+        def tool_hook_orders(self, server):
+            return [("post_tool_use", 0)]
+
+        async def resolve_approval(self, *args):
+            return "unscrubbed-result"
+
+    thread = LostHookThread()
+    threads[0].append(thread)
+    monkeypatch.delattr(agent.model, "_run_approved_native_call")
+    with pytest.raises(UserError, match="Check the effect"):
+        await Runner.run(agent, state, run_config=config)
+    assert thread.closed and len(requests) == 1
+    assert "unscrubbed-result" not in store.records[session.session_id]
+    assert store.checkpoint(session.session_id)["status"] == "active"
+    with pytest.raises(ResumableSessionError):
+        await ResumableSession.resume(store, session.session_id)
 
 
 @pytest.mark.asyncio

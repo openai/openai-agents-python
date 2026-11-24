@@ -726,6 +726,43 @@ Authorize access to the session and select a store scoped to the authenticated t
 
 Allow one writer per session. If `ResumableSessionError.reason` is `"conflict"`, reload the session and review the current request. If the reason is `"active"`, check whether the previous worker is still running. If it stopped, verify any external effects before starting a new session.
 
+### Track a job across pod restarts
+
+Run a long job in a service that outlives the SDK worker pod. `ResumableSession` saves the conversation and the receipt from the submission tool. The job service owns execution, progress and the result. Resuming a session cannot restart a command that died with the pod.
+
+Try the [sales report example](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/examples/memory/resumable_jobs.py) from the root of a `feat/simple-codex` checkout. The default run uses a scripted model and needs no credentials.
+
+```bash
+uv run python -m examples.memory.resumable_jobs
+```
+
+Expect the following output with a different job ID on each run.
+
+```text
+Accepted report <job_id>
+Running: 1 of 2 batches
+Completed: 75 units sold
+```
+
+The example simulates pod replacement with separate Python processes on one host. The first worker simulates approval for one fixed report. The parent process keeps both IDs, processes the two batches and removes the temporary SQLite files when the demo ends. The replacement worker retrieves the result.
+
+To make live model calls, choose one command. Model usage may incur charges.
+
+| Mode | Setup | Command |
+| --- | --- | --- |
+| Python | Set `OPENAI_API_KEY`. | `uv run python -m examples.memory.resumable_jobs --openai` |
+| Codex | [Build and install the native wheel](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/native/codex/patches/README.md#test-a-change) in `.venv-wheel` from the same checkout. Use a [saved Codex login](../models/codex.md#authenticate). | `.venv-wheel/bin/python -m examples.memory.resumable_jobs --codex` |
+
+On Windows, use `.venv-wheel\Scripts\python.exe` for the Codex command. The example requests a read-only sandbox in a temporary workspace. Review the hooks and MCP servers in your Codex configuration before running it. SDK function tools run outside the Codex sandbox.
+
+Use the same pattern in either mode.
+
+1. Before submission, save an application-generated job ID with the tenant, session ID and requested action in shared storage. Obtain approval for that action. The job service must accept repeated submissions with the same ID and action only once and reject reuse for a different action.
+2. Have `submit_job` return the receipt as soon as the service accepts the job. Set `tool_use_behavior={"stop_at_tool_names": ["submit_job"]}` to finish the turn. Wait for the run to finish so the SDK can confirm the session save.
+3. Check progress directly with the service, without calling the model. When the job finishes, resume the session on any compatible worker and use a read-only `job_status` tool in a new turn. Verify access to the job and remove secrets before returning its result.
+
+If the worker dies after submission but before the session save, resume can fail with `ResumableSessionError.reason == "active"`. Check whether the worker is still running and look up the job by its saved ID. Do not submit the work again. If the worker stopped, verify the outcome before starting a new session.
+
 ## Community session implementations
 
 The community has developed additional session implementations:
