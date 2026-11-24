@@ -205,7 +205,7 @@ def _normalize_output_tokens_details(
 @dataclass
 class Usage:
     requests: int = 0
-    """Total requests made to the LLM API."""
+    """Request count reported by models and the Runner, including counted retry attempts."""
 
     input_tokens: int = 0
     """Total input tokens sent, across all requests."""
