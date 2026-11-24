@@ -705,6 +705,10 @@
     {
       "module": "agents",
       "name": "OutputGuardrailBlockedMessageFormatter"
+    },
+    {
+      "module": "agents",
+      "name": "ModelSelector"
     }
   ],
   "public_typed_dicts": [

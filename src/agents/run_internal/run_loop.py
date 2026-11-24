@@ -115,6 +115,7 @@ from .agent_runner_helpers import (
     reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_for_server_model,
     validate_output_guardrails_with_server_managed_conversation,
 )
 from .agent_tool_configuration import guard_agent_tool_configuration
@@ -2543,6 +2544,7 @@ async def run_single_turn_streamed(
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
@@ -3098,6 +3100,7 @@ async def get_new_response(
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
