@@ -26,20 +26,26 @@ Only use application-approved destinations. Both URLs require HTTPS and the same
 
 ## Call the task client directly
 
-Configure the client as in steps 1 and 2 above. Choose a unique message ID for each new message. This example sends one question and reads the task once.
+Configure the client as in steps 1 and 2 above. Choose a unique message ID for each new message. This example checks progress once if the peer returns a pending task.
 
 ```python
+from a2a.types import a2a_pb2 as a2a
+
 from agents.extensions.a2a import A2ATaskClient
 
 
 async def send_and_read(client: A2ATaskClient, message_id: str):
     task = await client.send_message("Ready?", message_id=message_id)
-    return await client.get_task(task_id=task.id, context_id=task.context_id)
+    if task.status.state in (a2a.TASK_STATE_SUBMITTED, a2a.TASK_STATE_WORKING):
+        return await client.refresh_task(task)
+    return task
 ```
 
-The [A2A Python client](https://a2a-protocol.org/latest/sdk/python/api/a2a.client.base_client.html) uses the same operation names. Its `send_message` returns an async iterator. Here, each method returns one `a2a.types.Task`. `send_message` makes one non-streaming `SendMessage` request with one user text part. `get_task` makes one `GetTask` request and requires the task and context IDs to match. Both methods check the JSON-RPC response ID. Direct message responses are unsupported.
+The [A2A Python client](https://a2a-protocol.org/latest/sdk/python/api/a2a.client.base_client.html) also exposes `send_message` and `get_task`. Its `send_message` returns an async iterator. Here, each method returns one `a2a.types.Task`. `send_message` makes one non-streaming `SendMessage` request with one user text part. `get_task` makes one `GetTask` request and requires the task and context IDs to match. Both operations check the JSON-RPC response ID. Direct message responses are unsupported.
 
-Inspect the task state before using an artifact. Treat all peer fields as private and untrusted, including text that might repeat credentials. Avoid logging raw tasks, HTTP traffic or exception locals.
+`refresh_task(task)` calls `get_task(task_id=task.id, context_id=task.context_id)` once. Use the same client and owner. A task grants no access. The reply can still be pending. If a send fails without a task, delivery may be uncertain. Do not resend. Receipt recovery below requires a reservation made before sending.
+
+Use artifacts only after checking for `a2a.TASK_STATE_COMPLETED`. Treat all peer fields as private and untrusted, including text that might repeat credentials. Avoid logging raw tasks, HTTP traffic or exception locals.
 
 The maximum encoded request is 64 KiB. Each card and RPC response has a 1 MiB limit. Compressed responses are unsupported. The default `timeout` is ten seconds across discovery and RPC. `A2AError.kind` distinguishes request, authorization, timeout, transport, protocol and remote errors. Local cancellation propagates as `asyncio.CancelledError`. A timeout, disconnect or cancellation may leave remote work running. The adapter never retries, polls or sends `CancelTask`. Remote cancellation requires separate authorization and cannot guarantee rollback.
 

@@ -19,6 +19,8 @@ from tests.test_responses import get_function_tool_call, get_text_message
 
 pytest.importorskip("a2a")
 
+from a2a.types import a2a_pb2 as a2a
+
 from agents.extensions.a2a import A2AError, A2ATaskClient
 from examples.a2a.manager import Receipt, Registry, UnresolvedCall, ask_specialist, find_specialists
 
@@ -127,6 +129,41 @@ def stored(url: str) -> A2ATaskClient:
     return A2ATaskClient(
         rpc_url=url, card=json.dumps(card(url)).encode(), rpc_token=lambda: "synthetic-rpc"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", [None, "id", "contextId"])
+async def test_refresh_task_reads_once_and_checks_both_ids(mismatch):
+    methods = []
+
+    async def handle(request):
+        body = await request.json()
+        methods.append(body["method"])
+        task = {"id": "one", "contextId": "group", "status": {"state": "TASK_STATE_WORKING"}}
+        if body["method"] == "SendMessage":
+            result = {"task": task}
+        else:
+            assert body["params"] == {"id": "one", "historyLength": 0}
+            if mismatch:
+                task[mismatch] = "private"
+            result = task
+        return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    app = web.Application()
+    app.router.add_post("/rpc", handle)
+    async with TestServer(app) as server:
+        client = stored(str(server.make_url("/rpc")))
+        pending = await client.send_message("Ready?", message_id=uuid4().hex)
+        assert methods == ["SendMessage"]
+        if mismatch:
+            with pytest.raises(A2AError, match="^A2A protocol error$"):
+                await client.refresh_task(pending)
+        else:
+            update = await client.refresh_task(pending)
+            assert update is not pending
+            assert update.status.state == a2a.TASK_STATE_WORKING
+        assert (pending.id, pending.context_id) == ("one", "group")
+        assert methods == ["SendMessage", "GetTask"]
 
 
 def ask(name: str, call_id: str, question: str = "Ready?"):

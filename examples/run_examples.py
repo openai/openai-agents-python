@@ -57,6 +57,9 @@ DISCOVERY_EXCLUDE = {
 # Examples that are noisy, require extra credentials, or hang in auto runs.
 DEFAULT_AUTO_SKIP = {
     "examples/agent_patterns/llm_as_a_judge.py",
+    # Embedded Codex examples require a matching native wheel and Codex authentication.
+    "examples/codex/native_approval.py",
+    "examples/codex/native_workspace.py",
     "examples/hosted_mcp/connectors.py",
     "examples/mcp/git_example/main.py",
     # Dapr setup requires separate PostgreSQL credentials.
@@ -90,6 +93,7 @@ DEFAULT_AUTO_SKIP = {
     # Cloud backends require provider credentials in addition to OPENAI_API_KEY.
     "examples/sandbox/extensions/daytona/daytona_runner.py",
     "examples/sandbox/extensions/daytona/usaspending_text2sql/agent.py",
+    "examples/sandbox/extensions/daytona/usaspending_text2sql/local_agent.py",
     "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
     "examples/sandbox/extensions/e2b_runner.py",
     "examples/sandbox/extensions/modal_runner.py",
@@ -109,6 +113,7 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/tutorials/vision_website_clone/main.py",
     "examples/tools/codex_same_thread.py",
     # Host shell execution requires a person to review every command batch.
+    "examples/tools/local_code_execution.py",
     "examples/tools/local_shell_skill.py",
     "examples/tools/shell.py",
     "examples/tools/shell_human_in_the_loop.py",

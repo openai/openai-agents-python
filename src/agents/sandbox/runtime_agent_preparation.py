@@ -113,7 +113,10 @@ def prepare_sandbox_agent(
     for capability in capabilities:
         if isinstance(capability, Memory) and isinstance(model, Model):
             capability._model_instance = model
-    capability_tools = [tool for capability in capabilities for tool in capability.tools()]
+    indexed_tools = [
+        (index, tool) for index, cap in enumerate(capabilities) for tool in cap.tools()
+    ]
+    capability_tools = [tool for _, tool in indexed_tools]
     namespace = model_capabilities.get("tool_namespace")
     if namespace:
         capability_tools = [
@@ -172,7 +175,9 @@ def prepare_sandbox_agent(
         tools=[*agent.tools, *capability_tools],
         capabilities=capabilities,
     )
-    cast(SandboxAgent[TContext], prepared_agent)._sandbox_capability_tools = capability_tools
+    cast(SandboxAgent[TContext], prepared_agent)._sandbox_capability_tools = [
+        (index, tool) for (index, _), tool in zip(indexed_tools, capability_tools, strict=True)
+    ]
     set_public_agent(prepared_agent, agent)
     return prepared_agent
 

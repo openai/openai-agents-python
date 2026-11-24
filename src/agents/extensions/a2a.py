@@ -120,6 +120,12 @@ class A2ATaskClient:
         )
         return await self._call(request)
 
+    async def refresh_task(self, task: a2a.Task) -> a2a.Task:
+        """Read a task once using the same client and owner that received it."""
+        task_id, context_id = task.id, task.context_id
+        del task  # Keep the peer's artifacts and history out of failure frames.
+        return await self.get_task(task_id=task_id, context_id=context_id)
+
     async def get_task(self, *, task_id: str, context_id: str) -> a2a.Task:
         """Read an existing task and require both identifiers to match."""
         if not task_id or not context_id or len(task_id) > _REQUEST_BYTES:
