@@ -22,7 +22,7 @@ from ..items import ItemHelpers, TResponseInputItem, TResponseOutputItem
 from ..tool import ApplyPatchTool, FunctionTool, ShellTool, Tool, ToolSearchTool, WebSearchTool
 
 
-def _image_content(part: dict[str, Any]) -> dict[str, Any]:
+def _image_content(part: dict[str, Any], *, validate_only: bool = False) -> dict[str, Any]:
     image = part.get("image_url")
     if isinstance(image, str) and not image.startswith("data:"):
         parsed = urlparse(image)
@@ -36,6 +36,8 @@ def _image_content(part: dict[str, Any]) -> dict[str, Any]:
         media_type = mimetypes.guess_type(path.name)[0]
         if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
             raise UserError("CodexProvider accepts PNG, JPEG, WebP, and GIF images.")
+        if validate_only:
+            return {"type": "input_image", "image_url": image}
         try:
             image = f"data:{media_type};base64,{base64.b64encode(path.read_bytes()).decode()}"
         except (OSError, ValueError) as exc:
@@ -73,7 +75,7 @@ def _audio_content(part: dict[str, Any]) -> dict[str, Any]:
     return {"type": "input_audio", "audio_url": f"data:{media_type};base64,{data}"}
 
 
-def _user_content(content: Any) -> list[dict[str, Any]]:
+def _user_content(content: Any, *, validate_only: bool = False) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "input_text", "text": content}]
     result = []
@@ -83,7 +85,7 @@ def _user_content(content: Any) -> list[dict[str, Any]]:
         if part["type"] == "input_text":
             result.append({"type": "input_text", "text": part["text"]})
         elif part["type"] == "input_image":
-            result.append(_image_content(part))
+            result.append(_image_content(part, validate_only=validate_only))
         elif part["type"] == "input_audio":
             result.append(_audio_content(part))
         else:
@@ -96,6 +98,8 @@ def _user_content(content: Any) -> list[dict[str, Any]]:
 def prepare_codex_history(
     input: str | list[TResponseInputItem],
     tools: list[Tool] | None = None,
+    *,
+    validate_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Translate SDK replay items and separate the trailing user turn."""
     history: list[dict[str, Any]] = []
@@ -184,13 +188,15 @@ def prepare_codex_history(
                 {
                     "type": kind,
                     "call_id": call_id,
-                    "output": output if isinstance(output, str) else _user_content(output),
+                    "output": output
+                    if isinstance(output, str)
+                    else _user_content(output, validate_only=validate_only),
                 }
             )
         elif kind == "message" and item.get("role") in ("user", "assistant", "developer"):
             role = item["role"]
             if role in ("user", "developer"):
-                content = _user_content(item["content"])
+                content = _user_content(item["content"], validate_only=validate_only)
             elif isinstance(item["content"], str):
                 content = [{"type": "output_text", "text": item["content"]}]
             else:

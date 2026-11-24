@@ -73,6 +73,7 @@ from ..logger import (
     logger,
 )
 from ..memory import Session
+from ..model_preflight import ModelRequest
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -326,6 +327,14 @@ __all__ = [
 _OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT = OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT
 _safe_redacted_persistence_error = _safe_data_redacted_error
 _STREAM_EVENT_ITEM_OCCURRENCE_KEY = "_agents_stream_event_item_occurrence_key"
+
+
+def _requires_request_preflight(run_config: RunConfig) -> bool:
+    settings = run_config.tool_execution
+    return run_config.model_selector is not None or (
+        settings is not None
+        and (settings.workspace_execution == "sdk" or settings.require_native_approval_recovery)
+    )
 
 
 def _publish_stream_items(
@@ -2609,6 +2618,28 @@ async def run_single_turn_streamed(
     redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+    if _requires_request_preflight(run_config):
+        model.preflight(
+            ModelRequest(
+                input=filtered.input,
+                model_settings=model_settings,
+                tools=model_tools,
+                handoffs=handoffs,
+                previous_response_id=(
+                    server_conversation_tracker.previous_response_id
+                    if server_conversation_tracker is not None
+                    else None
+                ),
+                conversation_id=(
+                    server_conversation_tracker.conversation_id
+                    if server_conversation_tracker is not None
+                    else None
+                ),
+                prompt=prompt_config,
+                tool_execution=run_config.tool_execution,
+                resumable=isinstance(session, ResumableRun),
+            )
+        ).raise_for_errors()
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)
@@ -3170,6 +3201,29 @@ async def get_new_response(
     )
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
     validate_prepared_choice(omitted, model_settings.tool_choice, bool(all_tools or handoffs))
+
+    if _requires_request_preflight(run_config):
+        model.preflight(
+            ModelRequest(
+                input=filtered.input,
+                model_settings=model_settings,
+                tools=all_tools,
+                handoffs=handoffs,
+                previous_response_id=(
+                    server_conversation_tracker.previous_response_id
+                    if server_conversation_tracker is not None
+                    else None
+                ),
+                conversation_id=(
+                    server_conversation_tracker.conversation_id
+                    if server_conversation_tracker is not None
+                    else None
+                ),
+                prompt=prompt_config,
+                tool_execution=run_config.tool_execution,
+                resumable=isinstance(session, ResumableRun),
+            )
+        ).raise_for_errors()
 
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)

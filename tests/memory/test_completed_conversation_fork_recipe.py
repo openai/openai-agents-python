@@ -8,13 +8,69 @@ from typing import Any, cast
 
 import pytest
 
-from agents import Agent, RunConfig, Runner, SQLiteSession
+from agents import Agent, ModelRequest, RunConfig, Runner, SQLiteSession
 from agents.decorators import tool
 from agents.items import TResponseInputItem
+from agents.models.codex import CodexProvider
 from agents.testing import ScriptedModel, assistant_message, function_call
 from examples.memory.completed_conversation_fork import completed_text_prefix, fork_completed
+from tests.models.test_codex_provider import FakeThread, threads as threads
 
 CONFIG = RunConfig(tracing_disabled=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_completed_codex_fork_preserves_final_phase_and_diverges(tmp_path, threads, streamed):
+    queue, _ = threads
+    original = FakeThread(text="Original")
+    parent_turn = FakeThread(text="Parent branch")
+    child_turn = FakeThread(text="Child branch")
+    queue.extend([original, parent_turn, child_turn])
+    provider = CodexProvider(cwd=tmp_path)
+    config = RunConfig(model_provider=provider, tracing_disabled=True)
+    agent = Agent(name="Codex assistant")
+    parent = SQLiteSession("parent", tmp_path / "parent.db")
+    child = None
+
+    async def run(prompt, session):
+        if streamed:
+            result = Runner.run_streamed(agent, prompt, session=session, run_config=config)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, prompt, session=session, run_config=config)
+
+    def validate_destination(items):
+        provider.get_model(None).preflight(
+            ModelRequest(input=items + [{"role": "user", "content": "Continue"}])
+        ).raise_for_errors()
+
+    try:
+        await run("Begin", parent)
+        snapshot = await parent.get_items()
+        assert snapshot[-1]["phase"] == "final_answer"
+        child = await fork_completed(
+            parent,
+            tmp_path / "child.db",
+            authorize=lambda session_id, items: session_id == "parent" and items == snapshot,
+            tools=set(),
+            validate_destination=validate_destination,
+        )
+        assert await child.get_items() == snapshot
+        assert (await run("Continue parent", parent)).final_output == "Parent branch"
+        assert (await run("Continue child", child)).final_output == "Child branch"
+        assert parent_turn.history[-1]["phase"] == "final_answer"
+        assert child_turn.history[-1]["phase"] == "final_answer"
+        assert (await parent.get_items())[-1]["content"][0]["text"] == "Parent branch"
+        assert (await child.get_items())[-1]["content"][0]["text"] == "Child branch"
+        assert all(thread.closed for thread in (original, parent_turn, child_turn))
+        assert not queue
+    finally:
+        parent.close()
+        if child is not None:
+            child.close()
+        await provider.aclose()
 
 
 @pytest.mark.asyncio

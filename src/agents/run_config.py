@@ -296,7 +296,30 @@ class ToolExecutionConfig:
     With input or output preparation, the Codex provider disables native workspace tools.
     """
 
+    workspace_execution: Literal["provider", "sdk"] = field(default="provider", kw_only=True)
+    """Choose who executes workspace actions. Codex's SDK profile supplies no native
+    execution environments, even without preparation callbacks. Native workspace tools
+    can still appear in the model's tool list, but cannot execute workspace actions.
+    This profile does not prevent native child model requests or make shared child
+    budgets enforceable. SDK executors retain their own privileges. Other adapters
+    must explicitly verify their SDK workspace profile.
+    """
+
+    require_native_approval_recovery: bool = field(default=False, kw_only=True)
+    """Require recovery support when native policy asks to approve a command or edit.
+
+    This requires Codex's provider-owned workspace and a resumable session.
+    Leave tool_choice unset or use "auto". Requiring an SDK tool call disables
+    native approval recovery. Recovery does not cover unsupported native tools,
+    network approvals, or edits to the reviewed arguments. Host policy still
+    decides which operations need approval.
+    """
+
     def __post_init__(self) -> None:
+        if self.workspace_execution not in ("provider", "sdk"):
+            raise ValueError("tool_execution.workspace_execution must be 'provider' or 'sdk'")
+        if not isinstance(self.require_native_approval_recovery, bool):
+            raise ValueError("tool_execution.require_native_approval_recovery must be a bool")
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):

@@ -85,3 +85,22 @@ def clean_responses_input_item(item: Any) -> Any | None:
     cleaned.pop("provider_data", None)
     cleaned.pop("codex_reasoning_summary", None)
     return cleaned
+
+
+def merge_openai_extra_args(
+    kwargs: dict[str, Any],
+    extra_args: dict[str, Any],
+    *,
+    method: str,
+    omitted_types: type | tuple[type, ...],
+    error_type: type[Exception] = TypeError,
+) -> None:
+    """Allow raw overrides only where the adapter omitted its own argument."""
+    duplicates = sorted(
+        key for key in extra_args if key in kwargs and not isinstance(kwargs[key], omitted_types)
+    )
+    if duplicates:
+        noun = "argument" if len(duplicates) == 1 else "arguments"
+        keys = ", ".join(repr(key) for key in duplicates)
+        raise error_type(f"{method}() got multiple values for keyword {noun} {keys}")
+    kwargs.update(extra_args)

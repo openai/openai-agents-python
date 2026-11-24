@@ -40,9 +40,16 @@ from ..exceptions import UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..memory.session import await_session_mutation as _join_close
+from ..model_preflight import (
+    ModelPreflight,
+    ModelRequest,
+    ToolOwnership,
+    static_input_copy,
+    tool_ownership,
+)
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
-from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
+from ..tool import ApplyPatchTool, ShellTool, Tool, ToolSearchTool, WebSearchTool
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
@@ -215,15 +222,60 @@ def _pending_native_call(
 
 
 def _uses_sdk_workspace(tools: list[Tool], bindings: ModelToolHooks | None) -> bool:
-    settings = bindings.settings if bindings else None
+    return _sdk_workspace(tools, bindings.settings if bindings else None)
+
+
+def _sdk_workspace(tools: list[Tool], settings: Any) -> bool:
     return bool(
         settings
-        and settings.sdk_only_tool_hooks
-        and (settings.prepare_tool_input or settings.prepare_tool_output)
+        and (
+            settings.workspace_execution == "sdk"
+            or (
+                settings.sdk_only_tool_hooks
+                and (settings.prepare_tool_input or settings.prepare_tool_output)
+            )
+        )
     ) or any(
         getattr(tool, "_sdk_sandbox", False) or isinstance(tool, (ShellTool, ApplyPatchTool))
         for tool in tools
     )
+
+
+def _request_tool_settings(
+    tools: list[Tool], dynamic_tools: list[dict[str, Any]], sdk_sandbox: bool
+) -> tuple[set[str], dict[str, Any] | None]:
+    deferred_namespaces = {
+        tool["name"]
+        for tool in dynamic_tools
+        if tool.get("type") == "namespace"
+        and any(member.get("deferLoading") for member in tool["tools"])
+    }
+    if "functions" in deferred_namespaces:
+        raise UserError(
+            "Codex native tool discovery reserves the functions namespace; "
+            "use another namespace for deferred SDK tools."
+        )
+    web_tools = [tool for tool in tools if isinstance(tool, WebSearchTool)]
+    if len(web_tools) > 1:
+        raise UserError("CodexProvider supports one WebSearchTool per request.")
+    web_request = None
+    if web_tools:
+        web = web_tools[0]
+        if sdk_sandbox:
+            raise UserError("Expose web search through SDK sandbox tools with CodexProvider.")
+        if web.image_settings is not None:
+            raise UserError("CodexProvider does not support web search image settings.")
+        location = dict(web.user_location) if web.user_location is not None else None
+        if location is not None and location.pop("type", "approximate") != "approximate":
+            raise UserError("CodexProvider supports approximate web search locations.")
+        web_request = {
+            "external_web_access": web.external_web_access,
+            "search_context_size": web.search_context_size,
+            "allowed_domains": web.filters.allowed_domains if web.filters else None,
+            "user_location": location,
+            "search_content_types": web.search_content_types,
+        }
+    return deferred_namespaces, web_request
 
 
 def _settings(settings: ModelSettings) -> tuple[str | None, str | None]:
@@ -298,6 +350,77 @@ class _CodexModel(Model):
         self._name = name
         self._provider = provider
 
+    def preflight(self, request: ModelRequest) -> ModelPreflight:
+        """Reuse the Codex adapter's validators without importing or starting native Core."""
+        sdk_workspace = _sdk_workspace(request.tools, request.tool_execution)
+        owners = tuple(
+            ToolOwnership(tool.name, "native")
+            if isinstance(tool, (WebSearchTool, ToolSearchTool))
+            else owner
+            for tool, owner in zip(request.tools, tool_ownership(request.tools), strict=True)
+        )
+        if not sdk_workspace:
+            owners += (ToolOwnership("Codex workspace tools", "native"),)
+        errors: tuple[str, ...] = ()
+        static_input = static_input_copy(request.input)
+        try:
+            if (
+                request.previous_response_id is not None
+                or request.conversation_id is not None
+                or request.prompt is not None
+            ):
+                raise UserError("CodexProvider does not support Responses API state or prompt IDs.")
+            _settings(request.model_settings)
+            if static_input is not None:
+                prepare_codex_history(static_input, request.tools, validate_only=True)
+            dynamic_tools, identities = prepare_dynamic_tools(request.tools, request.handoffs)
+            require_sdk_call = request.model_settings.tool_choice == "required"
+            if require_sdk_call and not identities:
+                raise UserError(
+                    "CodexProvider tool_choice='required' needs an exposed SDK tool or handoff."
+                )
+            _request_tool_settings(request.tools, dynamic_tools, sdk_workspace)
+            if request.tool_execution and request.tool_execution.require_native_approval_recovery:
+                if sdk_workspace:
+                    raise UserError(
+                        "Native approval recovery requires provider-owned workspace tools."
+                    )
+                if not request.resumable:
+                    raise UserError("Native approval recovery requires session=ResumableSession.")
+                if require_sdk_call:
+                    raise UserError(
+                        "Native approval recovery does not support tool_choice='required'. "
+                        "Use tool_choice='auto' to allow native approvals."
+                    )
+        except UserError as error:
+            errors = (str(error),)
+        return ModelPreflight(
+            adapter=f"{type(self).__module__}.{type(self).__qualname__}",
+            static_validation="failed"
+            if errors
+            else "passed"
+            if static_input is not None
+            else "unknown",
+            model_name=self._name,
+            tools=owners,
+            errors=errors,
+            unchecked=(
+                "Model catalog, credentials, and host policy have not been checked.",
+                "The native runtime checks host policy and execution permissions.",
+                "The actual request checks local media readability and deferred input.",
+                "Native approval recovery covers supported unchanged commands and edits only.",
+            )
+            + (
+                (
+                    "Native workspace tools may be advertised, but have no usable "
+                    "execution environment.",
+                    "Native delegation may sample; shared child budgets remain unsupported.",
+                )
+                if sdk_workspace
+                else ()
+            ),
+        )
+
     def get_default_model_settings(self) -> ModelSettings:
         return ModelSettings()
 
@@ -363,6 +486,20 @@ class _CodexModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> AsyncIterator[TResponseStreamEvent]:
+        bindings = get_model_tool_hooks()
+        self.preflight(
+            ModelRequest(
+                input=input,
+                model_settings=model_settings,
+                tools=tools,
+                handoffs=handoffs,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+                tool_execution=bindings.settings if bindings else None,
+                resumable=bindings.resumable if bindings else False,
+            )
+        ).raise_for_errors()
         if previous_response_id is not None or conversation_id is not None or prompt is not None:
             raise UserError("CodexProvider does not support Responses API state or prompt IDs.")
         effort, summary = _settings(model_settings)
@@ -419,37 +556,7 @@ class _CodexModel(Model):
                     ],
                 )
             )
-        deferred_namespaces = {
-            tool["name"]
-            for tool in dynamic_tools
-            if tool.get("type") == "namespace"
-            and any(member.get("deferLoading") for member in tool["tools"])
-        }
-        if "functions" in deferred_namespaces:
-            raise UserError(
-                "Codex native tool discovery reserves the functions namespace; "
-                "use another namespace for deferred SDK tools."
-            )
-        web_tools = [tool for tool in tools if isinstance(tool, WebSearchTool)]
-        if len(web_tools) > 1:
-            raise UserError("CodexProvider supports one WebSearchTool per request.")
-        web_request = None
-        if web_tools:
-            web = web_tools[0]
-            if sdk_sandbox:
-                raise UserError("Expose web search through SDK sandbox tools with CodexProvider.")
-            if web.image_settings is not None:
-                raise UserError("CodexProvider does not support web search image settings.")
-            location = dict(web.user_location) if web.user_location is not None else None
-            if location is not None and location.pop("type", "approximate") != "approximate":
-                raise UserError("CodexProvider supports approximate web search locations.")
-            web_request = {
-                "external_web_access": web.external_web_access,
-                "search_context_size": web.search_context_size,
-                "allowed_domains": web.filters.allowed_domains if web.filters else None,
-                "user_location": location,
-                "search_content_types": web.search_content_types,
-            }
+        deferred_namespaces, web_request = _request_tool_settings(tools, dynamic_tools, sdk_sandbox)
         settings = {
             "model": self._name,
             "reasoning_effort": effort,

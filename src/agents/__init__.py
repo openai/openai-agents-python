@@ -88,6 +88,7 @@ from .memory import (
     SessionSettings,
     is_openai_responses_compaction_aware_session,
 )
+from .model_preflight import ModelPreflight, ModelRequest, ToolOwnership
 from .model_settings import ModelSettings
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
@@ -377,6 +378,9 @@ def enable_verbose_stdout_logging() -> None:
 
 
 __all__ = [
+    "ModelPreflight",
+    "ModelRequest",
+    "ToolOwnership",
     "Agent",
     "AgentBase",
     "AgentToolStreamEvent",
