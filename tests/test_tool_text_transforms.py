@@ -79,7 +79,7 @@ def model_for(name):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("detail", [None, "content"])
 @pytest.mark.parametrize("route", ["function", "mcp"])
-@pytest.mark.parametrize("outcome", ["edit", "throw", "cancel", "invalid"])
+@pytest.mark.parametrize("outcome", ["edit", "throw", "cancel", "invalid", "short", "list"])
 async def test_selected_output_before_publication(
     detail, route, outcome, exporter, caplog, monkeypatch
 ):
@@ -131,6 +131,10 @@ async def test_selected_output_before_publication(
             raise ValueError(RAW)
         if outcome == "cancel":
             raise asyncio.CancelledError(RAW)
+        if outcome == "short":
+            return ()
+        if outcome == "list":
+            return list(texts)
         if outcome == "invalid":
             return (RAW, 42)
         return tuple(SAFE if t else "" for t in texts)
@@ -144,6 +148,7 @@ async def test_selected_output_before_publication(
         ),
         tracing={"operation_detail": detail} if detail else {},
         trace_include_sensitive_data=True,
+        redact_text=(lambda text: text) if outcome == "short" else None,
     )
     session = SQLiteSession("local")
     try:
@@ -185,6 +190,9 @@ async def test_selected_output_before_publication(
         else:
             with pytest.raises(asyncio.CancelledError if outcome == "cancel" else UserError) as exc:
                 await collect()
+            assert ("same-length tuple of strings" in str(exc.value)) == (
+                outcome in {"invalid", "short", "list"}
+            )
             error: BaseException | None = exc.value
             seen = set()
             while error is not None:
@@ -260,6 +268,7 @@ async def test_selected_failures_never_become_success(
     with pytest.raises(UserError) as exc:
         await Runner.run(agent, "go", run_config=config)
     assert not unexpected
+    assert "editor" not in str(exc.value) and "transform" not in str(exc.value)
     if failure == "peer":
         assert "MCP tool reported an error" in str(exc.value)
     assert len(model.calls) == 1 and exc.value.__context__ is None and exc.value.__cause__ is None
@@ -409,6 +418,12 @@ def test_invalid_or_duplicate_registration():
     with pytest.raises(ValueError, match="MCP server object") as error:
         ToolExecutionConfig(tool_text_transforms=[(("example-server", "read.report"), edit)])
     assert "example-server" not in str(error.value) and "read.report" not in str(error.value)
+    for malformed in [None, [None], [(peer, RAW, edit)], [(peer, RAW), edit]]:
+        with pytest.raises(ValueError) as error:
+            ToolExecutionConfig(tool_text_transforms=malformed)
+        assert "(function_tool, edit_text)" in str(error.value)
+        assert "((server, raw_tool_name), edit_text)" in str(error.value)
+        assert RAW not in str(error.value)
     for entries in [[("read.report", edit)], [((peer, "read.report"), edit)] * 2]:
         with pytest.raises(ValueError, match="tool_text_transforms"):
             ToolExecutionConfig(tool_text_transforms=entries)

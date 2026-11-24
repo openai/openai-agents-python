@@ -78,13 +78,22 @@ class RunBudget:
     Missing or negative totals and unknown estimates (None) block the next
     admission by default. Set missing_usage="continue" to use only known values.
 
-    For a $0.01 limit, with a flat rate per million tokens for each known model::
+    This example uses synthetic USD rates per million tokens. Cached tokens
+    are part of the input count and get the same rate as other input tokens.
+    The Runner checks the limit before each regular model request. A single
+    request can take the estimated cost above the $0.01 limit::
 
-        prices_per_million = {"example": 2.0}
+        from agents import RunBudget, Usage
 
-        def estimate(model, usage):
-            rate = prices_per_million.get(model)
-            return None if rate is None else usage.total_tokens * rate / 1_000_000
+        def estimate(model: str | None, usage: Usage) -> float | None:
+            if model != "example":
+                return None
+            inputs, outputs = usage.input_tokens, usage.output_tokens
+            if not 0 <= usage.input_tokens_details.cached_tokens <= inputs or outputs < 0:
+                return None
+            if inputs + outputs != usage.total_tokens:
+                return None
+            return (2 * inputs + 5 * outputs) / 1_000_000
 
         budget = RunBudget(max_estimated_cost_usd=0.01, estimate_cost_usd=estimate)
 

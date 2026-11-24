@@ -302,10 +302,9 @@ class ToolExecutionConfig:
     async def edit_text(call, texts: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(text.replace("internal draft", "[hidden]") for text in texts)
 
-    config = ToolExecutionConfig(tool_text_transforms=[
-        (report, edit_text),
-        ((server, "lookup"), edit_text),
-    ])
+    target = (server, "lookup")
+    config = ToolExecutionConfig(tool_text_transforms=[(target, edit_text)])
+    # For a local function, use [(report, edit_text)].
     ```
 
     The editor receives a tuple of strings. Return a tuple of strings of the same
@@ -360,19 +359,29 @@ class ToolExecutionConfig:
             raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
         if not isinstance(self.sdk_only_tool_hooks, bool):
             raise ValueError("tool_execution.sdk_only_tool_hooks must be a bool")
-        self.tool_text_transforms = tuple(self.tool_text_transforms)
+        invalid = (
+            "For tool_text_transforms, use (function_tool, edit_text) or "
+            "((server, raw_tool_name), edit_text) with a local FunctionTool or "
+            "an MCP server object and a nonempty raw tool name."
+        )
+        try:
+            self.tool_text_transforms = tuple(self.tool_text_transforms)
+        except TypeError:
+            raise ValueError(invalid) from None
         if self.tool_text_transforms:
             from .mcp import MCPServer
             from .tool import FunctionTool
 
             seen: set[tuple[int, str | None]] = set()
-            for target, edit in self.tool_text_transforms:
+            for pair in self.tool_text_transforms:
+                try:
+                    target, edit = pair
+                except (TypeError, ValueError):
+                    raise ValueError(invalid) from None
                 key: tuple[int, str | None]
                 if isinstance(target, FunctionTool):
                     if target._is_agent_tool or target._is_codex_tool or target._mcp_tool_binding:
-                        raise ValueError(
-                            "Select a local function or an MCP server and raw tool name."
-                        )
+                        raise ValueError(invalid)
                     key = (id(target), None)
                 elif (
                     isinstance(target, tuple)
@@ -383,12 +392,10 @@ class ToolExecutionConfig:
                 ):
                     key = (id(target[0]), target[1])
                 else:
-                    raise ValueError(
-                        "For tool_text_transforms, use a local FunctionTool object or "
-                        "(server, raw_tool_name) with the MCP server object and a nonempty "
-                        "raw tool name. A server name string is invalid here."
-                    )
-                if key in seen or not callable(edit):
+                    raise ValueError(invalid)
+                if not callable(edit):
+                    raise ValueError(invalid)
+                if key in seen:
                     raise ValueError("Each tool_text_transforms target requires one editor.")
                 seen.add(key)
 

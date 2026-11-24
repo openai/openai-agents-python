@@ -258,17 +258,21 @@ def select_text_editor(
     return partial(_validated_edit, partial(editor, call), tool.name)
 
 
+class _InvalidTextEdit(ValueError):
+    """The editor returned a value with the wrong shape."""
+
+
 async def _validated_edit(edit: _Edit, name: str, texts: tuple[str, ...]) -> tuple[str, ...]:
-    async def invoke() -> tuple[str, ...]:
+    async def invoke() -> tuple[str, ...] | None:
         result = await _protect_selected_task(partial(edit, texts))
         # Refuse arbitrary objects before the hook takes ownership with deepcopy.
         if type(result) is not tuple or any(type(text) is not str for text in result):
-            raise ValueError
+            return None
         return result
 
     result = await _await_hook(invoke, "tool_text_transforms", name)
-    if len(result) != len(texts):
-        raise ValueError
+    if result is None or len(result) != len(texts):
+        raise _InvalidTextEdit()
     for text in result:
         text.encode("utf-8")
     return redact_payload(result)
@@ -298,7 +302,9 @@ async def invoke_selected_tool(
         safe_error = _prepare_data_redacted_error(error, trusted_error_message=_PEER_ERROR)
         if isinstance(safe_error, Exception) and not isinstance(safe_error, UserError):
             safe_error = UserError(
-                "Selected tool failed or its text transform did not produce a valid result."
+                "The tool_text_transforms editor must return a same-length tuple of strings."
+                if type(error) is _InvalidTextEdit
+                else "Selected tool execution failed."
             )
             _mark_error_data_redacted(safe_error)
     # Neither a tool nor its editor may publish a rejected payload via exception details.
