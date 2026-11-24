@@ -396,16 +396,21 @@ class OpenAIServerConversationTracker:
         if not items:
             return
 
-        delivered_sources: list[TResponseInputItem] = []
+        delivered_source_ids: set[int] = set()
+        initial_batch = not self.sent_items
         delivered_by_content: set[str] = set()
         for item in items:
             if item is None:
                 continue
             source_item, input_id = self._delivery_source(item)
-            if _is_tracked_object(delivered_sources, source_item):
+            source_id = id(source_item)
+            if source_id in delivered_source_ids:
                 continue
-            delivered_sources.append(source_item)
-            _track_object_once(self.sent_items, source_item)
+            delivered_source_ids.add(source_id)
+            if initial_batch:
+                self.sent_items.append(source_item)
+            else:
+                _track_object_once(self.sent_items, source_item)
             fp = _fingerprint_for_tracker(source_item)
             if fp:
                 delivered_by_content.add(fp)
@@ -417,7 +422,7 @@ class OpenAIServerConversationTracker:
 
         remaining: list[TResponseInputItem] = []
         for pending in self.remaining_initial_input:
-            if _is_tracked_object(delivered_sources, pending):
+            if id(pending) in delivered_source_ids:
                 continue
             pending_fp = _fingerprint_for_tracker(pending)
             if pending_fp and pending_fp in delivered_by_content:
