@@ -238,7 +238,8 @@ class SandboxRuntime(Generic[TContext]):
         with span_cm:
             self._session_manager.acquire_agent(current_agent)
             cached_preparation = self._prepared_agents.get(id(current_agent))
-            prepared_capabilities = clone_capabilities(current_agent.capabilities)
+            sources = tuple(current_agent.capabilities)
+            prepared_capabilities = clone_capabilities(sources)
             session = await self._session_manager.ensure_session(
                 agent=current_agent,
                 capabilities=prepared_capabilities,
@@ -276,6 +277,9 @@ class SandboxRuntime(Generic[TContext]):
                         resolved_model=resolved_model,
                         workspace_scope=self._workspace_scope,
                     )
+                    cast(
+                        SandboxAgent[TContext], prepared_agent
+                    )._sandbox_capability_sources = cached_agent._sandbox_capability_sources
                     self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
                         agent=prepared_agent,
                         session=session,
@@ -314,6 +318,7 @@ class SandboxRuntime(Generic[TContext]):
                 resolved_model=resolved_model,
                 workspace_scope=self._workspace_scope,
             )
+            cast(SandboxAgent[TContext], prepared_agent)._sandbox_capability_sources = sources
             self._prepared_agents[id(current_agent)] = _SandboxPreparedAgentCache(
                 agent=prepared_agent,
                 session=session,

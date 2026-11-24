@@ -42,6 +42,7 @@ from typing_extensions import NotRequired
 
 from .. import _debug
 from .._httpx_compat import is_legacy_httpx_instance
+from .._redaction import current_redactor, require_clean
 from .._tool_identity import (
     get_explicit_function_tool_namespace,
     get_function_tool_namespace_description,
@@ -70,6 +71,7 @@ from ..tool import (
     Tool,
     ToolSearchTool,
     WebSearchTool,
+    _builtin_tool_choice_name,
     has_required_tool_search_surface,
     validate_responses_programmatic_tool_calling_configuration,
     validate_responses_tool_search_configuration,
@@ -199,6 +201,7 @@ def _materialize_responses_tool_params(
 
 
 def _record_response_id(span: Span[ResponseSpanData], response_id: str) -> None:
+    require_clean(response_id)
     span.span_data.operation.response_id = response_id
     span.span_data._response_id = response_id
 
@@ -212,6 +215,8 @@ def _record_response_operation(
     outcome: Literal["completed", "failed"] = "completed",
 ) -> None:
     data = span.span_data
+    if current_redactor() is not None:
+        require_clean((response.id, response.model))
     data.operation.response_model = getattr(response, "model", None)
     data.operation.outcome = outcome
     if tracing.include_data():
@@ -239,6 +244,8 @@ def _record_failed_response(response: Response, *, response_id_trusted: bool) ->
     if span is None or not isinstance(span.span_data, ResponseSpanData):
         return
     operation = span.span_data.operation
+    if current_redactor() is not None:
+        require_clean((response.id, response.model))
     operation.response_model = getattr(response, "model", None)
     if operation.detail == "content":
         span.span_data.output = bound_content(response.output)
@@ -704,7 +711,7 @@ class OpenAIResponsesModel(Model):
                     prompt=prompt,
                 )
 
-                if _debug.DONT_LOG_MODEL_DATA:
+                if _debug.DONT_LOG_MODEL_DATA or current_redactor() is not None:
                     logger.debug("LLM responded")
                 else:
                     logger.debug(
@@ -743,7 +750,7 @@ class OpenAIResponsesModel(Model):
                     trace_include_sensitive_data=tracing.include_data(),
                 )
                 message = "Error getting response"
-                if not _debug.DONT_LOG_MODEL_DATA:
+                if not _debug.DONT_LOG_MODEL_DATA and current_redactor() is None:
                     message = f"{message} (request_id: {getattr(e, 'request_id', None)})"
                 log_model_action_error(logger, message, e)
                 raise
@@ -1103,7 +1110,7 @@ class OpenAIResponsesModel(Model):
             include_set.add("message.output_text.logprobs")
         include: list[ResponseIncludable] = list(include_set)
 
-        if _debug.DONT_LOG_MODEL_DATA:
+        if _debug.DONT_LOG_MODEL_DATA or current_redactor() is not None:
             logger.debug("Calling LLM")
         else:
             input_json = json.dumps(
@@ -1964,11 +1971,9 @@ class Converter:
             return "auto"
         elif tool_choice == "none":
             return "none"
-        elif tool_choice in {
-            "computer",
-            "computer_use",
-            "computer_use_preview",
-        } and cls._has_computer_tool(tools):
+        elif _builtin_tool_choice_name(
+            tool_choice
+        ) == "computer_use_preview" and cls._has_computer_tool(tools):
             return cls._convert_builtin_computer_tool_choice(
                 tool_choice=tool_choice,
                 model=model,
@@ -1992,7 +1997,7 @@ class Converter:
             "web_search_preview",
         }:
             # WebSearchTool advertises web_search for both search selectors.
-            hosted_type = "web_search" if tool_choice == "web_search_preview" else tool_choice
+            hosted_type = _builtin_tool_choice_name(tool_choice)
             if not any(tool["type"] == hosted_type for tool in tool_params) and any(
                 tool["type"] == "function"
                 and tool["name"] == tool_choice

@@ -16,6 +16,7 @@ from .._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_call,
     get_function_tool_lookup_key_for_tool,
+    get_function_tool_lookup_keys,
     get_tool_call_namespace,
 )
 from .._tool_invocation import (
@@ -39,11 +40,12 @@ from ..items import (
     ToolCallOutputItem,
 )
 from ..run_context import RunContextWrapper
-from ..tool import FunctionTool, MCPToolApprovalRequest, get_function_tool_origin
+from ..tool import FunctionTool, MCPToolApprovalRequest, ToolOriginType, get_function_tool_origin
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..util._asyncio_tasks import gather_with_cancel
 from . import tool_execution
 from .agent_bindings import AgentBindings
+from .agent_tool_configuration import snapshot_agent_tools
 from .run_steps import (
     ProcessedResponse,
     ToolRunApplyPatchCall,
@@ -333,6 +335,53 @@ def _register_tool_call_items(
             continue
         if isinstance(item, ToolCallOutputItem | HandoffOutputItem | MCPApprovalResponseItem):
             context_wrapper._mark_tool_call_completed(item.raw_item)
+
+
+def _check_workspace_approvals(
+    pending: Sequence[ToolApprovalItem], agent: Agent[Any], processed: ProcessedResponse
+) -> None:
+    """Stop before claiming a session if restore skipped a pending shell or edit."""
+    restored = {
+        tool_invocation_call_id(run.tool_call)
+        for run in processed.shell_calls
+        if run.shell_tool.executor is not None
+    }
+    restored.update(tool_invocation_call_id(run.tool_call) for run in processed.apply_patch_calls)
+    for item in pending:
+        if (
+            item.agent is agent
+            and get_mapping_or_attr(item.raw_item, "type") in ("shell_call", "apply_patch_call")
+            and tool_invocation_call_id(item.raw_item) not in restored
+        ):
+            raise ModelBehaviorError(f"Tool {item.qualified_name} not found in agent {agent.name}")
+
+
+def _check_approved_functions(
+    pending: Sequence[ToolApprovalItem], agent: Agent[Any], context: RunContextWrapper[Any]
+) -> None:
+    """Check registration before claiming a session. Dispatch still checks live availability."""
+    # A sandbox or custom agent can add functions during tool discovery.
+    if type(agent).get_all_tools is not Agent.get_all_tools:
+        return
+    registered = {
+        key
+        for tool in snapshot_agent_tools(agent)
+        if isinstance(tool, FunctionTool) and tool.is_enabled is not False
+        for key in get_function_tool_lookup_keys(tool)
+    }
+    for item in pending:
+        if (
+            item.agent is agent
+            and item.tool_origin is not None
+            and item.tool_origin.type == ToolOriginType.FUNCTION
+            and item.tool_lookup_key not in registered
+            and item.tool_name
+            and item.call_id
+            and context.get_approval_status(
+                item.tool_name, item.call_id, existing_pending=item, current_invocation=item
+            )
+        ):
+            raise ModelBehaviorError(f"Tool {item.qualified_name} not found in agent {agent.name}")
 
 
 def _validate_unresolved_function_calls(

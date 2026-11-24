@@ -16,6 +16,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from .. import _debug
 from .._mcp_tool_metadata import resolve_mcp_tool_description_for_model, resolve_mcp_tool_title
+from .._redaction import hook_payload_diagnostics, require_clean, require_clean_function
 from ..exceptions import AgentsException, MCPToolCancellationError, ModelBehaviorError, UserError
 from ..logger import log_tool_action_error, logger
 from ..run_context import RunContextWrapper
@@ -30,6 +31,7 @@ from ..tool import (
     ToolOutputTextDict,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
+    _ToolEligibilityError,
     default_tool_error_function,
 )
 from ..tool_context import ToolContext
@@ -54,7 +56,7 @@ else:
     ToolOutput = Union[str, ToolOutputItem, list[ToolOutputItem]]  # noqa: UP007
 
 if TYPE_CHECKING:
-    from mcp.types import Tool as MCPTool
+    from mcp.types import CallToolResult, Tool as MCPTool
 
     from ..agent import AgentBase
     from .server import MCPServer
@@ -347,8 +349,16 @@ class MCPUtil:
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
     ) -> list[MCPTool]:
-        with mcp_tools_span(server=get_mcp_server_log_name(server.name)) as span:
-            tools = await server.list_tools(run_context, agent)
+        server_name = get_mcp_server_log_name(server.name)
+        require_clean(server_name)
+        with mcp_tools_span(server=server_name) as span:
+            with hook_payload_diagnostics(
+                "MCP tool discovery failed with RunConfig.redact_text enabled.",
+                redact_by_default=False,
+            ):
+                tools = await server.list_tools(run_context, agent)
+            # Reject unsafe identities and schemas before exposing even the tool names.
+            require_clean(tools)
             span.span_data.result = [tool.name for tool in tools]
             return tools
 
@@ -603,6 +613,7 @@ class MCPUtil:
         )
         function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
+        require_clean_function(function_tool)
         return function_tool
 
     @staticmethod
@@ -716,19 +727,45 @@ class MCPUtil:
                 f"Invalid JSON input for tool {tool_name_for_display}: expected a JSON object"
             )
 
+        async def call_peer() -> CallToolResult:
+            if merged_meta is None:
+                return await server.call_tool(tool.name, json_data)
+            return await server.call_tool(tool.name, json_data, meta=merged_meta)
+
+        invoke = call_peer
         if _debug.DONT_LOG_TOOL_DATA:
             logger.debug("Invoking MCP tool")
         else:
             logger.debug("Invoking MCP tool %s with input %s", tool_name_for_display, input_json)
 
         try:
+            if (
+                isinstance(context, ToolContext)
+                and (record := context._tool_invocations.get(context.tool_call_id)) is not None
+                and record.declaration is not None
+            ):
+                binding = record.declaration
+
+                async def check_and_call() -> CallToolResult:
+                    # Check inside the scheduled task, after metadata resolution.
+                    try:
+                        if context.run_config is None or binding.server is not server:
+                            raise UserError("MCP recipient or policy changed.")
+                        if not await server._apply_tool_filter([tool], context, binding.agent):
+                            raise UserError("MCP tool filter refused the call.")
+                        await binding.check(context, context.run_config)
+                        if tool.name != binding.view.mcp_tool_name:
+                            raise UserError("MCP tool name changed.")
+                    except Exception as error:
+                        raise _ToolEligibilityError(
+                            "Prepared MCP tool is no longer eligible."
+                        ) from error
+                    return await call_peer()
+
+                invoke = check_and_call
             resolved_meta = await cls._resolve_meta(server, context, tool.name, json_data)
             merged_meta = cls._merge_mcp_meta(resolved_meta, meta)
-            call_task = asyncio.create_task(
-                server.call_tool(tool.name, json_data)
-                if merged_meta is None
-                else server.call_tool(tool.name, json_data, meta=merged_meta)
-            )
+            call_task = asyncio.create_task(invoke())
             try:
                 done, _ = await asyncio.wait({call_task}, return_when=asyncio.FIRST_COMPLETED)
                 finished_task = done.pop()

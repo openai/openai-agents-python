@@ -221,7 +221,12 @@ class ModelSettings:
     """
 
     prompt_cache_key: str | None = field(default=None, kw_only=True, repr=False)
-    """Optional key for grouping requests with a shared prompt prefix.
+    """Use a stable, non-sensitive key for requests that share a prompt prefix.
+
+    For example, ``ModelSettings(prompt_cache_key="shared-prefix")``.
+    A key does not guarantee a cache hit or savings. Check the provider's cached
+    token count when available. If usage or the count is missing, the cache outcome
+    is unknown even if normalized usage shows zero. See ``preserve_raw_usage``.
 
     Leave unset for the Runner or provider default. Set the key here or in extras, never both.
 
