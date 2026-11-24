@@ -3,17 +3,23 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 from agents import (
     Agent,
+    GuardrailFunctionOutput,
     ModelSelectionData,
     ModelSettings,
+    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
     RunBudget,
     RunConfig,
     Runner,
     UserError,
     function_tool,
+    output_guardrail,
 )
 from agents.models.interface import Model, ModelProvider
 from agents.models.multi_provider import MultiProvider, MultiProviderMap
@@ -349,24 +355,88 @@ async def test_dictionary_config_accepts_selector(streamed: bool) -> None:
 
 
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_same_provider_alias_keeps_original_route(streamed: bool) -> None:
+async def test_nested_provider_switch_fails_before_model_lookup(streamed: bool) -> None:
+    first = RecordingProvider({})
+    second = RecordingProvider({"B": ScriptedModel([[assistant_message("wrong provider")]])})
+    leaves = MultiProviderMap()
+    leaves.add_provider("first", first)
+    leaves.add_provider("second", second)
+    groups = MultiProviderMap()
+    groups.add_provider("group", MultiProvider(provider_map=leaves))
+
+    with pytest.raises(UserError, match="cannot switch providers"):
+        await run_agent(
+            streamed,
+            Agent(name="worker", model="group/first/A"),
+            run_config=RunConfig(
+                model_provider=MultiProvider(provider_map=groups),
+                model_selector=lambda _: "group/second/B",
+                tracing_disabled=True,
+            ),
+        )
+    assert first.selections == second.selections == []
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_same_provider_alias_keeps_original_route(streamed: bool, nested: bool) -> None:
     model = ScriptedModel([[assistant_message("same provider")]])
     inner = RecordingProvider({"B": model})
     mapping = MultiProviderMap()
     mapping.add_provider("primary", inner)
     mapping.add_provider("alias", inner)
     provider = MultiProvider(provider_map=mapping)
+    configured, selected = "primary/A", "alias/B"
+    if nested:
+        groups = MultiProviderMap()
+        groups.add_provider("group", provider)
+        groups.add_provider("other-name", provider)
+        provider = MultiProvider(provider_map=groups)
+        configured, selected = f"group/{configured}", f"other-name/{selected}"
     result = await run_agent(
         streamed,
-        Agent(name="worker", model="primary/A"),
+        Agent(name="worker", model=configured),
         run_config=RunConfig(
             model_provider=provider,
-            model_selector=lambda data: "alias/B",
+            model_selector=lambda data: selected,
             tracing_disabled=True,
         ),
     )
     assert result.final_output == "same provider"
     assert inner.selections == ["B"] and len(model.calls) == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.allow_call_model_methods
+async def test_selected_model_cannot_persist_guarded_output(streamed: bool) -> None:
+    # Use both real adapters so a request reaching the network boundary fails the test.
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"Guarded output could be stored by {request.url.path}")
+
+    @output_guardrail
+    def reject_output(context: Any, agent: Agent[Any], output: str) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as http_client:
+        client = AsyncOpenAI(api_key="test", http_client=http_client)
+        provider = RecordingProvider(
+            {
+                "chat": OpenAIChatCompletionsModel("chat", client),
+                "responses": OpenAIResponsesModel("responses", client),
+            }
+        )
+        with pytest.raises(UserError, match="server-managed conversation history"):
+            await run_agent(
+                streamed,
+                Agent(name="worker", model="chat", output_guardrails=[reject_output]),
+                conversation_id="conv_test",
+                run_config=RunConfig(
+                    model_provider=provider,
+                    model_selector=lambda _: "responses",
+                    tracing_disabled=True,
+                ),
+            )
+        assert provider.selections.count("responses") == 1
 
 
 @pytest.mark.parametrize("streamed", [False, True])

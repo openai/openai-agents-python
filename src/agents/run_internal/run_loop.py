@@ -116,6 +116,7 @@ from .agent_runner_helpers import (
     reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_for_server_model,
     validate_output_guardrails_with_server_managed_conversation,
 )
 from .agent_tool_configuration import guard_agent_tool_configuration
@@ -163,6 +164,7 @@ from .items import (
     run_items_to_input_items,
 )
 from .model_retry import (
+    _close_async_iterator_quietly,
     _StreamAttemptSkipped,
     apply_retry_attempt_usage,
     get_response_with_retry,
@@ -2557,6 +2559,7 @@ async def run_single_turn_streamed(
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
@@ -2698,25 +2701,27 @@ async def run_single_turn_streamed(
 
     async def controlled_stream() -> AsyncIterator[TResponseStreamEvent]:
         # Defer dispatch until the retry driver actually pulls the stream.
-        stream = get_model_stream()
         assert control is not None
-        control._dispatch(filtered.input)
+        stream = get_model_stream()
         try:
+            control._dispatch(filtered.input)
             async for event in stream:
                 yield event
         finally:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                await close()
+            # The retry driver cannot see this attempt end until provider cleanup returns.
+            if preview is not None:
+                preview.retire()
+            await _close_async_iterator_quietly(stream)
 
     await _admit(context_wrapper._budget, model, session, streamed_result=streamed_result)
+    preview = (
+        streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
+        if streamed_result._approved_output is not None and current_redactor() is None
+        else None
+    )
     retry_stream = stream_response_with_retry(
         get_stream=controlled_stream if control is not None else get_model_stream,
-        preview=(
-            streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
-            if streamed_result._approved_output is not None and current_redactor() is None
-            else None
-        ),
+        preview=preview,
         rewind=rewind_model_request,
         retry_settings=model_settings.retry,
         get_retry_advice=model.get_retry_advice,
@@ -3131,6 +3136,7 @@ async def get_new_response(
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,

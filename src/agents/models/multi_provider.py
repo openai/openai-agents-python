@@ -223,10 +223,14 @@ class MultiProvider(ModelProvider):
 
         raise UserError(f"Unknown prefix: {prefix}")
 
-    def _validate_model_selection(self, configured: str | None, selected: str) -> None:
-        original, _ = self._model_route(configured)
-        target, _ = self._model_route(selected)
-        if target is original or (isinstance(target, str) and target == original):
+    def _validate_model_selection(self, configured: str | None, selected: str | None) -> None:
+        original, configured_name = self._model_route(configured)
+        target, selected_name = self._model_route(selected)
+        if target is original:
+            if isinstance(original, MultiProvider):
+                original._validate_model_selection(configured_name, selected_name)
+            return
+        if isinstance(original, str) and isinstance(target, str) and target == original:
             return
         raise UserError(
             "model_selector cannot switch providers. Choose a model on the same provider."

@@ -10,7 +10,7 @@ import inspect
 import json
 import sys
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from importlib.util import find_spec
 from pathlib import Path
 from types import FunctionType, ModuleType, UnionType
@@ -1056,7 +1056,9 @@ def _type_alias_definition(
         }
     if origin is not None:
         if not isinstance(origin, type) or not (
-            origin.__module__ == "agents" or origin.__module__.startswith("agents.")
+            origin is Awaitable
+            or origin.__module__ == "agents"
+            or origin.__module__.startswith("agents.")
         ):
             raise TypeError(f"unsupported public generic type alias origin: {origin!r}")
         return {

@@ -18,6 +18,7 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RetryDecision,
     RunConfig,
+    RunControl,
     Runner,
     function_tool,
     output_guardrail,
@@ -552,7 +553,8 @@ async def test_hosted_child_raw_text_never_reaches_approval(previews):
 
 
 @pytest.mark.parametrize("ending", ["eof", "error", "cancel", "timeout"])
-async def test_pending_approval_expires_before_attempt_cleanup(ending):
+@pytest.mark.parametrize("controlled", [False, True])
+async def test_pending_approval_expires_before_attempt_cleanup(ending, controlled):
     entered, closing, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
     reply = asyncio.get_running_loop().create_future()
 
@@ -605,7 +607,7 @@ async def test_pending_approval_expires_before_attempt_cleanup(ending):
         model=Model([[assistant_message("draft")]]),
         model_settings=ModelSettings(timeout=1 if ending == "timeout" else None),
     )
-    run = Runner.run_streamed(root, "start")
+    run = Runner.run_streamed(root, "start", control=RunControl() if controlled else None)
     reading = asyncio.create_task(collect(run.subscribe_approved_output(approve)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
