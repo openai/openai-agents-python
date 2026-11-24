@@ -15,6 +15,7 @@ from agents import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelSettings,
+    ModelTimeoutError,
     RunConfig,
     RunContextWrapper,
     RunControl,
@@ -516,6 +517,66 @@ async def test_approved_tool_resume_accepts_input_before_tool_finishes(
         assert model.calls[1].input[-2]["type"] == "function_call_output"
     finally:
         await finish(task, release)
+
+
+@pytest.mark.parametrize("outcome", ["complete", "failure", "provider_timeout", "cancel"])
+async def test_control_closes_provider_stream_without_aclose(outcome: str) -> None:
+    entered = asyncio.Event()
+    close_calls = 0
+    failure = (
+        ModelTimeoutError(3) if outcome == "provider_timeout" else RuntimeError("provider failed")
+    )
+
+    # ScriptedModel normally returns an async generator, which always exposes aclose().
+    class CloseOnlyModel(ScriptedModel):
+        def stream_response(self, *args: Any, **kwargs: Any) -> Any:
+            events = super().stream_response(*args, **kwargs)
+
+            class Stream:
+                def __aiter__(self) -> Stream:
+                    return self
+
+                async def __anext__(self) -> Any:
+                    entered.set()
+                    if outcome == "cancel":
+                        await asyncio.Event().wait()
+                    return await anext(events)
+
+                def close(self) -> None:
+                    nonlocal close_calls
+                    close_calls += 1
+                    raise RuntimeError("cleanup failed")
+
+            return Stream()
+
+    model = CloseOnlyModel(
+        [failure if outcome in ("failure", "provider_timeout") else [assistant_message("done")]]
+    )
+    result = Runner.run_streamed(
+        Agent(name="worker", model=model),
+        "start",
+        control=RunControl(),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    if outcome in ("failure", "provider_timeout"):
+        with pytest.raises(type(failure)) as caught:
+            await consume()
+        assert caught.value is failure
+    else:
+        if outcome == "cancel":
+            try:
+                await wait(entered)
+            finally:
+                result.cancel()
+        await consume()
+        if outcome == "complete":
+            assert result.final_output == "done"
+    assert close_calls == 1
 
 
 @pytest.mark.parametrize("streamed", [False, True])
