@@ -1152,6 +1152,31 @@ class Foo(TypedDict):
 
 
 @pytest.mark.asyncio
+async def test_streamed_tool_turn_refreshes_output_type() -> None:
+    class Total(TypedDict):
+        amount: int
+
+    @function_tool
+    async def select_total() -> str:
+        agent.output_type = Total
+        return "selected"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("select_total", "{}", call_id="call_1")],
+            [get_text_message('{"amount": 42}')],
+        ]
+    )
+    agent = Agent(name="test", model=model, tools=[select_total], output_type=Foo)
+
+    result = Runner.run_streamed(agent, "total")
+    async for _ in result.stream_events():
+        pass
+
+    assert result.final_output == {"amount": 42}
+
+
+@pytest.mark.asyncio
 async def test_structured_output():
     model = ScriptedModel()
     agent_1 = Agent(

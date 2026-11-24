@@ -2490,7 +2490,9 @@ async def run_single_turn_streamed(
     output_schema = get_output_schema(execution_agent)
 
     streamed_result.current_agent = public_agent
-    streamed_result._current_agent_output_schema = get_output_schema(public_agent)
+    streamed_result._current_agent_output_schema = (
+        output_schema if execution_agent is public_agent else get_output_schema(public_agent)
+    )
 
     system_prompt, prompt_config = await gather_with_cancel(
         execution_agent.get_system_prompt(context_wrapper),
