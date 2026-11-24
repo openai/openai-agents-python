@@ -30,6 +30,7 @@ from .session import await_session_mutation
 if TYPE_CHECKING:
     from ..agent import Agent
     from ..models._run_context import ModelToolHooks
+    from ..run_config import ToolNotFoundBehavior
     from ..run_state import ContextDeserializer, ContextOverride, RunState
 
 
@@ -227,15 +228,30 @@ class ResumableSession:
         """Read the latest accepted native plan in this idle checkpoint without inference.
 
         Use `CodexProvider(config_overrides=["tools.update_plan.enabled=true"])`
-        with this session. After the run finishes or pauses for approval, read
-        `session.codex_checklist`. To reopen, use
-        `session = await ResumableSession.resume(store, session_id)` first.
+        as the model provider in `config`. Read the snapshot after `Runner.run`
+        returns or after you finish iterating over `stream_events()`, including
+        when the run pauses for approval.
+
+        ```python
+        result = await Runner.run(agent, message, session=session, run_config=config)
+        snapshot = session.codex_checklist
+        steps = None if snapshot is None else snapshot.plan
+        ```
+
+        `None` means no saved checklist. Each accepted update replaces the
+        snapshot. An explicit clear leaves `plan == ()` and keeps the
+        `thread_id` and `turn_id` of the update that cleared the steps.
+        With no accepted update, even after invalid tool arguments, the
+        previous snapshot stays unchanged.
+
+        This property reads the loaded checkpoint. After another worker saves
+        a change, reload with `session = await ResumableSession.resume(store, session_id)`.
+        Reading or loading an active checkpoint raises `ResumableSessionError`
+        with `reason == "active"`.
 
         RunConfig.redact_text scrubs saved step text and explanations. It does
         not cover work inside Codex or rewrite an existing checkpoint.
 
-        Each accepted update replaces the whole list. An empty plan clears it.
-        Invalid tool arguments leave it unchanged. None means no saved plan.
         History-only sessions cannot store this snapshot. Nested agent tools
         do not update their parent session. Use the plan for display only. It
         cannot authorize tools or resume a native thread. Older SDK versions
@@ -367,16 +383,28 @@ class ResumableSession:
     def _get_history(self) -> list[TResponseInputItem]:
         return copy.deepcopy(self._checkpoint.history)
 
-    async def _begin_run(self, input: Any, tool_hooks: ModelToolHooks) -> None:
+    async def _begin_run(
+        self, input: Any, tool_hooks: ModelToolHooks, tool_not_found_behavior: ToolNotFoundBehavior
+    ) -> None:
         self._validate_run(input)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
         if self.is_paused:
             from ..run_internal.native_approvals import validate_native_restore_hooks
+            from ..run_internal.tool_planning import (
+                _check_approved_functions,
+                _check_workspace_approvals,
+            )
 
             processed = input._last_processed_response
             if processed is not None and processed.native_approvals:
                 validate_native_restore_hooks(processed, tool_hooks)
+            else:
+                pending = input.get_interruptions()
+                if processed is not None:
+                    _check_workspace_approvals(pending, tool_hooks.agent, processed)
+                if tool_not_found_behavior == "raise_error":
+                    _check_approved_functions(pending, tool_hooks.agent, tool_hooks.context)
         active = self._checkpoint.model_copy(
             update={
                 "version": 2 if current_redactor() is not None else self._checkpoint.version,
