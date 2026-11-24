@@ -46,6 +46,7 @@ HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
 RELEASED_1_21_WRITER = "17d994bd3045dae71acda676a4ef4762ed8ecd94"
 RELEASED_1_22_WRITER = "0a74177ed23ffb0c2dba24eda3fb12fb58e3e09d"
 CODEX_1_22_WRITER = "448ae7a3d9c5ddbfa0656a04a021ffb3f3c16530"
+RESUMABLE_1_23_WRITER = "d48e3c89ecdb71ad78d9eb90ed97bf632598d51c"
 GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
@@ -590,6 +591,12 @@ state._pending_session_write = {
 }
 """,
     ),
+    Scenario(
+        "1.23",
+        RESUMABLE_1_23_WRITER,
+        "requires_resumable_session",
+        'state._resumable_binding = "detached"',
+    ),
 )
 
 
@@ -637,6 +644,7 @@ MINIMAL_SCENARIOS = (
     Scenario("1.20", GUARDRAIL_1_20_WRITER, "minimal", ""),
     Scenario("1.21", RELEASED_1_21_WRITER, "minimal", ""),
     Scenario("1.22", RELEASED_1_22_WRITER, "minimal", ""),
+    Scenario("1.23", RESUMABLE_1_23_WRITER, "minimal", ""),
 )
 
 

@@ -61,7 +61,7 @@ class GoalThread:
             raise RuntimeError("Local goal thread has no current owner in this task")
 
     async def get(self) -> CodexGoal | None:
-        """Return the stored goal or None for a root without one."""
+        """Read a snapshot in any stored status, or return None if the root has no goal."""
         self._check()
         raw: str = await await_session_mutation(self._native.get())
         return None if raw == "null" else CodexGoal.model_validate_json(raw)
@@ -69,10 +69,13 @@ class GoalThread:
     async def set_paused(self, objective: str, *, token_budget: int | None = None) -> CodexGoal:
         """Set a paused objective. An omitted budget preserves an existing grant.
 
+        With write permission, you can create a goal or edit one with status
+        `paused` or `budgetLimited`. Editing a goal in any other status raises
+        `ValueError`. A goal can stay `budgetLimited`. Inspect the returned status.
+
         Use 1–4,000 characters after trimming and a positive signed 64-bit budget.
-        A new goal uses the profile ceiling, if any. A budget-limited goal
-        may stay limited. Inspect the returned status. After a storage error
-        or cancellation, read the goal before considering another write.
+        A new goal uses the profile ceiling, if any. After a storage error or
+        cancellation, read the goal before considering another write.
         """
         self._check()
         if token_budget is not None and (
@@ -95,13 +98,17 @@ async def open_goal(
 
     Supply an existing, private absolute profile path and an authorized ID.
     Pass None explicitly to create a root. Creation and each edit require
-    can_write() to return True. Only the opening task may use the handle.
-    Use a wheel with native Codex support. No operation starts a model turn.
+    can_write() to return True. Use a wheel with native Codex support.
+    Opening or editing a goal does not schedule work or start a model turn.
     Runner uses separate ephemeral threads and does not charge this budget.
 
     Save the profile and ID in your application before the first edit.
     Authorize reads there too. Local history can retain previous objectives.
-    Even reads acquire a writer lock and may initialize storage resources.
+    Even a read-only open acquires the writer lock and may initialize storage.
+    If another worker holds the lock, opening the root raises `RuntimeError`.
+    A stored `active` status alone does not prevent reading. Await reads and
+    edits in the task that opened the root. Exiting `async with` releases the lock.
+
     Profile limits load on open. Reopen after a policy change. An edit that
     retains a grant above the new ceiling requires an explicit smaller budget.
 
@@ -113,12 +120,13 @@ async def open_goal(
             remember(root.thread_id)
             return await root.set_paused("Review the draft", token_budget=1000)
 
-    async def display(profile, saved_id):
+    async def inspect_later(profile, saved_id):
         async with open_goal(profile, thread_id=saved_id) as root:
-            return await root.get()
+            goal = await root.get()
+        return None if goal is None else goal.status
     ```
 
-    A missing or busy root raises an error. A started write can finish even
+    A missing root raises an error. A started write can finish even
     if the caller cancels. Creation can leave an empty root, and an edit can
     persist intent before a failed write or change the goal before a failed
     receipt. No automatic retries.

@@ -29,6 +29,32 @@ pytestmark = pytest.mark.allow_call_model_methods
 MODEL = "fixture-model"
 
 
+def test_worker_exit_joins_native_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.environ.get("CODEX_TRACING_NATIVE_TEST") != "1":
+        pytest.skip("Set CODEX_TRACING_NATIVE_TEST=1 and use an installed SDK wheel.")
+
+    workers: list[threading.Thread] = []
+
+    async def close() -> None:
+        provider = CodexProvider(cwd=tmp_path)
+        provider._native_manager()
+        loop = asyncio.get_running_loop()
+        schedule = loop.call_soon_threadsafe
+
+        def observe(*args: Any, **kwargs: Any) -> asyncio.Handle:
+            workers.append(threading.current_thread())
+            return schedule(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "call_soon_threadsafe", observe)
+            await provider.aclose()
+
+    # The worker can exit immediately after asyncio.run, even after an approval pause.
+    asyncio.run(close())
+    assert workers
+    assert all(t is threading.current_thread() or not t.is_alive() for t in workers)
+
+
 class _LoopbackServer(ThreadingHTTPServer):
     def server_bind(self) -> None:
         # Numeric loopback avoids reverse DNS and never reaches a model service.
@@ -405,6 +431,178 @@ async def _exercise_retry_parity(
             assert "omitted" in exported
             assert "data:image/" not in exported
             assert "iVBORw0KGgo" not in exported
+    finally:
+        try:
+            await provider.aclose()
+        finally:
+            server.close()
+            set_trace_processors([SPAN_PROCESSOR_TESTING])
+            tracer_provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["openai", "codex"])
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "stream"])
+async def test_text_redaction_survives_approval_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    provider_name: str,
+    streamed: bool,
+) -> None:
+    if provider_name == "codex" and os.environ.get("CODEX_TRACING_NATIVE_TEST") != "1":
+        pytest.skip("Set CODEX_TRACING_NATIVE_TEST=1 and use an installed SDK wheel.")
+    if os.environ.get("CODEX_TRACING_NATIVE_TEST") == "1":
+        import agents
+
+        assert (
+            not Path(agents.__file__)
+            .resolve()
+            .is_relative_to(Path(__file__).resolve().parents[2] / "src")
+        ), "Run with the installed wheel and pytest -o pythonpath=."
+    pytest.importorskip("opentelemetry.sdk.trace")
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from agents import ResumableSession, _debug
+    from agents.extensions.tracing import OpenTelemetryTracingProcessor
+
+    writes: list[str] = []
+
+    # Installed-wheel CI checks out only this test module and its tracing fixtures.
+    class RecordingStore:
+        async def load(self, session_id: str) -> str | None:
+            return writes[-1] if writes else None
+
+        async def save(self, session_id: str, value: str, *, expected: str | None) -> bool:
+            assert expected == await self.load(session_id)
+            writes.append(value)
+            return True
+
+    canaries = (
+        "prompt-canary",
+        "argument-canary",
+        "result-canary",
+        "answer-canary",
+        "policy-canary",
+    )
+
+    def redact_text(value: str) -> str:
+        for canary in canaries:
+            value = value.replace(canary, "[redacted]")
+        return value
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setattr(_debug, "DONT_LOG_MODEL_DATA", False)
+    monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
+    caplog.set_level("DEBUG", logger="openai.agents")
+    exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
+    callbacks = _Callbacks()
+    set_trace_processors(
+        [callbacks, OpenTelemetryTracingProcessor(tracer_provider=tracer_provider)]
+    )
+    server = _ResponsesFixture()
+    provider = _provider(provider_name, tmp_path, server)
+    tool_inputs: list[str] = []
+    stream_events: list[Any] = []
+
+    @tool(needs_approval=True)
+    async def lookup(key: str) -> str:
+        """Look up one synthetic record after approval."""
+        tool_inputs.append(key)
+        return "result-canary"
+
+    def agent() -> Agent[Any]:
+        return Agent(
+            name="worker",
+            instructions=lambda ctx, agent: "Rule policy-canary",
+            model=MODEL,
+            tools=[lookup],
+        )
+
+    config = RunConfig(
+        model_provider=provider,
+        tracing={"operation_detail": "content"},
+        trace_include_sensitive_data=True,
+        redact_text=redact_text,
+    )
+
+    async def run(input: Any, session: ResumableSession | None = None) -> Any:
+        if not streamed:
+            return await Runner.run(agent(), input, session=session, run_config=config)
+        result = Runner.run_streamed(agent(), input, session=session, run_config=config)
+        async for event in result.stream_events():
+            stream_events.append(event)
+        return result
+
+    async def exercise() -> Any:
+        store = RecordingStore()
+        original = await ResumableSession.create(store)
+        paused = await run("prompt-canary", original)
+        assert len(paused.interruptions) == 1
+        assert json.loads(paused.interruptions[0].raw_item.arguments) == {"key": "[redacted]"}
+        assert tool_inputs == []
+        assert original.is_paused
+        # Rebuild the agent and session from storage, retaining no paused RunState.
+        restored = await ResumableSession.resume(store, original.session_id)
+        state = await restored.load_state(agent())
+        state.approve(state.get_interruptions()[0])
+        result = await run(state)
+        assert not restored.is_paused
+        assert json.loads(writes[-1])["status"] == "ready"
+        return result
+
+    try:
+        result = await asyncio.wait_for(exercise(), timeout=30)
+        assert result.final_output == "[redacted]"
+        assert tool_inputs == ["[redacted]"]
+        for request in (server.requests[0], server.requests[-1]):
+            assert "Rule [redacted]" in json.dumps(request)
+            assert "policy-canary" not in json.dumps(request)
+        assert "[redacted]" in json.dumps(server.requests[0]["input"])
+        assert any(
+            item.get("type") == "function_call_output" and item.get("output") == "[redacted]"
+            for item in server.requests[-1]["input"]
+        )
+        assert len(writes) >= 5
+        assert any(json.loads(value)["status"] == "paused" for value in writes)
+        spans = callbacks.get_ordered_spans()
+        models = [span for span in spans if span.span_data.type == "response"]
+        functions = [span for span in spans if span.span_data.type == "function"]
+        assert models and functions
+        for span in [*models, *functions]:
+            assert span.span_data.operation.detail == "metadata"
+            # Inspect the payload before export sanitization can conceal a leak.
+            assert span.span_data.input is None
+            assert span.span_data.output is None
+            if isinstance(span.span_data, ResponseSpanData):
+                assert span.span_data.response is None
+        otel = exporter.get_finished_spans()
+        assert otel
+        captured = [
+            *writes,
+            repr([span.span_data.export() for span in spans]),
+            repr([(dict(span.attributes or {}), span.events) for span in otel]),
+            repr(result.new_items),
+            repr(stream_events),
+            caplog.text,
+            repr(
+                [
+                    vars(record)
+                    for record in caplog.records
+                    if record.name.startswith("openai.agents")
+                ]
+            ),
+        ]
+        for canary in canaries:
+            assert all(canary not in value for value in captured), canary
+        if streamed:
+            assert stream_events
+            assert any(event.type == "run_item_stream_event" for event in stream_events)
+            assert not any(event.type == "raw_response_event" for event in stream_events)
     finally:
         try:
             await provider.aclose()

@@ -6628,6 +6628,34 @@ async def test_runner_uses_public_agent_for_non_function_tool_outputs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_manager_waits_for_streamed_sandbox_snapshot() -> None:
+    release = asyncio.Event()
+    session = _PersistingStopSession(Manifest(), release)
+    child = SandboxAgent(name="child", model=ScriptedModel([[get_final_output_message("done")]]))
+    manager = Agent(
+        name="manager",
+        model=ScriptedModel([[get_function_tool_call("delegate", '{"input":"go"}')]]),
+        tools=[child.as_tool("delegate", "Ask child", on_stream=lambda _: None)],
+    )
+    parent = asyncio.create_task(
+        Runner.run(manager, "go", run_config=_sandbox_run_config(_FakeClient(session)))
+    )
+    try:
+        while session.stop_calls == 0 and not parent.done():
+            await asyncio.sleep(0)
+        parent.cancel()
+        await asyncio.sleep(0)
+        parent.cancel()
+        asyncio.get_running_loop().call_later(0.025, release.set)
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        assert session.stop_calls == 1
+        assert cast(_MarkerSnapshot, session.state.snapshot).marker == "persisted"
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
 async def test_sandbox_agent_as_tool_uses_runner_sandbox_prep() -> None:
     child_model = ScriptedModel(steps=[[get_final_output_message("child done")]])
     parent_model = ScriptedModel(
