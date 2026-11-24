@@ -27,20 +27,26 @@ async def answer(client: AsyncOpenAI, decisions_model: str, text: str):
         "billing": Agent(name="Billing", instructions="Help with invoices."),
         "account": Agent(name="Account", instructions="Help with account settings."),
     }
-    source.handoffs.append(
-        decision_handoff(
-            source,
-            provider=OpenAIDecisions(client, model=decisions_model),
-            question="Which team can help?",
-            targets=targets,
-            timeout=10,
-        )
+    provider = OpenAIDecisions(client, model=decisions_model)
+    route = decision_handoff(
+        source, question="Which team can help?", targets=targets, provider=provider
     )
+    source.handoffs.append(route)
     return await Runner.run(source, text)
 ```
 
+A plain `source.clone()` shares the handoff list, but the clone cannot use the source's Decisions route. To give the clone its own route, use the same targets and provider from the example above.
+
+```python
+clone = source.clone(handoffs=[])
+route = decision_handoff(clone, question="Which team can help?", targets=targets, provider=provider)
+clone.handoffs.append(route)
+```
+
+This discards all previously installed handoffs **on the clone only**. Add back any other handoffs the clone is allowed to use. The source keeps its original list.
+
 - **Evidence.** The model supplies one nonblank `input` string of up to 8,192 UTF-8 bytes. The provider receives that string, the question and the allowed choices. The model can copy sensitive text into the string. The specialist receives the usual handoff history. Set the handoff's `input_filter` when the specialist needs less context.
-- **Authority.** The handoff belongs to the source agent. Create a new handoff for a clone. Labels bind to the original agent objects and names. Removing, replacing or renaming a target makes it unavailable. Use a synchronous, side-effect-free `is_available(ctx, label)` to check application permissions. The handoff checks the selected route again before transfer. Runner keeps the run context, call IDs, tool restrictions and approvals.
+- **Authority.** The handoff belongs to the source agent. Labels bind to the original agent objects and names. Removing, replacing or renaming a target makes it unavailable. Use a synchronous, side-effect-free `is_available(ctx, label)` to check application permissions. The handoff checks the selected route again before transfer. Runner keeps the run context, call IDs, tool restrictions and approvals.
 - **Failures.** Refusals and invalid answers raise `DecisionError`. Revoked routes raise `ValueError`. The provider deadline defaults to 30 seconds. On timeout or cancellation, the SDK waits for provider cleanup and discards late answers. Timeout raises `asyncio.TimeoutError`. If the provider cancels its own request, the SDK raises `RuntimeError`. Transport errors propagate. There is no automatic fallback or retry. To return an error to the primary model, explicitly set the handoff's `failure_error_function`. For immediate stream cancellation, call `result.cancel()` and drain `result.stream_events()`.
 - **Error privacy.** When either model or tool data logging is disabled, the handoff removes routing traceback frames and exception chains before propagating a failure. Provider errors and metadata can still contain sensitive data. Keep custom error messages and recovery callbacks safe to share.
 - **Scope.** Both Runner modes support specialist selection. Decisions cannot invoke a tool, grant permissions or tell the source to continue. Realtime and dynamic agent factories are outside this integration.

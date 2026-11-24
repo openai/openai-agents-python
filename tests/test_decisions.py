@@ -619,18 +619,39 @@ async def test_immediate_stream_cancellation_drains_late_selection(delegate):
     assert result.last_agent is source
 
 
-async def test_primary_can_answer_without_selection_and_clones_need_their_own_route():
+@pytest.mark.parametrize("stream", [False, True])
+async def test_primary_can_answer_without_selection_and_clones_need_their_own_route(stream):
     provider = Provider("blue")
-    model = ScriptedModel([[assistant_message("direct")], [assistant_message("direct")]])
+    model = ScriptedModel(
+        [
+            [assistant_message("direct")],
+            [assistant_message("direct")],
+            [function_call("select_specialist", {"input": "evidence"}, call_id="clone")],
+            [function_call("select_specialist", {"input": "evidence"}, call_id="transfer")],
+        ]
+    )
     source = Agent(name="Source", model=model)
+    original = Agent(name="Blue", model=ScriptedModel([[assistant_message("original")]]))
     route = decision_handoff(
-        source, provider=provider, question="Which?", targets={"blue": Agent(name="Blue")}
+        source, question="Which?", targets={"blue": original}, provider=provider
     )
     source.handoffs.append(route)
-    for agent in (source, source.clone()):
-        assert (await run(agent, False)).final_output == "direct"
+    shallow = source.clone()
+    assert shallow.handoffs is source.handoffs
+    for agent in (source, shallow):
+        assert (await run(agent, stream)).final_output == "direct"
     assert len(model.calls[0].handoffs) == 1 and not model.calls[1].handoffs
     assert not provider.requests
+
+    clone = source.clone(handoffs=[])
+    alternate = Agent(name="Blue", model=ScriptedModel([[assistant_message("alternate")]]))
+    clone.handoffs.append(
+        decision_handoff(clone, question="Which?", targets={"blue": alternate}, provider=provider)
+    )
+    assert source.handoffs == [route]
+    assert (await run(clone, stream)).last_agent is alternate
+    assert (await run(source, stream)).last_agent is original
+    assert len(provider.requests) == 2
 
 
 async def test_scope_exit_during_cancelled_request_joins_without_interrupting_cleanup():
