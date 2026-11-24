@@ -60,6 +60,12 @@ from ._codex_tool_hooks import CodexToolHooks
 from ._codex_tracing import CodexOperationTracing
 from ._codex_usage import _add_sample_usage, _usage
 from ._run_context import ModelToolHooks, get_model_tool_hooks
+from .codex_children import (
+    CodexChildLimitError as CodexChildLimitError,
+    CodexChildren as CodexChildren,
+    CodexRole as CodexRole,
+    _delegation_error,
+)
 from .interface import Model, ModelProvider, ModelTracing
 
 
@@ -71,6 +77,54 @@ class CodexProvider(ModelProvider):
     command or edit for approval. The SDK session ID stays the same across workers.
     Supply the same SDK tool hooks on both workers. The user reviews the prepared
     input. Output preparation runs after execution.
+
+    Native delegation requires `children=CodexChildren(max_delegation_attempts=1)`
+    or another explicit limit on this provider, even if local settings enable it.
+    Omit `children` for ordinary workspace tools or Python `Agent.as_tool` calls.
+
+    To choose a model for native children, run `codex debug models` with a CLI that matches
+    the Codex Core revision in the SDK wheel. Use the same workspace,
+    credentials, provider and catalog settings. With `jq`, list candidate slugs:
+
+    ```sh
+    codex debug models | jq -r '.models[]
+        | select(.visibility == "list" and .multi_agent_version == "v1")
+        | .slug'
+    ```
+
+    For API keys, add `and .supported_in_api == true` inside `select(...)`.
+    A catalog entry does not guarantee access. If none qualifies, there is
+    no listed V1 candidate.
+
+    With a saved Codex login, pass the exact `slug` to `get_model`:
+
+    ```python
+    import asyncio
+
+    from agents import Agent, Runner
+    from agents.models.codex import CodexChildren, CodexProvider, CodexRole
+
+    async def main(slug):
+        editor = CodexRole("editor", "Edits prose", "Return a concise rewrite.")
+        provider = CodexProvider(children=CodexChildren(roles=[editor], max_delegation_attempts=1))
+        try:
+            agent = Agent(name="Manager", model=provider.get_model(slug))
+            result = await Runner.run(agent, "Ask the editor to shorten 'at this point in time'.")
+            print(result.final_output)
+        finally:
+            await provider.aclose()
+
+    asyncio.run(main(input("V1 model slug: ")))
+    ```
+
+    The model chooses whether to delegate. See `CodexChildren` for the attempts
+    that count. Limits reset on each native invocation and do not cap model
+    requests, tokens or cost.
+    This profile disables workspace tools and Code Mode. Enabled MCP servers,
+    SDK tools, handoffs, SDK sandboxes, update_plan, native tool hooks and saved
+    workspace approvals are incompatible. Core can still accept structured inputs and read local
+    context under the parent's permissions. Core owns child results and joins
+    the tree when the request ends. Child IDs cannot resume in another request.
     """
 
     _supports_stored_response_id = False
@@ -81,7 +135,11 @@ class CodexProvider(ModelProvider):
         cwd: str | os.PathLike[str] | None = None,
         config_overrides: Sequence[str] = (),
         api_key: str | None = None,
+        children: CodexChildren | None = None,
     ) -> None:
+        if children is not None and not isinstance(children, CodexChildren):
+            raise TypeError("children must be a CodexChildren declaration.")
+        self._children = children
         self._cwd = str(Path(cwd).resolve() if cwd is not None else Path.cwd())
         self._config_overrides = tuple(config_overrides)
         self._api_key = api_key
@@ -105,8 +163,11 @@ class CodexProvider(ModelProvider):
                 / "_codex_bin"
                 / ("codex-sdk-runtime.exe" if os.name == "nt" else "codex-sdk-runtime")
             )
+            options = {}
+            if self._children is not None:
+                options["children"] = self._children
             self._manager = native.Manager(
-                self._cwd, str(executable), list(self._config_overrides), self._api_key
+                self._cwd, str(executable), list(self._config_overrides), self._api_key, **options
             )
         return self._manager
 
@@ -119,10 +180,15 @@ class CodexProvider(ModelProvider):
     def get_model(self, model_name: str | None) -> Model:
         return _CodexModel(model_name, self)
 
+    def _check_workspace_approval(self) -> None:
+        if self._children is not None:
+            raise UserError("Native children cannot resume workspace approvals.")
+
     async def _run_approved_native_call(
         self, checkpoint: dict[str, Any], tracing: ModelTracing, hooks: CodexToolHooks | None
     ) -> str:
         """Run only the saved invocation, without a model turn or its old Codex home."""
+        self._check_workspace_approval()
         if checkpoint.get("cwd") != self._cwd:
             raise UserError("This Codex approval belongs to a different workspace or SDK version.")
 
@@ -212,6 +278,46 @@ def _pending_native_call(
     ):
         return CodexPendingCustomCall(**wire, checkpoint=checkpoint)
     raise UserError("This Codex approval cannot safely be resumed on another worker.")
+
+
+_CHILD_TOOL_CONFLICT = "Native children cannot use SDK tools, handoffs, or tool hooks."
+
+
+def _validate_static_children(bindings: ModelToolHooks) -> None:
+    """Reject known conflicts before a fresh checkpoint claim, without discovery."""
+    from ..agent import Agent
+    from ..run_internal.tool_declarations import _covered
+    from ..tool import FunctionTool
+
+    config, agent = bindings.run_config, bindings.agent
+    if config is None or type(agent) is not Agent:
+        return
+    selected = config.model if config.model is not None else agent.model
+    if type(selected) is _CodexModel:
+        provider, name = selected._provider, selected._name
+    elif not isinstance(selected, Model) and type(config.model_provider) is CodexProvider:
+        provider, name = config.model_provider, selected
+    else:
+        return
+    if provider._children is None:
+        return
+    settings = agent.model_settings.resolve(config.model_settings)
+    if settings.tool_choice == "required":
+        raise UserError("Native children cannot require an SDK tool. Use tool_choice='auto'.")
+    policy = config.tool_execution.prepare_tool_declaration if config.tool_execution else None
+    if (
+        any(
+            not isinstance(t, FunctionTool)
+            or (t.is_enabled is True and (policy is None or not _covered(t)))
+            for t in agent.tools
+        )
+        or any(isinstance(h, Agent) or h.is_enabled is True for h in agent.handoffs)
+        or _uses_sdk_workspace([], bindings)
+        or CodexToolHooks.for_run(bindings, set()) is not None
+    ):
+        raise UserError(_CHILD_TOOL_CONFLICT)
+    if not name or not name.strip():
+        raise UserError("Native children require an exact V1 model slug from `codex debug models`.")
 
 
 def _uses_sdk_workspace(tools: list[Tool], bindings: ModelToolHooks | None) -> bool:
@@ -308,6 +414,13 @@ class _CodexModel(Model):
         return await self._provider._run_approved_native_call(checkpoint, tracing, hooks)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice:
+        # A retry would grant a fresh allowance and expose the refusal to policy callbacks.
+        if isinstance(request.error, CodexChildLimitError):
+            from ..retry import ModelRetryNormalizedError
+
+            return ModelRetryAdvice(
+                replay_safety="unsafe", normalized=ModelRetryNormalizedError(is_abort=True)
+            )
         # Native Codex tools may have changed the workspace before a failed response.
         return ModelRetryAdvice(replay_safety="unsafe")
 
@@ -407,6 +520,9 @@ class _CodexModel(Model):
         bindings = get_model_tool_hooks()
         sdk_sandbox = _uses_sdk_workspace(tools, bindings)
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
+        children = provider._children
+        if children is not None and (tools or handoffs or sdk_sandbox or native_hooks):
+            raise UserError(_CHILD_TOOL_CONFLICT)
         if sdk_sandbox:
             system_instructions = "\n\n".join(
                 filter(
@@ -517,7 +633,9 @@ class _CodexModel(Model):
             observations.bind(
                 thread, _approval_tracing(tracing, native_hooks) if recover else tracing
             )
-            turn_id = await thread.start_turn(json.dumps(turn_input), json.dumps(schema), recover)
+            turn_id = await thread.start_turn(
+                json.dumps(turn_input), json.dumps(schema), recover and children is None
+            )
             response = Response(
                 id=turn_id,
                 created_at=time.time(),
@@ -570,6 +688,7 @@ class _CodexModel(Model):
                     if (
                         message.get("turn_id") != turn_id
                         or pending_approval is not None
+                        or children is not None
                         or (native_hooks is not None and not recover)
                         or sdk_sandbox
                         or require_sdk_call
@@ -637,6 +756,8 @@ class _CodexModel(Model):
                         raise native_hooks.error
                     break
                 if kind == "error":
+                    if children is not None and thread.delegation_error:
+                        raise _delegation_error(*thread.delegation_error)
                     raise RuntimeError("Codex model turn failed.")
                 if kind == "token_count":
                     info = message.get("info")
@@ -888,6 +1009,11 @@ class _CodexModel(Model):
                 # Keep the attempt failure primary when joined cleanup also fails.
                 if failure is None:
                     raise
+            else:
+                # A parent can finish without waiting for a child that exceeded the limit.
+                if failure is None and children is not None and thread.delegation_error:
+                    completed = None
+                    raise _delegation_error(*thread.delegation_error)
             finally:
                 # Pending items carry a private recovery checkpoint.
                 observations.close(completed if pending_approval is None else None)

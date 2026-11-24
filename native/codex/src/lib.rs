@@ -1,5 +1,6 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod approval_files;
+mod children;
 mod config;
 mod native_approval;
 mod operation_tracing;
@@ -45,6 +46,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// A detached cleanup task keeps running when a Python awaitable is cancelled.
 struct ThreadRecord {
+    role_files: std::sync::Mutex<Option<tempfile::TempDir>>,
     services: Arc<CoreServices>,
     thread: Arc<CodexThread>,
     id: ThreadId,
@@ -61,8 +63,10 @@ impl ThreadRecord {
                 let thread = self.thread.clone();
                 let services = self.services.clone();
                 let id = self.id;
+                let role_files = self.role_files.lock().unwrap().take();
                 let operations = self.operations.clone();
                 let task = runtime().spawn(async move {
+                    let _role_files = role_files;
                     let result = async {
                         // Each fresh root owns an independent local agent runtime. Fence that
                         // exact tree before waiting, so native subagents cannot outlive an attempt.
@@ -142,12 +146,13 @@ struct Settings {
     helper: PathBuf,
     overrides: Vec<String>,
     api_key: Option<String>,
+    children: Option<Arc<children::Children>>,
 }
 
 struct StartRequest {
     tools: String,
     instructions: Option<String>,
-    settings: String,
+    settings: serde_json::Value,
     reply: oneshot::Sender<NativeResult<Arc<ThreadLease>>>,
 }
 
@@ -182,12 +187,16 @@ async fn start_thread(
     services: Arc<CoreServices>,
     request: &StartRequest,
 ) -> NativeResult<Arc<ThreadLease>> {
-    let settings = serde_json::from_str(&request.settings)
-        .map_err(|_| "Invalid Codex attempt settings.".to_owned())?;
-    let mut config = prepare_config(&services, &settings).await?;
+    let settings = &request.settings;
+    let mut config = prepare_config(&services, settings).await?;
     if let Some(instructions) = &request.instructions {
         config.developer_instructions = Some(instructions.clone());
     }
+    let role_files = services
+        .children
+        .as_ref()
+        .map(|profile| profile.install(&mut config))
+        .transpose()?;
     let values = serde_json::from_str(&request.tools)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
     let mut options = StartThreadOptions::new(config);
@@ -195,6 +204,7 @@ async fn start_thread(
         .get("sdk_sandbox")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
+        || services.children.is_some()
     {
         options.environments = Some(Vec::new());
     }
@@ -210,6 +220,7 @@ async fn start_thread(
                 .as_str()
                 .map(|name| tool_hooks::trusted(&created.thread, name))
                 .unwrap_or_default(),
+            role_files: std::sync::Mutex::new(role_files),
             model: created.session_configured.model,
             id: created.thread_id,
             thread: created.thread,
@@ -236,12 +247,15 @@ async fn manager_actor(
                         .send(Err("The Codex provider is closed.".to_owned()));
                     continue;
                 }
+                // V1 can address any thread in its manager. Never share a granted tree.
                 if services.is_none() {
                     match build_services(
                         settings.cwd.clone(),
                         settings.helper.clone(),
                         settings.overrides.clone(),
                         settings.api_key.clone(),
+                        settings.children.clone(),
+                        &request.settings,
                     )
                     .await
                     {
@@ -252,17 +266,18 @@ async fn manager_actor(
                         }
                     }
                 }
+                let host = if settings.children.is_some() {
+                    services.take()
+                } else {
+                    services.clone()
+                };
                 if closed.load(Ordering::Acquire) || request.reply.is_closed() {
                     let _ = request
                         .reply
                         .send(Err("The Codex provider is closed.".to_owned()));
                     continue;
                 }
-                let result = start_thread(
-                    services.as_ref().expect("initialized services").clone(),
-                    &request,
-                )
-                .await;
+                let result = start_thread(host.expect("initialized services"), &request).await;
                 if let Ok(thread) = &result {
                     threads.0.retain(|entry| {
                         entry.cleanup.get().is_none_or(|cleanup| {
@@ -332,12 +347,13 @@ struct Manager {
 #[pymethods]
 impl Manager {
     #[new]
-    #[pyo3(signature = (cwd, helper_executable, config_overrides, api_key=None))]
+    #[pyo3(signature = (cwd, helper_executable, config_overrides, api_key=None, *, children=None))]
     fn new(
         cwd: String,
         helper_executable: String,
         config_overrides: Vec<String>,
         api_key: Option<String>,
+        children: Option<children::Children>,
     ) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let closed = Arc::new(AtomicBool::new(false));
@@ -348,6 +364,7 @@ impl Manager {
                 helper: PathBuf::from(helper_executable),
                 overrides: config_overrides,
                 api_key,
+                children: children.map(Arc::new),
             },
             closed.clone(),
         ));
@@ -376,7 +393,8 @@ impl Manager {
             .send(ManagerCommand::Start(StartRequest {
                 tools: dynamic_tools_json,
                 instructions,
-                settings: settings_json,
+                settings: serde_json::from_str(&settings_json)
+                    .map_err(|_| py_error("Invalid Codex attempt settings."))?,
                 reply,
             }))
             .map_err(|_| py_error("The Codex manager stopped unexpectedly."))?;
@@ -441,6 +459,11 @@ impl Thread {
     fn tool_hook_orders(&self, server: &str) -> PyResult<Vec<(&'static str, i64)>> {
         self.lease.ensure_open().map_err(py_error)?;
         Ok(tool_hooks::registered(&self.lease.thread, server))
+    }
+
+    #[getter]
+    fn delegation_error(&self) -> Option<children::Denial> {
+        self.lease.services.budget.as_ref()?.denial()
     }
 
     fn inject_items<'py>(
