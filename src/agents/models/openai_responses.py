@@ -72,6 +72,7 @@ from ..tool import (
     Tool,
     ToolSearchTool,
     WebSearchTool,
+    _builtin_tool_choice_name,
     has_required_tool_search_surface,
     validate_responses_programmatic_tool_calling_configuration,
     validate_responses_tool_search_configuration,
@@ -1982,11 +1983,9 @@ class Converter:
             return "auto"
         elif tool_choice == "none":
             return "none"
-        elif tool_choice in {
-            "computer",
-            "computer_use",
-            "computer_use_preview",
-        } and cls._has_computer_tool(tools):
+        elif _builtin_tool_choice_name(
+            tool_choice
+        ) == "computer_use_preview" and cls._has_computer_tool(tools):
             return cls._convert_builtin_computer_tool_choice(
                 tool_choice=tool_choice,
                 model=model,
@@ -2010,7 +2009,7 @@ class Converter:
             "web_search_preview",
         }:
             # WebSearchTool advertises web_search for both search selectors.
-            hosted_type = "web_search" if tool_choice == "web_search_preview" else tool_choice
+            hosted_type = _builtin_tool_choice_name(tool_choice)
             if not any(tool["type"] == hosted_type for tool in tool_params) and any(
                 tool["type"] == "function"
                 and tool["name"] == tool_choice

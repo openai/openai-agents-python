@@ -123,6 +123,356 @@ def scrub(value: str) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("include", [False, True])
+@pytest.mark.parametrize("kind", ["max_turns", "model_refusal", "invalid_final_output"])
+async def test_handler_results_are_scrubbed_independently_of_history(streamed, include, kind):
+    from pydantic import BaseModel
+
+    from agents import RunErrorHandlerResult, RunHooks
+
+    from .test_responses import get_refusal_message
+
+    class Reply(BaseModel):
+        text: str
+
+    observed = []
+
+    class Hooks(RunHooks):
+        async def on_agent_end(self, context, agent, output):
+            observed.append(output)
+
+    structured = kind == "invalid_final_output"
+    step = get_refusal_message("no") if kind == "model_refusal" else assistant_message("oops")
+    agent = Agent(
+        name="worker", model=ScriptedModel([[step]]), output_type=Reply if structured else str
+    )
+
+    def handler(data):
+        text = data.context.context
+        return RunErrorHandlerResult(Reply(text=text) if structured else text, include)
+
+    options = {
+        "context": SECRET,
+        "hooks": Hooks(),
+        "run_config": RunConfig(redact_text=scrub),
+        "error_handlers": {kind: handler},
+        "max_turns": 0 if kind == "max_turns" else 1,
+    }
+    if streamed:
+        result = Runner.run_streamed(agent, "go", **options)
+        async for event in result.stream_events():
+            assert SECRET not in repr(event)
+    else:
+        result = await Runner.run(agent, "go", **options)
+    expected = Reply(text="[removed]") if structured else "[removed]"
+    assert result.final_output == expected
+    assert observed == [expected]
+    assert ("[removed]" in repr(result.to_input_list())) is include
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_private_fallback_cannot_complete_a_secret_outside_history(streamed):
+    agent = Agent(name="worker", model=ScriptedModel([]))
+    options = {
+        "run_config": RunConfig(redact_text=scrub),
+        "error_handlers": {
+            "max_turns": lambda _: {"final_output": "example", "include_in_history": False}
+        },
+        "max_turns": 0,
+    }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "private-", **options).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "private-", **options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_custom_tool_final_output_is_scrubbed(streamed):
+    from agents import ToolsToFinalOutputResult
+
+    @tool
+    def lookup() -> str:
+        return "ok"
+
+    def finish(context, results):
+        return ToolsToFinalOutputResult(is_final_output=True, final_output=context.context)
+
+    agent = Agent(
+        name="worker",
+        tools=[lookup],
+        tool_use_behavior=finish,
+        model=ScriptedModel([[function_call("lookup", {}, call_id="one")]]),
+    )
+    config = RunConfig(redact_text=scrub)
+    if streamed:
+        result = Runner.run_streamed(agent, "go", context=SECRET, run_config=config)
+        async for event in result.stream_events():
+            assert SECRET not in repr(event)
+    else:
+        result = await Runner.run(agent, "go", context=SECRET, run_config=config)
+    assert result.final_output == "[removed]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("policy", ["first", "named", "custom"])
+async def test_final_reply_counts_only_actual_tool_outputs(streamed, policy):
+    from agents import ToolsToFinalOutputResult
+
+    @tool
+    def selected() -> str:
+        return "half"
+
+    @tool
+    def other() -> str:
+        return ""
+
+    def finish(context, results):
+        return ToolsToFinalOutputResult(is_final_output=True, final_output="end")
+
+    calls = [function_call("selected", {}, call_id="one")]
+    if policy == "named":
+        calls.append(function_call("other", {}, call_id="two"))
+    agent = Agent(
+        name="worker",
+        tools=[selected, other],
+        tool_use_behavior={
+            "first": "stop_on_first_tool",
+            "named": {"stop_at_tool_names": ["selected"]},
+            "custom": finish,
+        }[policy],
+        model=ScriptedModel([calls]),
+    )
+    config = RunConfig(
+        redact_text=lambda text: text.replace("halfhalf", "-").replace("halfend", "-")
+    )
+
+    async def run():
+        if streamed:
+            result = Runner.run_streamed(agent, "go", run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "go", run_config=config)
+        return result.final_output
+
+    if policy == "custom":
+        with pytest.raises(UserError, match="redact_text"):
+            await run()
+    else:
+        assert await run() == "half"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("form", ["ordered", "reordered", "alias", "alternate"])
+async def test_parsed_final_output_does_not_duplicate_a_message(streamed, wrapped, form):
+    from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+    class Reply(BaseModel):
+        model_config = ConfigDict(validate_by_name=True)
+
+        text: str = Field(alias="wire_text", validation_alias=AliasChoices("wire_text", "alt"))
+        count: int
+        label: str
+
+    key = {"alias": "wire_text", "alternate": "alt"}.get(form, "text")
+    fields = {key: "value", "count": 1, "label": "half"}
+    if form != "ordered":
+        fields = dict(reversed(fields.items()))
+    payload = json.dumps({"response": [fields]} if wrapped else fields)
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message(payload)]]),
+        output_type=list[Reply] if wrapped else Reply,
+    )
+    config = RunConfig(redact_text=lambda text: text.replace("halfhalf", "[removed]"))
+    if streamed:
+        result = Runner.run_streamed(agent, "go", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", run_config=config)
+    reply = Reply(wire_text="value", count=1, label="half")
+    assert result.final_output == ([reply] if wrapped else reply)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("root", [False, True])
+async def test_nested_aliased_reply_with_omitted_count_is_still_one_reply(streamed, root):
+    from pydantic import BaseModel, Field, RootModel
+
+    class Reply(BaseModel):
+        text: str = Field(alias="wire_text")
+        count: int | None = None
+
+    payload = '{"wire_text":"half"}' if root else '{"response":{"wire_text":"half"}}'
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message(payload)]]),
+        output_type=RootModel[Reply] if root else Reply | None,
+    )
+    config = RunConfig(redact_text=lambda text: text.replace("halfhalf", "[removed]"))
+    if streamed:
+        result = Runner.run_streamed(agent, "go", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "go", run_config=config)
+    reply = result.final_output.root if root else result.final_output
+    assert reply == Reply(wire_text="half")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_reordered_array_is_a_changed_final_reply(streamed):
+    from pydantic import BaseModel, Field, field_validator
+
+    class Reply(BaseModel):
+        names: list[str] = Field(alias="wire_names")
+
+        @field_validator("names")
+        @classmethod
+        def reverse_names(cls, value):
+            return value[::-1]
+
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message('{"wire_names":["head","tail"]}')]]),
+        output_type=Reply,
+    )
+    config = RunConfig(redact_text=lambda text: text.replace("tailtail", "[removed]"))
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "go", run_config=config).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", run_config=config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("kind", ["model_refusal", "invalid_final_output"])
+async def test_identical_omitted_handler_reply_is_still_a_separate_reply(streamed, kind):
+    from .test_responses import get_refusal_message
+
+    if kind == "model_refusal":
+        message = get_refusal_message("no")
+        assert message.content is not None
+        message.content.extend(assistant_message("half").content)
+        output_type, fallback = str, "half"
+    else:
+        message = assistant_message('["half"]')  # Missing the SDK's response wrapper.
+        output_type, fallback = list[str], ["half"]
+
+    agent = Agent(name="worker", model=ScriptedModel([[message]]), output_type=output_type)
+    options = {
+        "run_config": RunConfig(redact_text=lambda s: s.replace("halfhalf", "[removed]")),
+        "error_handlers": {kind: lambda _: {"final_output": fallback, "include_in_history": False}},
+    }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            async for _ in Runner.run_streamed(agent, "go", **options).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", **options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_final_output_includes_pending_max_turns_reply_in_check(streamed):
+    from pydantic import BaseModel
+
+    from agents import GuardrailFunctionOutput, output_guardrail
+
+    class Reply(BaseModel):
+        text: str
+
+    @output_guardrail
+    def change_reply(ctx, agent, output):
+        assert output.text == "private-"
+        output.text = "example"
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(name="worker", output_type=Reply, output_guardrails=[change_reply])
+    options = {
+        "run_config": RunConfig(redact_text=scrub),
+        "max_turns": 0,
+        "error_handlers": {
+            "max_turns": lambda _: {
+                "final_output": {"text": "private-"},
+                "include_in_history": True,
+            }
+        },
+    }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            result = Runner.run_streamed(agent, "go", **options)
+            async for event in result.stream_events():
+                assert event.type != "run_item_stream_event"
+        else:
+            await Runner.run(agent, "go", **options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("stage", ["schema", "guardrail"])
+@pytest.mark.parametrize("source", ["model", "saved_fallback", "omitted_fallback"])
+async def test_final_output_is_checked_after_validation_and_guardrails(streamed, stage, source):
+    from pydantic import BaseModel, field_validator
+
+    from agents import GuardrailFunctionOutput, output_guardrail
+
+    class Reply(BaseModel):
+        text: str
+
+        @field_validator("text")
+        @classmethod
+        def validate_text(cls, value):
+            return "example" if stage == "schema" else value
+
+    @output_guardrail
+    def inspect_output(ctx, agent, output):
+        assert output.text == "ok"
+        output.text = "example"
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(
+        name="worker",
+        model=ScriptedModel([[assistant_message('{"text":"ok"}')]]),
+        output_type=Reply,
+        output_guardrails=[inspect_output],
+    )
+    config = RunConfig(redact_text=scrub)
+    options = {}
+    if source != "model":
+        options = {
+            "max_turns": 0,
+            "error_handlers": {
+                "max_turns": lambda _: {
+                    "final_output": {"text": "ok"},
+                    "include_in_history": source == "saved_fallback",
+                },
+            },
+        }
+    with pytest.raises(UserError, match="redact_text"):
+        if streamed:
+            result = Runner.run_streamed(agent, "private-", run_config=config, **options)
+            async for event in result.stream_events():
+                if event.type == "run_item_stream_event":
+                    assert "example" not in repr(event.item.raw_item)
+        else:
+            await Runner.run(agent, "private-", run_config=config, **options)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize(
     "source", ["instructions", "filter", "parallel", "blocking", "output", "interrupt"]
 )

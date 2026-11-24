@@ -6,6 +6,8 @@ on:
     paths: &wheel_paths
       - 'src/**'
       - 'native/**'
+      - 'examples/codex/native_workspace.py'
+      - 'examples/codex/native_approval.py'
       - 'tests/models/test_operation_tracing_parity.py'
       - 'tests/testing_processor.py'
       - 'tests/conftest.py'
@@ -196,6 +198,8 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             native/codex/verify_installed.py
+            examples/codex/native_workspace.py
+            examples/codex/native_approval.py
             pyproject.toml
             tests/__init__.py
             tests/models/__init__.py
@@ -214,15 +218,23 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           VERIFIER: ${{ github.workspace }}/native/codex/verify_installed.py
+          EXAMPLES_DIR: ${{ github.workspace }}/examples/codex
         run: |
-          import os, shutil, subprocess, venv
+          import os, shutil, subprocess, sys, venv
           from pathlib import Path
           wheel, = Path('codex-wheel').glob('*.whl')
           venv.create('codex-venv', with_pip=True)
           python = Path('codex-venv') / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
           subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:', str(wheel)], check=True)
           shutil.copy2(os.environ['VERIFIER'], 'verify_installed.py')
-          subprocess.run([str(python), '-I', 'verify_installed.py', '--output', 'installed.json'], check=True)
+          command = [str(python), '-I', 'verify_installed.py', '--output', 'installed.json']
+          if sys.platform == 'darwin' and sys.version_info[:2] == (3, 14):
+              examples = Path('codex-example-entrypoints')
+              examples.mkdir()
+              for name in ('native_workspace.py', 'native_approval.py'):
+                  shutil.copy2(Path(os.environ['EXAMPLES_DIR']) / name, examples / name)
+              command.extend(('--examples-dir', str(examples)))
+          subprocess.run(command, check=True)
       - name: Verify logical request parity through the installed wheel
         working-directory: ${{ runner.temp }}
         env:

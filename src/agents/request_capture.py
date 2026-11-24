@@ -144,7 +144,14 @@ class RequestCapture:
                 for prompt in prompts:
                     await Runner.run(agent, prompt)
         finally:
-            print(capture.totals.coverage, capture.totals.observed)
+            totals = capture.totals
+            coverage = totals.coverage
+            direct = [row for row in totals.routes if row.owner == "root"]
+            children = [row for row in totals.routes if row.owner == "child"]
+
+    Each row has its own `operation`, `route`, `submissions` and `coverage`.
+    Check `row.observed` for local `attempts`, `writes` and `replies`.
+    `None` means those counts are unavailable.
 
     Read totals after success, cancellation or failure. Drain streams inside the
     block. Exit with any run in progress freezes a partial snapshot. Re-entering

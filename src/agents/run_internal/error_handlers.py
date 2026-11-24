@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 
+from .._redaction import current_redactor, redact_payload
 from ..agent import Agent
 from ..agent_output import _WRAPPER_DICT_KEY, AgentOutputSchema
 from ..exceptions import (
@@ -155,7 +156,7 @@ def format_final_output_text(
         if isinstance(output_schema, AgentOutputSchema):
             payload_bytes = output_schema._type_adapter.dump_json(
                 payload_value,
-                warnings="none" if data_redacted else "warn",
+                warnings="none" if data_redacted or current_redactor() is not None else "warn",
             )
             return (
                 payload_bytes.decode()
@@ -173,6 +174,7 @@ def validate_handler_final_output(
     *,
     data_redacted: bool = False,
 ) -> Any:
+    final_output = redact_payload(final_output)
     output_schema = get_output_schema(agent)
     if output_schema is None or output_schema.is_plain_text():
         return final_output
@@ -186,7 +188,7 @@ def validate_handler_final_output(
         if isinstance(output_schema, AgentOutputSchema):
             payload_bytes = output_schema._type_adapter.dump_json(
                 payload_value,
-                warnings="none" if data_redacted else "warn",
+                warnings="none" if data_redacted or current_redactor() is not None else "warn",
             )
             payload = (
                 payload_bytes.decode()

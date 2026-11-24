@@ -1554,6 +1554,10 @@ class RunState(Generic[TContext, TAgent]):
                     "proposal_fingerprint": fingerprint,
                     "arguments": copy.deepcopy(arguments),
                 }
+            if invocation.requires_declaration and not invocation.completed:
+                record["requires_declaration"] = True
+                if invocation.capability_source is not None:
+                    record["capability_source"] = invocation.capability_source
             serialized[call_id] = record
         return serialized
 
@@ -4498,6 +4502,18 @@ async def _build_run_state_from_json(
         raise validation_error_factory(
             "Tool input rewrites require RunState schema 1.23.", UserError
         )
+    if (
+        (schema_major, schema_minor) < (1, 24)
+        and isinstance(saved_invocations, Mapping)
+        and any(
+            isinstance(record, Mapping)
+            and ("requires_declaration" in record or "capability_source" in record)
+            for record in saved_invocations.values()
+        )
+    ):
+        raise validation_error_factory(
+            "Prepared declarations require RunState schema 1.24.", UserError
+        )
     if (schema_major, schema_minor) >= (1, 15):
         context._rebuild_tool_invocations(
             saved_invocations,
@@ -5854,6 +5870,9 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Tool input rewrites require RunState schema 1.23.",
         _UNSUPPORTED_NATIVE_APPROVALS,
         "RunState tool input rewrite is invalid.",
+        "Prepared declarations require RunState schema 1.24.",
+        "RunState tool declaration requirement is invalid.",
+        "RunState capability source is invalid.",
         "Hosted MCP approval decisions require a non-empty request id.",
         (
             "Persistent hosted MCP approval decisions require a non-empty server_label "

@@ -35,6 +35,7 @@ from .agent_tool_state import (
 from .exceptions import ModelBehaviorError, UserError
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import Handoff
+from .items import RunItem
 from .logger import log_model_and_tool_action_error, logger
 from .mcp import MCPUtil
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
@@ -55,6 +56,7 @@ from .tool import (
     ToolOriginType,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
+    _function_tool_enabled,
     _log_function_tool_invocation,
     _parse_function_tool_json_input,
     default_tool_error_function,
@@ -79,6 +81,22 @@ if TYPE_CHECKING:
 
 class _AgentToolStreamOverflow(UserError):
     """The agent tool callback queue exceeded its configured backlog limit."""
+
+
+@dataclass(frozen=True)
+class ProposedFinalOutput(Generic[TContext]):
+    """A proposed final output from one SDK model turn. Treat its contents as read-only."""
+
+    agent: Agent[TContext]
+    turn: int
+    """One-based turn in this run. Resuming approvals keeps the same turn."""
+    kind: Literal["text", "structured", "tool"]
+    output: Any
+    """The candidate value, including empty text or a parsed structured value."""
+    items: tuple[RunItem, ...]
+    """Model items from this turn followed by any SDK function results in call order."""
+    response_id: str | None
+    request_id: str | None
 
 
 @dataclass
@@ -304,13 +322,7 @@ class AgentBase(Generic[TContext]):
             if not isinstance(tool, FunctionTool):
                 return True
 
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, get_public_agent(self))
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
+            return await _function_tool_enabled(tool, run_context, self)
 
         results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
         enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]
@@ -395,7 +407,8 @@ class Agent(AgentBase, Generic[TContext]):
     """
 
     hooks: AgentHooks[TContext] | None = None
-    """A class that receives callbacks on various lifecycle events for this agent.
+    """Callbacks for this agent. Set `AgentHooks(final_output_policy=...)` to control whether
+    a proposed final answer ends the run.
     """
 
     tool_use_behavior: (
@@ -1016,8 +1029,16 @@ class Agent(AgentBase, Generic[TContext]):
                                 diagnostic_extra=diagnostic_extra,
                             )
 
+                    stopped = False
+
+                    def stop_stream() -> None:
+                        nonlocal stopped
+                        stopped = True
+                        run_result_streaming.cancel()
+
                     async def dispatch_stream_events() -> None:
-                        while True:
+                        # A handler can suppress cancellation or raise during cleanup.
+                        while not stopped:
                             payload = await event_queue.get()
                             is_sentinel = payload is None  # None marks the end of the stream.
                             try:
@@ -1061,27 +1082,24 @@ class Agent(AgentBase, Generic[TContext]):
                         finally:
                             event_queue.put_nowait(None)
 
-                    try:
-                        await run_producer_consumer(
-                            enqueue_stream_events(),
-                            dispatch_stream_events(),
-                            fail_fast_exceptions=(_AgentToolStreamOverflow,),
-                            # Stop upstream work before awaiting callback cancellation cleanup.
-                            on_failure=lambda: run_result_streaming.cancel(),
-                        )
-                    except BaseException:
-                        # Cancellation can interrupt the producer between iterator advances.
-                        # Explicitly close the iterator after its owning task has stopped.
+                    async def close_stream() -> None:
+                        # Cancellation can leave the iterator suspended between advances.
                         try:
                             await stream_events.aclose()
                         except BaseException as close_error:
-                            # Cleanup cancellation must not replace the primary failure either.
                             log_model_and_tool_action_error(
                                 logger,
                                 "Error while closing an agent tool stream after failure",
                                 close_error,
                             )
-                        raise
+
+                    await run_producer_consumer(
+                        enqueue_stream_events(),
+                        dispatch_stream_events(),
+                        fail_fast_exceptions=(_AgentToolStreamOverflow,),
+                        on_failure=stop_stream,
+                        close_producer=close_stream,
+                    )
                     run_result = run_result_streaming
                 else:
                     with _attached_run():
