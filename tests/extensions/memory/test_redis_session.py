@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import time
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
@@ -1953,7 +1953,7 @@ async def test_redis8_blocking_pool_checkout_preserves_native_timing(
     wait_times: list[float] = []
 
     @asynccontextmanager
-    async def maybe_pool_lock() -> Any:
+    async def maybe_pool_lock() -> AsyncIterator[None]:
         nonlocal maintenance_entries
         maintenance_entries += 1
         yield
