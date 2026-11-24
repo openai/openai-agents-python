@@ -38,6 +38,11 @@ The originals stay in process memory outside SDK context. Leaving the `closing` 
 ## Limits
 
 - Selected successes support text and images. Images retain their contents and positions. Other media stop the run. The budget excludes images, block metadata and serialization overhead. Use this policy only for tools that accept a text replacement without a required output schema.
-- Unselected results and MCP errors pass through, even when large. Exceptions from selected operations and invalid summaries stop the run. Cancelling the run during preparation withholds the pending output. It cannot undo a remote action or stop counting already underway in a worker thread.
+- Unselected results and MCP errors pass through, even when large. The local function converts source-read exceptions into a fixed unavailable status before SDK publication; it preserves cancellation. Other selected-operation exceptions and invalid summaries stop the run. Cancelling the run during preparation withholds the pending output. It cannot undo a remote action or stop counting already underway in a worker thread.
 - This example disables tracing. Keep tool-data logging disabled and check logs, exceptions and other observers separately. Small reports, images and errors can still contain sensitive data.
 - The recipe covers SDK-executed tools. It excludes native tools and provider-hosted MCP. Editing later requests cannot retract data already received by a provider.
+
+
+## Source attribution
+
+This recipe has been reusing PR #6120 at `4c0fcf035faa12d34480329af49c6f634ddcc276`. The integration has been adding fixed local source-error handling and tests without changing the original ownership and media limits.

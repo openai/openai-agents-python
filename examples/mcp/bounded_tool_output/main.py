@@ -88,7 +88,11 @@ class Reports:
         async def inspect_site(ctx: RunContextWrapper[str]) -> str:
             """Read the local inspection report."""
             self.authorize(ctx.context)
-            text = await site_report()
+            try:
+                text = await site_report()
+            except Exception:
+                # Source errors may contain private data. Return only a fixed status.
+                return "Inspection report unavailable."
             if not isinstance(text, str):
                 raise UserError("Expected a report string")
             replacement = await self.bound((text,))
