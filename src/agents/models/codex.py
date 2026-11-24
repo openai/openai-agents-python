@@ -374,7 +374,8 @@ class _CodexModel(Model):
             if static_input is not None:
                 prepare_codex_history(static_input, request.tools, validate_only=True)
             dynamic_tools, identities = prepare_dynamic_tools(request.tools, request.handoffs)
-            if request.model_settings.tool_choice == "required" and not identities:
+            require_sdk_call = request.model_settings.tool_choice == "required"
+            if require_sdk_call and not identities:
                 raise UserError(
                     "CodexProvider tool_choice='required' needs an exposed SDK tool or handoff."
                 )
@@ -386,6 +387,11 @@ class _CodexModel(Model):
                     )
                 if not request.resumable:
                     raise UserError("Native approval recovery requires session=ResumableSession.")
+                if require_sdk_call:
+                    raise UserError(
+                        "Native approval recovery does not support tool_choice='required'. "
+                        "Use tool_choice='auto' to allow native approvals."
+                    )
         except UserError as error:
             errors = (str(error),)
         return ModelPreflight(

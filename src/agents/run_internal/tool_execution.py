@@ -2087,9 +2087,7 @@ class _FunctionToolBatchExecutor:
                 return rejected_message
 
         if not is_nested_continuation and self.context_wrapper._budget is not None:
-            self.context_wrapper._budget.reserve_tool(
-                tool_context.qualified_tool_name, child=func_tool._is_agent_tool
-            )
+            self.context_wrapper._budget.reserve_tool(func_tool)
         span.start(mark_as_current=True)
         if not is_nested_continuation:
             await gather_with_cancel(

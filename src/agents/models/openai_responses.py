@@ -114,7 +114,7 @@ from ._openai_retry import (
     get_openai_retry_advice,
     record_openai_error_retries,
 )
-from ._openai_shared import clean_responses_input_item
+from ._openai_shared import clean_responses_input_item, merge_openai_extra_args
 from ._openai_websocket import (
     get_openai_websocket_logger,
     merge_openai_client_websocket_headers,
@@ -620,20 +620,52 @@ class OpenAIResponsesModel(Model):
         errors: tuple[str, ...] = ()
         static_input = static_input_copy(request.input)
         static_tools = not any(isinstance(tool, ComputerTool) for tool in request.tools)
+        unchecked = ["Catalog, files, computer metadata, and host policy remain unchecked."]
+        if any(isinstance(tool, WebSearchTool) for tool in request.tools):
+            static_tools = False
+            unchecked.append(
+                "Preflight skips web search settings to avoid running caller serializers."
+            )
+        if request.model_settings.extra_args:
+            unchecked.append("Provider acceptance of extra_args remains unchecked.")
         try:
             validate_python_tool_execution(request)
-            if static_tools:
-                effective_model = None if self._prompt_owns_model(request.prompt) else self.model
-                computer_model = Converter.resolve_computer_tool_model(
-                    request_model=effective_model,
-                    tools=request.tools,
+            effective_model = None if self._prompt_owns_model(request.prompt) else self.model
+            computer_model = Converter.resolve_computer_tool_model(
+                request_model=effective_model,
+                tools=request.tools,
+            )
+            converted_tools = _PreflightConverter.convert_tools(
+                request.tools,
+                request.handoffs,
+                model=computer_model,
+                allow_opaque_tool_search_surface=request.prompt is not None,
+                tool_choice=request.model_settings.tool_choice,
+            )
+            if request.model_settings.extra_args:
+                # Input, include and headers are always supplied. ModelRequest omits
+                # instructions, output schema and stream mode. Websockets always stream.
+                kwargs = self._response_create_kwargs(
+                    request.model_settings,
+                    list_input=[],
+                    effective_request_model=effective_model,
+                    converted_tools_payload=converted_tools.tools,
+                    tool_choice=converted_tools.tool_choice,
+                    response_format=omit,
+                    include=[],
+                    system_instructions=None,
+                    previous_response_id=request.previous_response_id,
+                    conversation_id=request.conversation_id,
+                    stream=isinstance(self, OpenAIResponsesWSModel),
+                    prompt=request.prompt,
+                    extra_headers={},
                 )
-                Converter.convert_tools(
-                    request.tools,
-                    request.handoffs,
-                    model=computer_model,
-                    allow_opaque_tool_search_surface=request.prompt is not None,
-                    tool_choice=request.model_settings.tool_choice,
+                merge_openai_extra_args(
+                    kwargs,
+                    request.model_settings.extra_args,
+                    method="responses.create",
+                    omitted_types=(Omit, NotGiven),
+                    error_type=UserError,
                 )
             if static_input is not None:
                 self._remove_openai_responses_api_incompatible_fields(
@@ -646,12 +678,12 @@ class OpenAIResponsesModel(Model):
             static_validation="failed"
             if errors
             else "passed"
-            if static_input is not None and static_tools
+            if static_input is not None and static_tools and not request.model_settings.extra_args
             else "unknown",
             model_name=self.model,
             tools=tool_ownership(request.tools),
             errors=errors,
-            unchecked=("Catalog, files, computer metadata, and host policy remain unchecked.",),
+            unchecked=tuple(unchecked),
         )
 
     def _get_request_settings(
@@ -1128,25 +1160,7 @@ class OpenAIResponsesModel(Model):
             )
         tool_choice = converted_tools.tool_choice
         converted_tools_payload = _materialize_responses_tool_params(converted_tools.tools)
-        parallel_tool_calls: bool | Omit = (
-            self._non_null_or_omit(model_settings.parallel_tool_calls)
-            if prompt is not None or converted_tools_payload
-            else omit
-        )
         response_format = Converter.get_response_format(output_schema)
-        model_param: str | ChatModel | Omit = (
-            effective_request_model if effective_request_model is not None else omit
-        )
-        should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
-        # In prompt-managed tool flows without local tools payload, omit only named tool choices
-        # that must match an explicit tool list. Keep control literals like "none"/"required".
-        should_omit_tool_choice = should_omit_tools and isinstance(tool_choice, dict)
-        tools_param: list[ResponsesToolParam] | Omit = (
-            converted_tools_payload if not should_omit_tools else omit
-        )
-        tool_choice_param: response_create_params.ToolChoice | Omit = (
-            tool_choice if not should_omit_tool_choice else omit
-        )
 
         include_set: set[ResponseIncludable] = set(converted_tools.includes)
         if model_settings.response_include is not None:
@@ -1154,6 +1168,22 @@ class OpenAIResponsesModel(Model):
         if model_settings.top_logprobs is not None:
             include_set.add("message.output_text.logprobs")
         include: list[ResponseIncludable] = list(include_set)
+
+        create_kwargs = self._response_create_kwargs(
+            model_settings,
+            list_input=list_input,
+            effective_request_model=effective_request_model,
+            converted_tools_payload=converted_tools_payload,
+            tool_choice=tool_choice,
+            response_format=response_format,
+            include=include,
+            system_instructions=system_instructions,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            stream=stream,
+            prompt=prompt,
+            extra_headers=self._merge_headers(model_settings),
+        )
 
         if _debug.DONT_LOG_MODEL_DATA or current_redactor() is not None:
             logger.debug("Calling LLM")
@@ -1175,7 +1205,7 @@ class OpenAIResponsesModel(Model):
                 input_json,
                 tools_json,
                 stream,
-                tool_choice_param,
+                create_kwargs["tool_choice"],
                 response_format,
                 previous_response_id,
                 conversation_id,
@@ -1184,9 +1214,51 @@ class OpenAIResponsesModel(Model):
         extra_args = dict(model_settings.extra_args or {})
         if model_settings.top_logprobs is not None:
             extra_args["top_logprobs"] = model_settings.top_logprobs
+        merge_openai_extra_args(
+            create_kwargs, extra_args, method="responses.create", omitted_types=(Omit, NotGiven)
+        )
+        return create_kwargs
+
+    def _response_create_kwargs(
+        self,
+        model_settings: ModelSettings,
+        *,
+        list_input: list[Any],
+        effective_request_model: str | None,
+        converted_tools_payload: list[ResponsesToolParam],
+        tool_choice: response_create_params.ToolChoice | Omit,
+        response_format: ResponseTextConfigParam | Omit,
+        include: list[ResponseIncludable],
+        system_instructions: str | None,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        stream: bool,
+        prompt: ResponsePromptParam | None,
+        extra_headers: dict[str, Any],
+    ) -> dict[str, Any]:
+        parallel_tool_calls: bool | Omit = (
+            self._non_null_or_omit(model_settings.parallel_tool_calls)
+            if prompt is not None or converted_tools_payload
+            else omit
+        )
+        model_param: str | ChatModel | Omit = (
+            effective_request_model if effective_request_model is not None else omit
+        )
+        should_omit_tools = prompt is not None and len(converted_tools_payload) == 0
+        # In prompt-managed tool flows without local tools payload, omit only named tool choices
+        # that must match an explicit tool list. Keep control literals like "none"/"required".
+        should_omit_tool_choice = should_omit_tools and isinstance(tool_choice, dict)
+        tools_param: list[ResponsesToolParam] | Omit = (
+            converted_tools_payload if not should_omit_tools else omit
+        )
+        tool_choice_param: response_create_params.ToolChoice | Omit = (
+            tool_choice if not should_omit_tool_choice else omit
+        )
+
         if model_settings.verbosity is not None:
-            if response_format is not omit:
-                response_format["verbosity"] = model_settings.verbosity  # type: ignore [index]
+            if isinstance(response_format, dict):
+                response_format = response_format.copy()
+                response_format["verbosity"] = model_settings.verbosity
             else:
                 response_format = {"verbosity": model_settings.verbosity}
 
@@ -1208,7 +1280,7 @@ class OpenAIResponsesModel(Model):
             "tool_choice": tool_choice_param,
             "parallel_tool_calls": parallel_tool_calls,
             "stream": cast(Any, stream_param),
-            "extra_headers": self._merge_headers(model_settings),
+            "extra_headers": extra_headers,
             "extra_query": model_settings.extra_query,
             "extra_body": model_settings.extra_body,
             "text": response_format,
@@ -1219,20 +1291,6 @@ class OpenAIResponsesModel(Model):
             "metadata": self._non_null_or_omit(model_settings.metadata),
             "context_management": self._non_null_or_omit(model_settings.context_management),
         }
-        duplicate_extra_arg_keys = sorted(
-            k
-            for k in extra_args
-            if k in create_kwargs and not _is_openai_omitted_value(create_kwargs[k])
-        )
-        if duplicate_extra_arg_keys:
-            if len(duplicate_extra_arg_keys) == 1:
-                key = duplicate_extra_arg_keys[0]
-                raise TypeError(
-                    f"responses.create() got multiple values for keyword argument '{key}'"
-                )
-            keys = ", ".join(repr(key) for key in duplicate_extra_arg_keys)
-            raise TypeError(f"responses.create() got multiple values for keyword arguments {keys}")
-        create_kwargs.update(extra_args)
         return create_kwargs
 
     def _remove_openai_responses_api_incompatible_fields(self, list_input: list[Any]) -> list[Any]:
@@ -2518,3 +2576,20 @@ class Converter:
             type="function",
             description=handoff.tool_description,
         )
+
+
+class _PreflightConverter(Converter):
+    @classmethod
+    def _convert_tool(
+        cls, tool: Tool, *, use_preview_computer_tool: bool = False
+    ) -> tuple[ResponsesToolParam, ResponseIncludable | None]:
+        if isinstance(tool, WebSearchTool):
+            # Choice resolution needs the tool type. Serializing filters can run caller code.
+            return {"type": "web_search"}, None
+        return super()._convert_tool(tool, use_preview_computer_tool=use_preview_computer_tool)
+
+    @classmethod
+    def _convert_preview_computer_tool(cls, tool: ComputerTool[Any]) -> ResponsesToolParam:
+        # Only the tool type and presence are needed for static checks. Dispatch
+        # uses Converter to read the environment and dimensions from the computer.
+        return _require_responses_tool_param({"type": "computer_use_preview"})
