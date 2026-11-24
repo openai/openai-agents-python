@@ -8,13 +8,17 @@ from typing import Any
 import httpx2
 import pytest
 from openai import AsyncOpenAI
+from openai.types.shared import Reasoning
 
 from agents import (
     Agent,
+    ComputerTool,
+    ModelSettings,
     RunBudget,
     RunBudgetError,
     RunConfig,
     RunControl,
+    RunHooks,
     Runner,
     Usage,
     UserError,
@@ -22,7 +26,9 @@ from agents import (
 from agents.decorators import tool
 from agents.models.interface import ModelProvider
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+from tests.test_computer_tool_lifecycle import FakeComputer
 from tests.utils.simple_session import SimpleListSession
 
 pytestmark = pytest.mark.asyncio
@@ -182,12 +188,22 @@ async def test_selected_model_observes_tokens_and_later_budget_failure_preserves
         await stop(task, release)
 
 
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize(
+    "incompatibility", ["prompt", "reasoning", "parallel_tool_calls", "tool_choice"]
+)
 @pytest.mark.parametrize("streamed", [False, True], ids=["awaited", "streamed"])
 async def test_selected_adapter_preflight_rejects_before_receipt_submission_or_network(
     streamed: bool,
+    incompatibility: str,
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
     network_requests = []
+    llm_starts = []
+
+    class Observer(RunHooks):
+        async def on_llm_start(self, context, agent, system_prompt, input_items):
+            llm_starts.append(agent.name)
 
     def unexpected_request(request):
         network_requests.append(request)
@@ -197,8 +213,13 @@ async def test_selected_adapter_preflight_rejects_before_receipt_submission_or_n
         api_key="synthetic-key",
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(unexpected_request)),
     )
-    selected = OpenAIChatCompletionsModel(
-        model="fixture-chat", openai_client=client, strict_feature_validation=True
+    with_computer = incompatibility in {"parallel_tool_calls", "tool_choice"}
+    selected = (
+        OpenAIResponsesModel("gpt-5.4", client)
+        if with_computer
+        else OpenAIChatCompletionsModel(
+            model="fixture-chat", openai_client=client, strict_feature_validation=True
+        )
     )
 
     @tool
@@ -208,32 +229,46 @@ async def test_selected_adapter_preflight_rejects_before_receipt_submission_or_n
         return "test failed"
 
     first = ScriptedModel([[function_call("failing_test", "{}", call_id="test")]])
-    provider = RecordingProvider({"base": first, "chat": selected})
+    provider = RecordingProvider({"base": first, "selected": selected})
+    settings = {
+        "reasoning": ModelSettings(reasoning=Reasoning(mode="pro", context="all_turns")),
+        "parallel_tool_calls": ModelSettings(
+            parallel_tool_calls=False, extra_args={"parallel_tool_calls": True}
+        ),
+        "tool_choice": ModelSettings(tool_choice="auto", extra_args={"tool_choice": "none"}),
+    }
     agent = Agent(
         name="worker",
         model="base",
-        tools=[failing_test],
-        prompt={"id": "pmpt_synthetic"},
+        tools=[failing_test, ComputerTool(computer=FakeComputer())]
+        if with_computer
+        else [failing_test],
+        prompt={"id": "pmpt_synthetic"} if incompatibility == "prompt" else None,
+        model_settings=settings.get(incompatibility, ModelSettings()),
+        reset_tool_choice=not with_computer,
     )
     control, session = RunControl(), SimpleListSession()
     config = RunConfig(
         model_provider=provider,
-        model_selector=lambda data: "chat" if data.turn_number == 2 else None,
+        model_selector=lambda data: "selected" if data.turn_number == 2 else None,
         budget=RunBudget(max_outer_requests=2),
         tracing_disabled=True,
     )
     task = asyncio.create_task(
-        drive(streamed, agent, control=control, session=session, run_config=config)
+        drive(
+            streamed, agent, control=control, session=session, run_config=config, hooks=Observer()
+        )
     )
     try:
         await asyncio.wait_for(entered.wait(), 3)
         receipt = control.send("Explain before editing.")
         release.set()
-        with pytest.raises(UserError, match="Chat Completions|prompt"):
+        with pytest.raises(UserError, match=incompatibility):
             await asyncio.wait_for(task, 3)
         outcome = await asyncio.wait_for(receipt.wait(), 3)
         assert outcome.status == "not_submitted" and outcome.retained is True
-        assert provider.names == ["base", "chat"]
+        assert llm_starts == ["worker"]
+        assert provider.names == ["base", "selected"]
         assert network_requests == [] and len(first.calls) == 1
         assert count_message(await session.get_items(), "Explain before editing.") == 1
     finally:

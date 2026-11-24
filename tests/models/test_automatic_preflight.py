@@ -98,7 +98,7 @@ async def test_opted_in_request_validation_runs_before_hooks_and_sampling(
             config.tool_execution = ToolExecutionConfig(workspace_execution="sdk")
         else:
             config.tool_execution = ToolExecutionConfig(require_native_approval_recovery=True)
-        with pytest.raises(UserError, match="Chat Completions does not support|CodexProvider"):
+        with pytest.raises(UserError, match="server-managed conversation state|CodexProvider"):
             if streamed:
                 result = Runner.run_streamed(
                     Agent(

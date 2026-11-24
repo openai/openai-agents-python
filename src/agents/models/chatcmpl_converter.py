@@ -565,6 +565,8 @@ class Converter:
         base_url: str | None = None,
         should_replay_reasoning_content: ShouldReplayReasoningContent | None = None,
         strict_feature_validation: bool = False,
+        *,
+        warn_on_lossy_tool_output: bool = True,
     ) -> list[ChatCompletionMessageParam]:
         """
         Convert a sequence of 'Item' objects into a list of ChatCompletionMessageParam.
@@ -592,6 +594,8 @@ class Converter:
                 `reasoning_content`.
             strict_feature_validation: Whether to raise a UserError for Responses-only
                 features that Chat Completions cannot faithfully represent.
+            warn_on_lossy_tool_output: Disable the placeholder warning during preflight.
+                Actual request conversion warns when it substitutes the placeholder.
 
         Rules:
         - EasyInputMessage or InputMessage (role=user) => ChatCompletionUserMessageParam
@@ -913,11 +917,12 @@ class Converter:
                             )
                             if strict_feature_validation:
                                 raise UserError(message)
-                            logger.warning(
-                                "%s Replacing the tool output with a placeholder; enable strict "
-                                "feature validation to raise an error instead.",
-                                message,
-                            )
+                            if warn_on_lossy_tool_output:
+                                logger.warning(
+                                    "%s Replacing the tool output with a placeholder; enable "
+                                    "strict feature validation to raise an error instead.",
+                                    message,
+                                )
                             tool_result_content = _OMITTED_TOOL_OUTPUT_PLACEHOLDER
                 msg: ChatCompletionToolMessageParam = {
                     "role": "tool",
