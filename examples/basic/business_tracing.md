@@ -1,4 +1,4 @@
-# Trace a business workflow without recording model or tool payloads
+# Limit automatic trace capture in a business workflow
 
 [Run the offline example](business_tracing.py) from this checkout with the development dependencies installed (`make sync`). No API key, collector or network calls.
 
@@ -10,23 +10,28 @@ Expected output — one delivery to an in-memory outbox, five successful applica
 
 ## Limit capture across nested runs
 
-For a single run, use `RunConfig(tracing={"operation_detail": "metadata"})`. An explicit child config can change that policy. To prevent nested Runner calls and agents used as tools from enabling automatic model and tool payload capture, wrap the outer run.
+Set `RunConfig(tracing={"operation_detail": "metadata"})` to omit model and tool payloads from one run's automatic spans. A nested `Runner` call or an agent used as a tool can request content with its own config.
+
+To enforce metadata detail across those calls, wrap `await Runner.run(agent, request)` in `with metadata_only_run_tracing():`. For streaming, start the run and drain its events inside the same scope.
 
 ```python
 from agents import Runner
 from agents.tracing import metadata_only_run_tracing
 
 
-async def run_private(agent, request):
+async def run_streamed(agent, request):
     with metadata_only_run_tracing():
-        return await Runner.run(agent, request)
+        result = Runner.run_streamed(agent, request)
+        async for _ in result.stream_events():
+            pass
+        return result
 ```
 
-For streaming, start `Runner.run_streamed` and consume `result.stream_events()` inside the scope. Each run in the scope uses metadata detail and `trace_include_sensitive_data=False`. Disabled tracing stays disabled. The scope leaves caller configs and normal behavior outside it unchanged.
+Each run in the scope uses metadata detail and `trace_include_sensitive_data=False`, even when a child requests content. Disabled tracing stays disabled. The scope leaves caller configs unchanged.
 
 New asyncio tasks inherit the context at creation. Leaving the scope restores the previous setting in the current task. Enter a fresh scope on independent resume, in an existing worker task or in another service.
 
-**Still private** — run results, saved state, logs and exceptions. Keep sensitive values out of names, IDs, custom spans and `trace_metadata`. The scope does not sanitize those fields or third-party instrumentation.
+The scope does not sanitize raw stream events, returned data, saved state, exceptions or logs. The example discards events without displaying them. Check what you can disclose before sharing `result.final_output`. Keep sensitive values out of names, IDs, custom spans and `trace_metadata`. Third-party instrumentation has its own capture rules.
 
 ## Connect application stages
 

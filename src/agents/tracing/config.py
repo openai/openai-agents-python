@@ -18,12 +18,17 @@ _metadata_only_runs: ContextVar[bool] = ContextVar("metadata_only_runs", default
 def metadata_only_run_tracing() -> Iterator[None]:
     """Limit automatic model and tool capture for Runner calls in this context.
 
-    Nested runs use metadata detail with sensitive data disabled, even with an
-    explicit child config. Disabled tracing stays disabled. Enter before starting
-    the run and keep the scope open while consuming a stream. New asyncio tasks
-    inherit the scope. Independent resumes and remote services need their own scope.
+    A child config can override a parent's operation_detail. In this scope,
+    nested Runner calls and agents used as tools use metadata detail with
+    trace_include_sensitive_data=False even if they request content.
+    Disabled tracing stays disabled.
 
-    This does not sanitize names, trace metadata, custom spans, logs or run results.
+    Start Runner.run_streamed() and drain result.stream_events() inside the
+    scope. New asyncio tasks inherit it. Independent resumes and remote
+    services need their own scope.
+
+    The scope does not sanitize raw stream events, returned data, saved state,
+    exceptions, logs, names, IDs, custom spans or trace metadata.
     """
     token = _metadata_only_runs.set(True)
     try:
@@ -47,6 +52,9 @@ class TracingConfig(TypedDict, total=False):
     Omit to use existing SDK payload fields. Explicit content capture requires
     trace_include_sensitive_data in the run configuration. All settings keep
     one span per logical model call, with retries recorded on that span.
+
+    A nested run can override this setting. Use metadata_only_run_tracing()
+    to enforce metadata detail across nested Runner calls and agent tools.
     """
 
 
