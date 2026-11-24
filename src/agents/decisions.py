@@ -1,20 +1,15 @@
-"""Opt-in, explicit-input decisions and specialist handoffs for Runner."""
+"""Specialist handoffs using the caller's Decisions client."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import math
-from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
-from copy import deepcopy
-from dataclasses import dataclass, field, replace
-from typing import Any, Generic, Literal, Protocol, TypeVar, overload
+from collections.abc import Callable, Mapping
+from typing import Any, Literal, TypeVar
 
 from openai import AsyncOpenAI
 from openai.types.responses.response_usage import ResponseUsage
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import _debug
 from ._public_agent import get_public_agent
@@ -25,44 +20,10 @@ from .handoffs import Handoff, HandoffInputFilter
 from .run_context import RunContextWrapper
 from .usage import Usage, _response_usage_to_usage
 
-__all__ = [
-    "DecisionError",
-    "DecisionProvider",
-    "DecisionRequest",
-    "DecisionResult",
-    "OpenAIDecisions",
-    "decide",
-    "decision_handoff",
-    "decision_scope",
-]
+__all__ = ["DecisionError", "decision_handoff"]
 
-_Input = str | Sequence[dict[str, Any]]
-_Scalar = str | bool | int | float | None
-_S = TypeVar("_S", bound=_Scalar)
 _T = TypeVar("_T")
-_json: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-
-
-@dataclass(frozen=True)
-class DecisionRequest:
-    """One question, explicit evidence and the JSON schema of the application value."""
-
-    question: str = field(repr=False)
-    input: _Input = field(repr=False)
-    output_schema: dict[str, Any] = field(repr=False)
-
-
-@dataclass(frozen=True)
-class DecisionResult(Generic[_T]):
-    """A value with observed metadata. Missing usage is unknown."""
-
-    value: _T = field(repr=False)
-    request_id: str | None = None
-    model: str | None = None
-    usage: Usage | None = None
-
-    def __bool__(self) -> bool:
-        raise TypeError("Read DecisionResult.value to test the answer.")
+_CHOICE_COUNTS = range(2, 256)
 
 
 class DecisionError(ValueError):
@@ -83,268 +44,7 @@ class DecisionError(ValueError):
         self.usage = usage
 
 
-class DecisionProvider(Protocol):
-    """Trusted application code returning JSON or raising DecisionError on refusal."""
-
-    async def get_decision(self, request: DecisionRequest) -> DecisionResult[Any]: ...
-
-
-@dataclass
-class _Scope:
-    owner: object
-    loop: asyncio.AbstractEventLoop
-    live: bool = True
-    pending: dict[asyncio.Task[Any], bool] = field(default_factory=dict)
-
-    def check(self, owner: object) -> None:
-        if (
-            not self.live
-            or self.owner is not owner
-            or _current.get() is not self
-            or asyncio.get_running_loop() is not self.loop
-        ):
-            raise RuntimeError("Decision requires its exact live callback owner")
-
-    async def cancel(self, tasks: Sequence[asyncio.Task[Any]]) -> None:
-        # A deadline and callback exit can overlap. Cancel each provider only once.
-        for task in tasks:
-            if not task.done() and not self.pending[task]:
-                self.pending[task] = True
-                task.cancel()
-        interrupted = False
-        while any(not task.done() for task in tasks):
-            try:
-                await asyncio.wait(tasks)
-            except asyncio.CancelledError:
-                interrupted = True
-        for task in tasks:
-            if not task.cancelled():
-                task.exception()
-        if interrupted:
-            raise asyncio.CancelledError
-
-
-_current: ContextVar[_Scope | None] = ContextVar("decision_scope", default=None)
-
-
-@asynccontextmanager
-async def decision_scope(owner: object) -> AsyncIterator[None]:
-    """Bind decisions to a callback owner. Exit revokes and joins outstanding requests."""
-    if owner is None:
-        raise ValueError("A callback owner is required")
-    scope = _Scope(owner, asyncio.get_running_loop())
-    token = _current.set(scope)
-    try:
-        yield
-    finally:
-        scope.live = False
-        _current.reset(token)
-        await scope.cancel(tuple(scope.pending))
-
-
-def _check_request(question: str, timeout: float) -> None:
-    if not isinstance(question, str) or not question.strip():
-        raise ValueError("A nonblank question is required")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("timeout must be finite and positive")
-
-
-def _snapshot(value: Any) -> str:
-    return json.dumps(_json.validate_python(value, strict=True), allow_nan=False)
-
-
-def _key(value: _Scalar) -> tuple[type, _Scalar]:
-    # JSON numbers compare by value, independently of booleans.
-    return (int if type(value) is float else type(value), value)
-
-
-@overload
-def decide(
-    question: str,
-    *,
-    provider: DecisionProvider,
-    input: _Input,
-    choices: Sequence[_S],
-    owner: object = None,
-    timeout: float = 30,
-) -> Coroutine[Any, Any, DecisionResult[_S]]: ...
-
-
-@overload
-def decide(
-    question: str,
-    *,
-    provider: DecisionProvider,
-    input: _Input,
-    output_type: type[_T],
-    owner: object = None,
-    timeout: float = 30,
-) -> Coroutine[Any, Any, DecisionResult[_T]]: ...
-
-
-@overload
-def decide(
-    question: str,
-    *,
-    provider: DecisionProvider,
-    input: _Input,
-    owner: object = None,
-    timeout: float = 30,
-) -> Coroutine[Any, Any, DecisionResult[bool]]: ...
-
-
-def decide(
-    question: str,
-    *,
-    provider: DecisionProvider,
-    input: _Input,
-    choices: Sequence[_Scalar] | None = None,
-    output_type: type[Any] | None = None,
-    owner: object = None,
-    timeout: float = 30,
-) -> Coroutine[Any, Any, DecisionResult[Any]]:
-    """Capture explicit evidence now. Await once for a validated value and provider metadata.
-
-    Inside decision_scope, pass the same owner. The timeout in seconds covers the
-    provider request. Caller cancellation waits for cooperative provider cleanup.
-    Independent cancellation of the provider request raises RuntimeError.
-    """
-    scope = _current.get()
-    if scope is not None:
-        scope.check(owner)
-    elif owner is not None:
-        raise RuntimeError("Decision requires its exact live callback owner")
-    _check_request(question, timeout)
-    if input == "":
-        raise ValueError("Decision input is required")
-    if not isinstance(input, str):
-        if (
-            not isinstance(input, Sequence)
-            or not input
-            or not all(isinstance(i, dict) for i in input)
-        ):
-            raise ValueError("Expected text or a nonempty sequence of JSON objects")
-        input = json.loads(_snapshot(list(input)))
-    if choices is not None:
-        if output_type is not None:
-            raise ValueError("choices and output_type are mutually exclusive")
-        if (
-            not choices
-            or isinstance(choices, (str, bytes, bytearray))
-            or not isinstance(choices, Sequence)
-        ):
-            raise ValueError("Expected a nonempty sequence of choices")
-        values = list(choices)
-        if any(type(v) not in (str, int, float, bool, type(None)) for v in values):
-            raise ValueError("Choices must be JSON scalars")
-        _snapshot(values)
-        admitted = {_key(v): v for v in values}
-        if len(admitted) != len(values):
-            raise ValueError("Choices must be distinct")
-        schema: dict[str, Any] = {"enum": values}
-
-        def parse(text: str) -> Any:
-            return admitted[_key(json.loads(text))]
-    else:
-        from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
-        from referencing import Registry
-
-        adapter: TypeAdapter[Any] = TypeAdapter(bool if output_type is None else output_type)
-        schema = adapter.json_schema()
-        Draft202012Validator.check_schema(schema)
-        validator = Draft202012Validator(schema, registry=Registry())
-
-        def parse(text: str) -> Any:
-            validator.validate(json.loads(text))
-            return adapter.validate_json(text, strict=True)
-
-    request = DecisionRequest(question, input, deepcopy(schema))
-
-    async def execute() -> DecisionResult[Any]:
-        if scope is not None:
-            scope.check(owner)
-        loop = asyncio.get_running_loop()
-        work = scope or _Scope(None, loop)
-        deadline = loop.time() + timeout
-        task = asyncio.create_task(provider.get_decision(request))
-        work.pending[task] = False
-        try:
-            await asyncio.wait((task,), timeout=timeout)
-            if not work.live:
-                raise asyncio.CancelledError
-            if not task.done() or loop.time() >= deadline:
-                raise asyncio.TimeoutError("Decision timed out")
-            if task.cancelled():
-                raise RuntimeError("Decision provider cancelled its request")
-            result = _validate(task.result(), parse)
-        finally:
-            try:
-                await work.cancel((task,))
-            finally:
-                del work.pending[task]
-                del task
-        if isinstance(result, DecisionError):
-            raise result
-        return result
-
-    return execute()
-
-
-def _validate(
-    response: DecisionResult[Any], parse: Callable[[str], Any]
-) -> DecisionResult[Any] | DecisionError:
-    if not isinstance(response, DecisionResult):
-        return DecisionError("invalid_response")
-    try:
-        return replace(response, value=parse(_snapshot(response.value)))
-    except Exception:
-        # Keep parser exceptions and raw values out of the raising frame.
-        return DecisionError(
-            "invalid_response",
-            request_id=response.request_id,
-            model=response.model,
-            usage=response.usage,
-        )
-
-
-_OPENAI_CHOICE_COUNTS = range(2, 256)
-
-
-class OpenAIDecisions:
-    """Ask a predicate or string/boolean choice with a caller-owned client and no retries."""
-
-    def __init__(self, client: AsyncOpenAI, *, model: str):
-        self._client = client
-        self._model = model
-
-    async def get_decision(self, request: DecisionRequest) -> DecisionResult[Any]:
-        schema = request.output_schema
-        question: dict[str, Any] = {"instructions": request.question, "name": "decision"}
-        if schema == {"type": "boolean"}:
-            question["type"] = "predicate"
-        elif (
-            set(schema) == {"enum"}
-            and len(schema["enum"]) in _OPENAI_CHOICE_COUNTS
-            and all(type(value) in (bool, str) for value in schema["enum"])
-        ):
-            question.update(type="choice", choices=[{"value": v} for v in schema["enum"]])
-        else:
-            raise ValueError("Expected a predicate or 2 to 255 string or boolean choices")
-        resource = getattr(self._client.with_options(max_retries=0), "decisions", None)
-        if resource is None:
-            raise RuntimeError("The Decisions client requires openai>=3.26.0")
-        result = _read_answer(
-            await resource.with_raw_response.create(
-                model=self._model, input=request.input, questions=[question]
-            ),
-            question["type"],
-        )
-        if isinstance(result, DecisionError):
-            raise result
-        return result
-
-
-def _read_answer(raw: Any, kind: str) -> DecisionResult[Any] | DecisionError:
+def _read_answer(raw: Any, choices: list[str], ctx: RunContextWrapper[Any]) -> str | DecisionError:
     metadata: dict[str, Any] = {"request_id": raw.headers.get("x-request-id")}
     try:
         data = raw.http_response.json()
@@ -353,17 +53,16 @@ def _read_answer(raw: Any, kind: str) -> DecisionResult[Any] | DecisionError:
         if data.get("usage") is not None:
             usage = ResponseUsage.model_validate(data["usage"], strict=True, extra="ignore")
             metadata["usage"] = _response_usage_to_usage(usage)
+            ctx.usage.add(metadata["usage"])
         answers = data["answers"]
         if isinstance(answers, list) and len(answers) == 1 and answers[0]["name"] == "decision":
             answer = answers[0]
             if answer["type"] == "refusal":
                 return DecisionError("refusal", **metadata)
-            if answer["type"] == kind:
-                if kind == "choice":
-                    return DecisionResult(answer["choice"], **metadata)
-                probability = answer["probability"]
-                if type(probability) in (int, float) and 0 <= probability <= 1:
-                    return DecisionResult(probability >= 0.5, **metadata)
+            if answer["type"] == "choice":
+                label = answer["choice"]
+                if isinstance(label, str) and label in choices:
+                    return label
     except (ValueError, KeyError, AttributeError, TypeError, RecursionError):
         pass
     return DecisionError("invalid_response", **metadata)
@@ -387,7 +86,8 @@ def _routing_input(arguments: str) -> str:
 def decision_handoff(
     source: Agent[_T],
     *,
-    provider: DecisionProvider,
+    client: AsyncOpenAI,
+    model: str,
     question: str,
     targets: Mapping[str, Agent[_T]],
     tool_name: str = "select_specialist",
@@ -400,16 +100,23 @@ def decision_handoff(
 
     Labels bind to concrete agents at construction. Removing or replacing a target
     revokes it. A synchronous is_available callback can further restrict each run.
-    OpenAIDecisions requires 2 to 255 available labels to offer or invoke the handoff.
-    For a single fixed label, use `handoff(target)` or a custom provider.
-    Pass `input_filter` to filter the selected specialist's history. The provider
-    has already received the routing evidence when this filter runs.
-    A custom provider may await decide() without access to the run context.
-    Invoke the handoff outside an explicit decision_scope, which requires its owner.
-    Restoring a specialist from serialized RunState checks its incoming selectors.
-    Supply a fresh context_override if any of them uses is_available.
+    The primary model supplies the routing evidence. The optional input_filter
+    changes the selected specialist's history only, after the Decisions request.
+    Supply fresh context_override on protected reload. Resuming rechecks the
+    selected grant without another request. Use separate specialist instances
+    for different labels or ordinary handoffs.
     """
-    _check_request(question, timeout)
+    if not isinstance(client, AsyncOpenAI):
+        raise TypeError("Pass a caller-owned AsyncOpenAI client.")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("A nonblank Decisions model is required.")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("A nonblank question is required.")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    resource = getattr(client.with_options(max_retries=0), "decisions", None)
+    if resource is None:
+        raise ValueError("Decision handoffs require an OpenAI client with Decisions support.")
     if not tool_name.strip() or not targets:
         raise ValueError("Expected a handoff name and targets")
     if any(
@@ -419,10 +126,14 @@ def decision_handoff(
         raise ValueError("Expected nonblank labels mapped to agents")
     roster = {label: (agent, agent.name) for label, agent in targets.items()}
 
-    if isinstance(provider, OpenAIDecisions) and len(roster) == 1:
+    if len(roster) < 2 or (len(roster) > 255 and is_available is None):
         raise ValueError(
-            "OpenAIDecisions requires at least two labels. Use handoff(target) for one."
+            "Decisions requires 2 to 255 available labels. Use handoff(target) for one."
         )
+    if any(agent is source or not name.strip() for agent, name in roster.values()) or len(
+        {id(agent) for agent, _ in roster.values()}
+    ) != len(roster):
+        raise ValueError("Create a separate named specialist for each decision label.")
 
     def admitted(ctx: RunContextWrapper[_T] | None, label: str) -> bool:
         agent, name = roster[label]
@@ -434,7 +145,7 @@ def decision_handoff(
 
     def available_choices(ctx: RunContextWrapper[_T]) -> list[str]:
         labels = [label for label in roster if admitted(ctx, label)]
-        if isinstance(provider, OpenAIDecisions) and len(labels) not in _OPENAI_CHOICE_COUNTS:
+        if len(labels) not in _CHOICE_COUNTS:
             return []
         return labels
 
@@ -466,23 +177,48 @@ def decision_handoff(
         choices = available_choices(ctx)
         if not choices or not attached():
             raise ValueError("Decision handoff is unavailable")
-        try:
-            result = await decide(
-                question,
-                provider=provider,
+        deadline = asyncio.get_running_loop().time() + timeout
+        task = asyncio.create_task(
+            resource.with_raw_response.create(
+                model=model,
                 input=evidence,
-                choices=choices,
-                timeout=timeout,
+                questions=[
+                    {
+                        "type": "choice",
+                        "name": "decision",
+                        "instructions": question,
+                        "choices": [{"value": label} for label in choices],
+                    }
+                ],
             )
-        except DecisionError as error:
-            if error.usage is not None:
-                ctx.usage.add(error.usage)
-            raise
-        if result.usage is not None:
-            ctx.usage.add(result.usage)
-        if not authorized(ctx, result.value):
+        )
+        try:
+            await asyncio.wait((task,), timeout=timeout)
+            if not task.done() or asyncio.get_running_loop().time() >= deadline:
+                raise asyncio.TimeoutError("Decision timed out")
+            if task.cancelled():
+                raise RuntimeError("Decisions request was cancelled")
+            answer = _read_answer(task.result(), choices, ctx)
+        finally:
+            if not task.done():
+                task.cancel()
+            interrupted = False
+            while not task.done():
+                try:
+                    await asyncio.wait((task,))
+                except asyncio.CancelledError:
+                    interrupted = True
+            if not task.cancelled():
+                task.exception()
+            del task
+            if interrupted:
+                raise asyncio.CancelledError
+        if isinstance(answer, DecisionError):
+            raise answer
+        if not authorized(ctx, answer):
             raise ValueError("Selected specialist is unavailable")
-        return roster[result.value][0]
+        ctx._decision_binding = (route, answer)
+        return roster[answer][0]
 
     route: _DecisionHandoff[_T] = _DecisionHandoff(
         tool_name=tool_name,

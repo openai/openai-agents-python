@@ -15,6 +15,7 @@ from typing import Any, cast
 
 from ._tool_identity import get_function_tool_namespace, get_function_tool_qualified_name
 from .agent import Agent
+from .exceptions import UserError
 from .handoffs import Handoff
 from .logger import logger
 from .run_context import RunContextWrapper, TContext
@@ -513,14 +514,37 @@ def _has_ambiguous_hook_identities(initial_agent: Agent[Any]) -> bool:
     )
 
 
-def _decision_edges(
-    agents: Mapping[str, Agent[Any]],
-) -> Iterator[tuple[str, _DecisionHandoff[Any], str, Agent[Any]]]:
-    for key, source in agents.items():
+def _decision_bindings(root: Agent[Any]) -> dict[int, tuple[_DecisionHandoff[Any], str]]:
+    """Require a unique incoming route for each protected checkpoint identity."""
+    bindings: dict[int, tuple[_DecisionHandoff[Any], str]] = {}
+    ordinary = {id(root)}
+    for source in _iter_agent_graph(root):
         for route in source.handoffs:
-            if isinstance(route, _DecisionHandoff) and route._source is source:
+            if isinstance(route, _DecisionHandoff):
+                if route._source is not source:
+                    continue
+                names = (
+                    h.tool_name if isinstance(h, Handoff) else Handoff.default_tool_name(h)
+                    for h in source.handoffs
+                )
+                if sum(name == route.tool_name for name in names) != 1:
+                    raise UserError("Give each decision handoff a unique tool_name on its source.")
                 for label, (target, _) in route._roster.items():
-                    yield key, route, label, target
+                    if id(target) in bindings:
+                        raise UserError("Create a separate specialist for each decision label.")
+                    bindings[id(target)] = (route, label)
+            else:
+                ref = getattr(route, "_agent_ref", None)
+                ordinary.add(id(ref() if callable(ref) else getattr(route, "agent", route)))
+        for tool in source.tools:
+            if getattr(tool, "_is_agent_tool", False):
+                ordinary.add(id(getattr(tool, "_agent_instance", None)))
+    if ordinary.intersection(bindings):
+        raise UserError(
+            "A decision specialist cannot also be a root, agent tool or ordinary handoff "
+            "target. Create a separate specialist for each route."
+        )
+    return bindings
 
 
 def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
@@ -568,13 +592,14 @@ def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]
 
     # Keep ordinary identities stable. Bind specialist identities to their incoming
     # selectors so another edge cannot silently replace a removed selector or label.
-    bindings: dict[int, list[tuple[str, str, str]]] = {}
-    for key, route, label, target in _decision_edges(agent_identity_map):
-        bindings.setdefault(id(target), []).append((key, route.tool_name, label))
+    bindings = _decision_bindings(initial_agent)
     if bindings:
+        source_keys = {id(agent): key for key, agent in agent_identity_map.items()}
         for key, target in list(agent_identity_map.items()):
             if id(target) in bindings:
-                data = _stable_identity_text([key, sorted(bindings[id(target)])])
+                route, label = bindings[id(target)]
+                edge = (source_keys[id(route._source)], route.tool_name, label)
+                data = _stable_identity_text([key, [edge]])
                 identity = _DECISION_PREFIX + hashlib.sha256(data.encode()).hexdigest()
                 if identity in agent_identity_map:
                     raise ValueError("Conflicting specialist identity")

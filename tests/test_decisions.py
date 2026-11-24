@@ -4,12 +4,10 @@ import asyncio
 import json
 from dataclasses import replace
 from typing import Any
-from unittest.mock import Mock
 
 import httpx2
 import pytest
-from openai import AsyncOpenAI, InternalServerError
-from pydantic import BaseModel, Field, field_validator
+from openai import AsyncOpenAI
 
 from agents import (
     Agent,
@@ -19,18 +17,9 @@ from agents import (
     Runner,
     RunState,
     SQLiteSession,
-    Usage,
     handoff,
 )
-from agents.decisions import (
-    DecisionError,
-    DecisionRequest,
-    DecisionResult,
-    OpenAIDecisions,
-    decide,
-    decision_handoff,
-    decision_scope,
-)
+from agents.decisions import DecisionError, decision_handoff
 from agents.decorators import tool
 from agents.exceptions import UserError
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
@@ -38,119 +27,48 @@ from agents.testing import ModelStep, ScriptedModel, assistant_message, function
 CONFIG = RunConfig(tracing_disabled=True)
 
 
-class Provider:
-    """Script the decision boundary independently of the primary model."""
+class Peer:
+    """Offline transport for the generated Decisions resource."""
 
-    def __init__(self, value: Any):
+    def __init__(self, value="blue"):
+        if not hasattr(AsyncOpenAI, "decisions"):
+            pytest.skip("This client has no Decisions resource.")
+        self.requests = []
         self.value = value
-        self.requests: list[DecisionRequest] = []
+        self.client = AsyncOpenAI(
+            api_key="synthetic",
+            base_url="https://fixture.invalid/v1",
+            http_client=httpx2.AsyncClient(
+                transport=httpx2.MockTransport(self.respond), trust_env=False
+            ),
+        )
 
-    async def get_decision(self, request: DecisionRequest) -> DecisionResult[Any]:
-        self.requests.append(request)
-        return DecisionResult(self.value, "request", "fixture", Usage(requests=1, total_tokens=7))
-
-
-class DelegatingProvider:
-    def __init__(self, inner: Provider):
-        self.inner = inner
-
-    async def get_decision(self, request: DecisionRequest) -> DecisionResult[Any]:
-        return await decide(
-            request.question,
-            provider=self.inner,
-            input=request.input,
-            choices=request.output_schema["enum"],
+    async def respond(self, request):
+        assert request.url.path == "/v1/decisions"
+        self.requests.append(json.loads(request.content))
+        if self.value == "transport":
+            return httpx2.Response(500, json={})
+        answer = {"name": "decision", "type": "choice", "choice": self.value}
+        if self.value == "refusal":
+            answer = {"name": "decision", "type": "refusal", "refusal": "private"}
+        return httpx2.Response(
+            200,
+            headers={"x-request-id": "request"},
+            json={
+                "model": "fixture",
+                "answers": [answer],
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "total_tokens": 7,
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+            },
         )
 
 
-class Count(BaseModel):
-    count: int = Field(json_schema_extra={"minimum": 0})
-
-    @field_validator("count")
-    @classmethod
-    def even(cls, value: int) -> int:
-        if value % 2:
-            raise ValueError("private parser details")
-        return value
-
-
-async def test_decision_results_require_explicit_value_for_truth_tests():
-    predicate = await decide("Even?", provider=Provider(False), input="1")
-    label = await decide(
-        "Which?", provider=Provider("left"), input="turn", choices=["left", "right"]
-    )
-    typed = await decide(
-        "How many?", provider=Provider({"count": 2}), input="pair", output_type=Count
-    )
-    assert predicate.value is False
-    assert label.value == "left"
-    assert typed.value.count == 2
-    for result in (predicate, label, typed):
-        with pytest.raises(TypeError, match=r"\.value"):
-            bool(result)
-
-
-async def test_explicit_input_and_choices_are_captured_before_await():
-    provider = Provider(False)
-    evidence = [{"values": [1]}]
-    choices = [0, False, None]
-    pending = decide("Which?", provider=provider, input=evidence, choices=choices)
-    evidence[0]["values"].clear()
-    choices.clear()
-    result = await pending
-    assert result.value is False
-    assert provider.requests[0].input == [{"values": [1]}]
-    assert provider.requests[0].output_schema == {"enum": [0, False, None]}
-    assert result.usage is not None
-    assert (result.request_id, result.model, result.usage.total_tokens) == ("request", "fixture", 7)
-    assert (await decide("Even?", provider=Provider(True), input="2")).value is True
-    typed = await decide(
-        "How many?", provider=Provider({"count": 2}), input="pair", output_type=Count
-    )
-    assert typed.value.count == 2
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"question": " "},
-        {"input": None},
-        {"input": ""},
-        {"input": []},
-        {"input": [{"n": float("inf")}]},
-        {"input": [{1: True}]},
-        {"choices": []},
-        {"choices": [1, 1.0]},
-        {"choices": [float("nan")]},
-        {"choices": ["x"], "output_type": Count},
-    ],
-)
-async def test_invalid_requests_do_not_reach_provider(changes):
-    provider = Provider(True)
-    with pytest.raises(ValueError):
-        await decide(**{"question": "Which?", "provider": provider, "input": "item", **changes})
-    assert not provider.requests
-
-
-@pytest.mark.parametrize("value", [-2, 3, "private", float("nan")])
-async def test_schema_and_parser_failures_keep_only_metadata(value):
-    class MutableProvider(Provider):
-        async def get_decision(self, request):
-            request.output_schema.clear()
-            return await super().get_decision(request)
-
-    with pytest.raises(DecisionError) as caught:
-        await decide(
-            "Count?", provider=MutableProvider({"count": value}), input="pair", output_type=Count
-        )
-    error = caught.value
-    assert error.reason == "invalid_response" and error.__context__ is None
-    assert error.usage is not None
-    assert (error.model, error.request_id, error.usage.total_tokens) == ("fixture", "request", 7)
-    assert "private" not in repr(error)
-
-
-class BlockingProvider(Provider):
+class BlockingPeer(Peer):
     """Control suspension and simulate a provider returning success after cancellation."""
 
     def __init__(self):
@@ -159,99 +77,14 @@ class BlockingProvider(Provider):
         self.release = asyncio.Event()
         self.finished = asyncio.Event()
 
-    async def get_decision(self, request):
+    async def respond(self, request):
         self.started.set()
         try:
             await self.release.wait()
         except asyncio.CancelledError:
             await asyncio.sleep(0)
         self.finished.set()
-        return await super().get_decision(request)
-
-
-async def test_scope_requires_exact_live_owner_and_joins_revoked_work():
-    provider = BlockingProvider()
-    owner = {}
-    async with decision_scope(owner):
-        with pytest.raises(RuntimeError, match="owner"):
-            await decide("Which?", provider=provider, input="item", owner={})
-        stale = decide("Which?", provider=provider, input="item", owner=owner)
-        task = asyncio.create_task(
-            decide("Which?", provider=provider, input="item", choices=["blue"], owner=owner)
-        )
-        await provider.started.wait()
-    assert provider.finished.is_set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    async with decision_scope(owner):
-        with pytest.raises(RuntimeError, match="owner"):
-            await stale
-    assert len(provider.requests) == 1
-
-
-@pytest.mark.parametrize("case", ["choice", "predicate", "refusal", "invalid", "transport"])
-async def test_generated_client_without_network(case):
-    requests = []
-
-    def respond(req):
-        requests.append(json.loads(req.content))
-        assert req.url.path == "/v1/decisions"
-        if case == "transport":
-            return httpx2.Response(500, json={})
-        answer = {"name": "decision", "type": case, "choice": "blue", "probability": 0.7}
-        if case == "invalid":
-            answer.update(type="choice", choice="private")
-        return httpx2.Response(
-            200,
-            headers={"x-request-id": "observed"},
-            json={
-                "answers": [answer],
-                "model": "fixture",
-                "usage": {
-                    "input_tokens": 3,
-                    "output_tokens": 1,
-                    "total_tokens": 4,
-                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
-                    "output_tokens_details": {"reasoning_tokens": 0},
-                },
-            },
-        )
-
-    http = httpx2.AsyncClient(transport=httpx2.MockTransport(respond), trust_env=False)
-    async with AsyncOpenAI(
-        api_key="synthetic", base_url="https://fixture.invalid/v1", http_client=http
-    ) as client:
-        if not hasattr(client, "decisions"):
-            pytest.skip("Requires the optional Decisions client")
-        provider = OpenAIDecisions(client, model="fixture")
-        with pytest.raises(ValueError, match="predicate"):
-            await decide("How many?", provider=provider, input="item", output_type=Count)
-        options: dict[str, Any] = {} if case == "predicate" else {"choices": ["red", "blue"]}
-        pending = decide("Which?", provider=provider, input="item", **options)
-        if case == "transport":
-            with pytest.raises(InternalServerError):
-                await pending
-        else:
-            if case in ("refusal", "invalid"):
-                with pytest.raises(DecisionError) as caught:
-                    await pending
-                result = caught.value
-                assert result.reason == ("refusal" if case == "refusal" else "invalid_response")
-                assert result.__context__ is None and "private" not in repr(result)
-            else:
-                result = await pending
-                assert result.value == (True if case == "predicate" else "blue")
-            assert result.usage is not None
-            assert (result.request_id, result.model, result.usage.total_tokens) == (
-                "observed",
-                "fixture",
-                4,
-            )
-        assert len(requests) == 1 and requests[0]["input"] == "item"
-        assert requests[0]["questions"][0]["type"] == (
-            "predicate" if case == "predicate" else "choice"
-        )
-        assert not http.is_closed
+        return await super().respond(request)
 
 
 def source_agent(arguments=None):
@@ -284,46 +117,13 @@ async def run(source, stream, value="history", **kwargs):
     return await Runner.run(source, value, run_config=CONFIG, **kwargs)
 
 
-@pytest.mark.parametrize("stream", [False, True])
-async def test_handoff_provider_can_delegate_a_decision(stream):
-    inner = Provider("blue")
-    provider = DelegatingProvider(inner)
-    answer = await decide("Which?", provider=provider, input="evidence", choices=["blue"])
-    assert answer.value == "blue"
-
-    source = source_agent()
-    target = Agent(name="Blue", model=ScriptedModel([[assistant_message("done")]]))
-    source.handoffs.append(
-        decision_handoff(source, provider=provider, question="Which?", targets={"blue": target})
-    )
-    result = await run(source, stream)
-    assert result.last_agent is target
-    assert len(inner.requests) == 2 and inner.requests[0] == inner.requests[1]
-
-
-async def test_handoff_cannot_replace_an_external_decision_owner():
-    source = source_agent()
-    inner = Provider("blue")
-    source.handoffs.append(
-        decision_handoff(
-            source,
-            provider=inner,
-            question="Which?",
-            targets={"blue": Agent(name="Blue", model=ScriptedModel())},
-        )
-    )
-    async with decision_scope(object()):
-        with pytest.raises(RuntimeError, match="owner"):
-            await run(source, False)
-    assert not inner.requests
-
-
 def test_openai_single_target_suggests_ordinary_handoff():
     source = source_agent()
     with pytest.raises(ValueError, match=r"handoff\(target\)"):
         decision_handoff(
             source,
-            provider=OpenAIDecisions(Mock(spec=AsyncOpenAI), model="fixture"),
+            client=Peer().client,
+            model="fixture",
             question="Which?",
             targets={"blue": Agent(name="Blue")},
         )
@@ -338,14 +138,15 @@ async def test_input_filter_changes_specialist_history_only(stream, routed):
 
     model = ScriptedModel([[assistant_message("done")]])
     target = Agent(name="Blue", model=model)
-    provider = Provider("blue")
+    provider = Peer("blue")
     if routed:
         source = source_agent()
         route = decision_handoff(
             source,
-            provider=provider,
+            client=provider.client,
+            model="fixture",
             question="Which?",
-            targets={"blue": target},
+            targets={"blue": target, "red": Agent(name="Red")},
             input_filter=summary,
         )
     else:
@@ -359,7 +160,7 @@ async def test_input_filter_changes_specialist_history_only(stream, routed):
     result = await run(source, stream)
     assert result.last_agent is target
     assert model.calls[0].input == [{"role": "user", "content": "summary"}]
-    assert [request.input for request in provider.requests] == (["evidence"] if routed else [])
+    assert [request["input"] for request in provider.requests] == (["evidence"] if routed else [])
 
 
 @pytest.mark.parametrize("count", [0, 1, 2, 255, 256])
@@ -367,10 +168,11 @@ async def test_openai_handoff_catalog_uses_permitted_choice_count(count):
     model = ScriptedModel([[assistant_message("stay")]])
     source = Agent(name="Source", model=model)
     targets = {str(i): Agent(name=str(i)) for i in range(max(2, count))}
-    client = Mock(spec=AsyncOpenAI)
+    client = Peer().client
     route = decision_handoff(
         source,
-        provider=OpenAIDecisions(client, model="fixture"),
+        client=client,
+        model="fixture",
         question="Which?",
         targets=targets,
         is_available=lambda ctx, label: int(label) < count,
@@ -389,18 +191,15 @@ async def test_openai_handoff_revoked_after_catalog_skips_provider(stream, monke
         async def on_llm_end(self, context, agent, response):
             del targets["red"]
 
-    client = Mock(spec=AsyncOpenAI)
-    provider = OpenAIDecisions(client, model="fixture")
-    with pytest.raises(ValueError, match="2 to 255"):
-        await decide("Which?", provider=provider, input="item", choices=["blue"])
-    calls = Provider("blue")
-    monkeypatch.setattr(provider, "get_decision", calls.get_decision)
+    provider = Peer()
     source.handoffs.append(
-        decision_handoff(source, provider=provider, question="Which?", targets=targets)
+        decision_handoff(
+            source, client=provider.client, model="fixture", question="Which?", targets=targets
+        )
     )
     with pytest.raises(ValueError, match="unavailable"):
         await run(source, stream, hooks=Hooks())
-    assert not calls.requests
+    assert not provider.requests
     assert isinstance(source.model, ScriptedModel)
     assert len(source.model.calls) == 1 and source.model.calls[0].handoffs
 
@@ -429,14 +228,15 @@ async def test_runner_preserves_context_call_identity_and_specialist_permissions
     )
     red = Agent(name="Red", model=ScriptedModel())
     source = source_agent()
-    provider = Provider("blue")
+    provider = Peer("blue")
     targets = {"red": red, "blue": blue}
     route = decision_handoff(
         source,
-        provider=provider,
+        client=provider.client,
+        model="fixture",
         question="Which?",
         targets=targets,
-        is_available=lambda ctx, label: ctx.context["allowed"] == label,
+        is_available=lambda ctx, label: label == "red" or ctx.context["allowed"] == label,
     )
     source.handoffs.append(route)
     result = await run(
@@ -475,12 +275,12 @@ async def test_runner_preserves_context_call_identity_and_specialist_permissions
     resumed = await Runner.run(source, state, run_config=CONFIG)
     assert resumed.final_output == "done" and effects == ["approved"]
     assert len(model.calls) == len(provider.requests) == 1
-    assert provider.requests[0].input == "evidence"
-    assert provider.requests[0].output_schema == {"enum": ["blue"]}
+    assert provider.requests[0]["input"] == "evidence"
+    assert provider.requests[0]["questions"][0]["choices"] == [{"value": "red"}, {"value": "blue"}]
 
 
 async def test_restore_rebuilt_roster_binds_label_and_agent_without_reselection():
-    provider = Provider("blue")
+    provider = Peer("blue")
     effects = []
 
     @tool(needs_approval=True)
@@ -497,7 +297,13 @@ async def test_restore_rebuilt_roster_binds_label_and_agent_without_reselection(
             model=ScriptedModel([[function_call("record", {}, call_id="write")]]),
         )
         source.handoffs.append(
-            decision_handoff(source, provider=provider, question="Which?", targets={label: target})
+            decision_handoff(
+                source,
+                client=provider.client,
+                model="fixture",
+                question="Which?",
+                targets={label: target, "red": Agent(name="Red")},
+            )
         )
         return source, target
 
@@ -519,13 +325,14 @@ async def test_restore_rebuilt_roster_binds_label_and_agent_without_reselection(
 async def test_no_transfer_after_revocation_failure_or_cancellation(case):
     source = source_agent()
     model = ScriptedModel([[assistant_message("unexpected")]])
-    targets = {"blue": Agent(name="Blue", model=model)}
+    targets = {"blue": Agent(name="Blue", model=model), "red": Agent(name="Red")}
     context = {"allowed": True}
-    provider = BlockingProvider()
+    provider = BlockingPeer()
     source.handoffs.append(
         decision_handoff(
             source,
-            provider=provider,
+            client=provider.client,
+            model="fixture",
             question="Which?",
             targets=targets,
             is_available=lambda ctx, label: ctx.context["allowed"],
@@ -565,9 +372,15 @@ async def test_no_transfer_after_revocation_failure_or_cancellation(case):
 @pytest.mark.parametrize("arguments", [{"input": "a", "grant": True}, {"input": "é" * 4097}])
 async def test_model_cannot_extend_routing_input(arguments):
     source = source_agent(arguments)
-    provider = Provider("blue")
+    provider = Peer("blue")
     source.handoffs.append(
-        decision_handoff(source, provider=provider, question="Which?", targets={"blue": source})
+        decision_handoff(
+            source,
+            client=provider.client,
+            model="fixture",
+            question="Which?",
+            targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
+        )
     )
     with pytest.raises(ValueError, match="routing input"):
         await run(source, False)
@@ -593,14 +406,14 @@ async def test_handoff_error_redaction(
         arguments["extra"] = "unknown"
     source = source_agent(arguments)
 
-    class RefusingProvider(Provider):
-        async def get_decision(self, request):
-            self.requests.append(request)
-            raise DecisionError("refusal", request_id="observed") from ValueError(request.input)
+    provider = Peer("refusal" if failure == "refusal" else "unknown")
 
-    provider = RefusingProvider(None) if failure == "refusal" else Provider("unknown")
     handoff = decision_handoff(
-        source, provider=provider, question="Which?", targets={"blue": source}
+        source,
+        client=provider.client,
+        model="fixture",
+        question="Which?",
+        targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
     )
     source.handoffs.append(handoff)
     errors: list[Exception] = []
@@ -625,27 +438,25 @@ async def test_handoff_error_redaction(
         assert not provider.requests
     else:
         assert isinstance(error, DecisionError) and error.reason == failure
-        assert error.request_id == ("observed" if failure == "refusal" else "request")
+        assert error.request_id == "request"
     assert _is_error_data_redacted(error) == (hide_model or hide_tool)
     if hide_model or hide_tool:
         assert error.__cause__ is error.__context__ is None
         assert marker not in str(error)
         assert marker not in repr(_agents_traceback_frame_locals(error))
-    elif failure == "refusal":
-        assert marker in str(error.__cause__)
 
 
-@pytest.mark.parametrize("delegate", [False, True])
-async def test_immediate_stream_cancellation_drains_late_selection(delegate):
+async def test_immediate_stream_cancellation_drains_late_selection():
     source = source_agent()
     model = ScriptedModel()
-    provider = BlockingProvider()
+    provider = BlockingPeer()
     source.handoffs.append(
         decision_handoff(
             source,
-            provider=DelegatingProvider(provider) if delegate else provider,
+            client=provider.client,
+            model="fixture",
             question="Which?",
-            targets={"blue": Agent(name="Blue", model=model)},
+            targets={"blue": Agent(name="Blue", model=model), "red": Agent(name="Red")},
         )
     )
     result = Runner.run_streamed(source, "history", run_config=CONFIG)
@@ -666,7 +477,7 @@ async def test_immediate_stream_cancellation_drains_late_selection(delegate):
 
 @pytest.mark.parametrize("stream", [False, True])
 async def test_primary_can_answer_without_selection_and_clones_need_their_own_route(stream):
-    provider = Provider("blue")
+    provider = Peer("blue")
     model = ScriptedModel(
         [
             [assistant_message("direct")],
@@ -678,7 +489,11 @@ async def test_primary_can_answer_without_selection_and_clones_need_their_own_ro
     source = Agent(name="Source", model=model)
     original = Agent(name="Blue", model=ScriptedModel([[assistant_message("original")]]))
     route = decision_handoff(
-        source, question="Which?", targets={"blue": original}, provider=provider
+        source,
+        question="Which?",
+        targets={"blue": original, "red": Agent(name="Red")},
+        client=provider.client,
+        model="fixture",
     )
     source.handoffs.append(route)
     shallow = source.clone()
@@ -691,44 +506,18 @@ async def test_primary_can_answer_without_selection_and_clones_need_their_own_ro
     clone = source.clone(handoffs=[])
     alternate = Agent(name="Blue", model=ScriptedModel([[assistant_message("alternate")]]))
     clone.handoffs.append(
-        decision_handoff(clone, question="Which?", targets={"blue": alternate}, provider=provider)
+        decision_handoff(
+            clone,
+            question="Which?",
+            targets={"blue": alternate, "red": Agent(name="Red")},
+            client=provider.client,
+            model="fixture",
+        )
     )
     assert source.handoffs == [route]
     assert (await run(clone, stream)).last_agent is alternate
     assert (await run(source, stream)).last_agent is original
     assert len(provider.requests) == 2
-
-
-async def test_scope_exit_during_cancelled_request_joins_without_interrupting_cleanup():
-    started = asyncio.Event()
-    cleaning = asyncio.Event()
-    release = asyncio.Event()
-    cleaned = asyncio.Event()
-
-    class SlowCleanup:
-        async def get_decision(self, request):
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cleaning.set()
-                await release.wait()
-                cleaned.set()
-
-    owner = object()
-    async with decision_scope(owner):
-        task = asyncio.create_task(
-            decide("Ready?", provider=SlowCleanup(), input="item", owner=owner)
-        )
-        try:
-            await started.wait()
-            task.cancel()
-            await cleaning.wait()
-        finally:
-            asyncio.get_running_loop().call_soon(release.set)
-    assert cleaned.is_set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
 
 
 async def test_explicit_recovery_returns_to_caller_without_transferring():
@@ -739,9 +528,13 @@ async def test_explicit_recovery_returns_to_caller_without_transferring():
         ]
     )
     source = Agent(name="Source", model=model)
-    provider = Provider("unknown")
+    provider = Peer("unknown")
     route = decision_handoff(
-        source, provider=provider, question="Which?", targets={"blue": Agent(name="Blue")}
+        source,
+        client=provider.client,
+        model="fixture",
+        question="Which?",
+        targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
     )
     route.failure_error_function = lambda ctx, error: "Transfer unavailable"
     source.handoffs.append(route)
@@ -760,13 +553,15 @@ async def test_explicit_recovery_returns_to_caller_without_transferring():
 async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_first, failure):
     effects = []
 
-    class Failing:
-        async def get_decision(self, request):
+    class Failing(Peer):
+        async def respond(self, request):
             effects.append("select")
             if failure == "refusal":
-                raise DecisionError("refusal")
+                self.value = "refusal"
+                return await super().respond(request)
             if failure == "invalid":
-                return DecisionResult("unknown")
+                self.value = "unknown"
+                return await super().respond(request)
             if failure == "timeout":
                 await asyncio.Event().wait()
             future = asyncio.get_running_loop().create_future()
@@ -794,10 +589,11 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
     source.handoffs.append(
         decision_handoff(
             source,
-            provider=Failing(),
+            client=Failing().client,
+            model="fixture",
             question="Which?",
             timeout=0.01 if failure == "timeout" else 30,
-            targets={"blue": Agent(name="Blue", model=specialist)},
+            targets={"blue": Agent(name="Blue", model=specialist), "red": Agent(name="Red")},
         )
     )
     session = SQLiteSession("receipts")
@@ -813,7 +609,7 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
         with pytest.raises(error) as caught:
             await run(source, stream, value, session=session)
         if failure == "cancel":
-            assert str(caught.value) == "Decision provider cancelled its request"
+            assert str(caught.value) == "Decisions request was cancelled"
         if approve_first:
             items = [
                 entry["raw_item"]
@@ -833,7 +629,7 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
 @pytest.mark.parametrize("stream", [False, True])
 async def test_nested_specialist_uses_fresh_context_and_owns_approval(stream):
     effects = []
-    provider = Provider("blue")
+    provider = Peer("blue")
 
     @tool(needs_approval=True)
     def record(ctx: RunContextWrapper[dict[str, str]]) -> str:
@@ -849,10 +645,11 @@ async def test_nested_specialist_uses_fresh_context_and_owns_approval(stream):
     )
     route = decision_handoff(
         source,
-        provider=provider,
+        client=provider.client,
+        model="fixture",
         question="Which?",
-        targets={"blue": target},
-        is_available=lambda ctx, label: ctx.context["allowed"] == label,
+        targets={"blue": target, "red": Agent(name="Red")},
+        is_available=lambda ctx, label: label == "red" or ctx.context["allowed"] == label,
     )
     source.handoffs.append(route)
     manager = Agent(
@@ -882,3 +679,166 @@ async def test_nested_specialist_uses_fresh_context_and_owns_approval(stream):
     done = await run(manager, not stream, state)
     assert done.final_output == "done"
     assert len(effects) == len(provider.requests) == 1 and effects[0] is fresh
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode", ["memory", "loaded", "session"])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_resume_rechecks_only_selected_grant_before_any_effect(stream, mode, nested):
+    from agents.memory.resumable_session import ResumableSession
+    from tests.memory.test_resumable_session import MemoryStore
+
+    effects = []
+
+    @tool(needs_approval=True)
+    def record() -> str:
+        effects.append("record")
+        return "done"
+
+    source = source_agent()
+    blue = Agent(
+        name="Blue",
+        model=ScriptedModel([[function_call("record", {}, call_id="effect")]]),
+        tools=[record],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    targets = {"blue": blue, "red": Agent(name="Red")}
+    peer = Peer()
+    grants = {"blue", "red"}
+    route = decision_handoff(
+        source,
+        client=peer.client,
+        model="fixture",
+        question="Which?",
+        targets=targets,
+        is_available=lambda ctx, label: label in grants,
+    )
+    source.handoffs.append(route)
+    root = source
+    if nested:
+        delegate = source.as_tool("ask", "Ask")
+        sibling = Agent(name="Other").as_tool("ask", "Other", is_enabled=False)
+        root = Agent(
+            name="Manager",
+            model=ScriptedModel(
+                [
+                    [function_call("ask", {"input": "work"}, call_id="child")],
+                    [assistant_message("done")],
+                ]
+            ),
+            tools=[delegate, sibling],
+        )
+    store = MemoryStore()
+    session = await ResumableSession.create(store) if mode == "session" else None
+    state = (await run(root, stream, context={}, session=session)).to_state()
+    if session:
+        state = await session.load_state(root, context_override={})
+    elif mode == "loaded":
+        state = await RunState.from_string(root, state.to_string(), context_override={})
+    grants.clear()
+    state.approve(state.get_interruptions()[0])
+    before = store.records.copy()
+    with pytest.raises(UserError, match="specialist unavailable"):
+        await run(root, stream, state)
+    grants.add("blue")
+    source.handoffs.clear()
+    with pytest.raises(UserError):
+        await run(root, stream, state)
+    assert not effects and store.records == before
+    source.handoffs.append(route)
+    if nested:
+        for enabled, other in [(False, False), (True, True), (False, True)]:
+            delegate.is_enabled, sibling.is_enabled = enabled, other
+            with pytest.raises(UserError, match="same enabled agent tool"):
+                await run(root, stream, state)
+            assert not effects and store.records == before and len(peer.requests) == 1
+        delegate.is_enabled, sibling.is_enabled = True, False
+    assert (await run(root, stream, state)).final_output == "done"
+    assert effects == ["record"] and len(peer.requests) == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("other", ["plain", "handoff", "decision"])
+async def test_shared_specialist_rejected_before_primary_inference(stream, other):
+    source = source_agent()
+    peer = Peer()
+    blue = Agent(name="Blue")
+
+    def route(name):
+        return decision_handoff(
+            source,
+            client=peer.client,
+            model="fixture",
+            question="Which?",
+            tool_name=name,
+            targets={"blue": blue, "red": Agent(name="Red")},
+        )
+
+    source.handoffs.append(route("select_specialist"))
+    source.handoffs.append(
+        blue if other == "plain" else handoff(blue) if other == "handoff" else route("second")
+    )
+    with pytest.raises(UserError, match="separate specialist"):
+        await run(source, stream)
+    assert isinstance(source.model, ScriptedModel)
+    assert not source.model.calls and not peer.requests
+
+
+def test_invalid_permanent_configuration(monkeypatch):
+    client = Peer().client
+    blue = Agent(name="Blue")
+    targets = {"blue": blue, "red": Agent(name="Red")}
+
+    def build(model="fixture", roster=targets):
+        return decision_handoff(
+            source_agent(), client=client, model=model, question="Which?", targets=roster
+        )
+
+    with pytest.raises(ValueError, match="model"):
+        build(" ")
+    with pytest.raises(ValueError, match="separate"):
+        build(roster={"a": blue, "b": blue})
+    with pytest.raises(ValueError, match="255"):
+        build(roster={str(i): Agent(name=str(i)) for i in range(256)})
+    monkeypatch.setattr(AsyncOpenAI, "decisions", None, raising=False)
+    with pytest.raises(ValueError, match="Decisions support"):
+        build()
+
+
+async def test_transport_error_has_no_retry():
+    from openai import InternalServerError
+
+    peer = Peer("transport")
+    source = source_agent()
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            client=peer.client,
+            model="fixture",
+            question="Which?",
+            targets={"a": Agent(name="A"), "b": Agent(name="B")},
+        )
+    )
+    with pytest.raises(InternalServerError):
+        await run(source, False)
+    assert len(peer.requests) == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_selector_names_must_be_unique_before_inference(stream):
+    source = source_agent()
+    peer = Peer()
+    for _ in range(2):
+        source.handoffs.append(
+            decision_handoff(
+                source,
+                client=peer.client,
+                model="fixture",
+                question="Which?",
+                targets={"blue": Agent(name="Blue"), "red": Agent(name="Red")},
+            )
+        )
+    with pytest.raises(UserError, match="unique tool_name"):
+        await run(source, stream)
+    assert isinstance(source.model, ScriptedModel)
+    assert not source.model.calls and not peer.requests

@@ -29,6 +29,7 @@ from .memory.session_settings import (
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
+from .run_budget import RunBudget
 from .run_context import TContext
 from .run_error_handlers import RunErrorHandlers
 from .tracing import TracingConfig
@@ -671,6 +672,9 @@ class RunConfig:
     metadata. No redactor is active by default.
     """
 
+    budget: RunBudget | None = None
+    """Optional limits on root model calls and observed tokens."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -703,6 +707,7 @@ class RunConfig:
                 str | OutputGuardrailBlockedMessageFormatter | None
             ) = None,
             redact_text: Callable[[str], str] | None = None,
+            budget: RunBudget | dict[str, Any] | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
@@ -710,6 +715,10 @@ class RunConfig:
             not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
         ):
             raise TypeError("redact_text must be a synchronous callable or None")
+        if self.budget is not None:
+            self.budget = coerce_dataclass_config(
+                self.budget, RunBudget, parameter_name="run_config.budget"
+            )
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message
