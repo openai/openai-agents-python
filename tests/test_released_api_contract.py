@@ -1411,6 +1411,22 @@ def test_typed_dict_requiredness_annotation_contract_is_python_version_independe
     assert contract_surface._annotation_contract(annotation) == expected
 
 
+def test_native_mcp_result_field_contract_is_python_version_independent() -> None:
+    from agents import NativeMCPResult
+
+    for name, annotation in {
+        "content": "list[dict[str, Any]]",
+        "structuredContent": "Any",
+        "isError": "bool | None",
+        "_meta": "dict[str, Any] | None",
+    }.items():
+        assert contract_surface._typed_dict_field_contract(NativeMCPResult, name) == {
+            "name": name,
+            "annotation": annotation,
+            "required": name == "content",
+        }
+
+
 def test_curated_public_property_contract_honors_optional_dependency_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3910,6 +3926,10 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             "module": "agents",
             "name": "OutputGuardrailBlockedMessageFormatter",
         },
+        {
+            "module": "agents",
+            "name": "ModelSelector",
+        },
     )
     type_aliases: dict[tuple[str, str], dict[str, Any]] = {
         (cast(str, entry["module"]), cast(str, entry["name"])): cast(
@@ -3967,6 +3987,31 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             ],
         },
     }
+    selector_results = [
+        {"identity": "builtins.NoneType", "kind": "type"},
+        {"identity": "builtins.str", "kind": "type"},
+    ]
+    assert type_aliases[("agents", "ModelSelector")] == {
+        "kind": "callable",
+        "parameters": [
+            {
+                "arguments": [{"kind": "any"}],
+                "kind": "generic",
+                "origin": "agents.run_config.ModelSelectionData",
+            }
+        ],
+        "return": {
+            "kind": "union",
+            "members": [
+                {
+                    "arguments": [{"kind": "union", "members": selector_results}],
+                    "kind": "generic",
+                    "origin": "collections.abc.Awaitable",
+                },
+                *selector_results,
+            ],
+        },
+    }
     assert policy.public_typed_dicts == (
         {
             "class_name": "WebSearchToolImageSettings",
@@ -3990,6 +4035,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
                 "quality",
                 "size",
             ],
+        },
+        {
+            "class_name": "NativeMCPResult",
+            "module": "agents",
+            "names": ["content", "structuredContent", "isError", "_meta"],
         },
         {
             "class_name": "ModelStepSpec",

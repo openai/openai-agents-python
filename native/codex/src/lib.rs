@@ -1,6 +1,8 @@
 //! Private, asynchronous Core bindings for the opt-in Codex model provider.
 mod approval_files;
+mod children;
 mod config;
+mod mcp_results;
 mod native_approval;
 mod operation_tracing;
 mod tool_hooks;
@@ -45,6 +47,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 /// A detached cleanup task keeps running when a Python awaitable is cancelled.
 struct ThreadRecord {
+    role_files: std::sync::Mutex<Option<tempfile::TempDir>>,
     services: Arc<CoreServices>,
     thread: Arc<CodexThread>,
     id: ThreadId,
@@ -61,8 +64,10 @@ impl ThreadRecord {
                 let thread = self.thread.clone();
                 let services = self.services.clone();
                 let id = self.id;
+                let role_files = self.role_files.lock().unwrap().take();
                 let operations = self.operations.clone();
                 let task = runtime().spawn(async move {
+                    let _role_files = role_files;
                     let result = async {
                         // Each fresh root owns an independent local agent runtime. Fence that
                         // exact tree before waiting, so native subagents cannot outlive an attempt.
@@ -96,6 +101,7 @@ impl ThreadRecord {
                     .await;
                     // Detach even when a joined shutdown returns an error; the buffer remains drainable.
                     operations.close();
+                    services.mcp_results.close(&id.to_string());
                     result
                 });
                 async move {
@@ -121,6 +127,7 @@ impl ThreadRecord {
 /// Dropping a cancelled startup result therefore closes the thread, while manager
 /// shutdown can still wait for the detached cleanup task to finish.
 struct ThreadLease {
+    mcp_results: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<mcp_results::PendingResult>>>,
     record: Arc<ThreadRecord>,
 }
 
@@ -142,12 +149,14 @@ struct Settings {
     helper: PathBuf,
     overrides: Vec<String>,
     api_key: Option<String>,
+    children: Option<Arc<children::Children>>,
 }
 
 struct StartRequest {
+    mcp_tools: Vec<(String, String)>,
     tools: String,
     instructions: Option<String>,
-    settings: String,
+    settings: serde_json::Value,
     reply: oneshot::Sender<NativeResult<Arc<ThreadLease>>>,
 }
 
@@ -182,34 +191,65 @@ async fn start_thread(
     services: Arc<CoreServices>,
     request: &StartRequest,
 ) -> NativeResult<Arc<ThreadLease>> {
-    let settings = serde_json::from_str(&request.settings)
-        .map_err(|_| "Invalid Codex attempt settings.".to_owned())?;
-    let mut config = prepare_config(&services, &settings).await?;
+    let settings = &request.settings;
+    let mut config = prepare_config(&services, settings).await?;
     if let Some(instructions) = &request.instructions {
         config.developer_instructions = Some(instructions.clone());
     }
+    let role_files = services
+        .children
+        .as_ref()
+        .map(|profile| profile.install(&mut config))
+        .transpose()?;
     let values = serde_json::from_str(&request.tools)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
     let mut options = StartThreadOptions::new(config);
+    if let Some(key) = settings
+        .get("prompt_cache_key")
+        .and_then(serde_json::Value::as_str)
+    {
+        options.prompt_cache_key = codex_core_api::PromptCacheKey::Custom(key.to_owned());
+    }
     if settings
         .get("sdk_sandbox")
         .and_then(serde_json::Value::as_bool)
         == Some(true)
+        || services.children.is_some()
     {
         options.environments = Some(Vec::new());
     }
     options.dynamic_tools = normalize_dynamic_tool_specs(values)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
+    let mcp_results = if request.mcp_tools.is_empty() {
+        None
+    } else {
+        mcp_results::check_recording()?;
+        let (requests, receiver) = mpsc::unbounded_channel();
+        options
+            .thread_extension_init
+            .insert(mcp_results::Selection {
+                tools: request.mcp_tools.clone(),
+                requests,
+            });
+        Some(tokio::sync::Mutex::new(receiver))
+    };
     let created = Box::pin(services.manager.start_thread(options))
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
     let operations = services.operations.root(created.thread_id.to_string());
+    if mcp_results.is_some() && settings["sdk_tool_hooks"]["prepare_tool_output"] == true {
+        services
+            .mcp_results
+            .guard_calls(created.thread_id.to_string());
+    }
     Ok(Arc::new(ThreadLease {
+        mcp_results,
         record: Arc::new(ThreadRecord {
             approval_hooks: settings["sdk_tool_hooks"]["server"]
                 .as_str()
                 .map(|name| tool_hooks::trusted(&created.thread, name))
                 .unwrap_or_default(),
+            role_files: std::sync::Mutex::new(role_files),
             model: created.session_configured.model,
             id: created.thread_id,
             thread: created.thread,
@@ -236,12 +276,15 @@ async fn manager_actor(
                         .send(Err("The Codex provider is closed.".to_owned()));
                     continue;
                 }
+                // V1 can address any thread in its manager. Never share a granted tree.
                 if services.is_none() {
                     match build_services(
                         settings.cwd.clone(),
                         settings.helper.clone(),
                         settings.overrides.clone(),
                         settings.api_key.clone(),
+                        settings.children.clone(),
+                        &request.settings,
                     )
                     .await
                     {
@@ -252,17 +295,18 @@ async fn manager_actor(
                         }
                     }
                 }
+                let host = if settings.children.is_some() {
+                    services.take()
+                } else {
+                    services.clone()
+                };
                 if closed.load(Ordering::Acquire) || request.reply.is_closed() {
                     let _ = request
                         .reply
                         .send(Err("The Codex provider is closed.".to_owned()));
                     continue;
                 }
-                let result = start_thread(
-                    services.as_ref().expect("initialized services").clone(),
-                    &request,
-                )
-                .await;
+                let result = start_thread(host.expect("initialized services"), &request).await;
                 if let Ok(thread) = &result {
                     threads.0.retain(|entry| {
                         entry.cleanup.get().is_none_or(|cleanup| {
@@ -332,12 +376,13 @@ struct Manager {
 #[pymethods]
 impl Manager {
     #[new]
-    #[pyo3(signature = (cwd, helper_executable, config_overrides, api_key=None))]
+    #[pyo3(signature = (cwd, helper_executable, config_overrides, api_key=None, *, children=None))]
     fn new(
         cwd: String,
         helper_executable: String,
         config_overrides: Vec<String>,
         api_key: Option<String>,
+        children: Option<children::Children>,
     ) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let closed = Arc::new(AtomicBool::new(false));
@@ -348,6 +393,7 @@ impl Manager {
                 helper: PathBuf::from(helper_executable),
                 overrides: config_overrides,
                 api_key,
+                children: children.map(Arc::new),
             },
             closed.clone(),
         ));
@@ -360,12 +406,14 @@ impl Manager {
         }
     }
 
+    #[pyo3(signature = (dynamic_tools_json, instructions, settings_json, *, mcp_tools=None))]
     fn start_thread<'py>(
         &self,
         py: Python<'py>,
         dynamic_tools_json: String,
         instructions: Option<String>,
         settings_json: String,
+        mcp_tools: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(py_error("The Codex provider is closed."));
@@ -374,9 +422,11 @@ impl Manager {
         self.state
             .commands
             .send(ManagerCommand::Start(StartRequest {
+                mcp_tools: mcp_tools.clone().unwrap_or_default(),
                 tools: dynamic_tools_json,
                 instructions,
-                settings: settings_json,
+                settings: serde_json::from_str(&settings_json)
+                    .map_err(|_| py_error("Invalid Codex attempt settings."))?,
                 reply,
             }))
             .map_err(|_| py_error("The Codex manager stopped unexpectedly."))?;
@@ -385,6 +435,9 @@ impl Manager {
                 .await
                 .map_err(|_| py_error("The Codex manager stopped unexpectedly."))?
                 .map_err(py_error)?;
+            if let Some(tools) = mcp_tools {
+                mcp_results::verify(&lease.thread, &tools).await?;
+            }
             Python::attach(|py| Py::new(py, Thread { lease }))
         })
     }
@@ -441,6 +494,11 @@ impl Thread {
     fn tool_hook_orders(&self, server: &str) -> PyResult<Vec<(&'static str, i64)>> {
         self.lease.ensure_open().map_err(py_error)?;
         Ok(tool_hooks::registered(&self.lease.thread, server))
+    }
+
+    #[getter]
+    fn delegation_error(&self) -> Option<children::Denial> {
+        self.lease.services.budget.as_ref()?.denial()
     }
 
     fn inject_items<'py>(
@@ -510,22 +568,34 @@ impl Thread {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             lease.ensure_open().map_err(py_error)?;
-            let mut event = lease
-                .thread
-                .next_event()
-                .await
-                .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            let next = lease.thread.next_event();
+            let mut event = if let Some(requests) = &lease.mcp_results {
+                let mut receiver = requests.lock().await;
+                tokio::select! {
+                    Some(request) = receiver.recv() => {
+                        return Python::attach(|py| Py::new(py, request).map(Py::into_any));
+                    }
+                    event = next => event,
+                }
+            } else {
+                next.await
+            }
+            .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            let encode =
+                |text: String| Python::attach(|py| pyo3::IntoPyObjectExt::into_py_any(text, py));
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
                     let (preconditions, input_hash) = native_approval::checkpoint(&lease.thread, &mut event)
                         .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;
-                    return Ok(serde_json::json!({
-                        "id": event.id, "msg": event.msg, "preconditions": preconditions,
-                        "input_hash": input_hash,
-                    })
-                    .to_string());
+                    return encode(
+                        serde_json::json!({
+                            "id": event.id, "msg": event.msg, "preconditions": preconditions,
+                            "input_hash": input_hash,
+                        })
+                        .to_string(),
+                    );
                 }
                 EventMsg::RequestPermissions(_)
                 | EventMsg::RequestUserInput(_)
@@ -537,7 +607,10 @@ impl Thread {
                 EventMsg::RawResponseItem(raw) => lease.operations.observe_item(&raw.item),
                 _ => {}
             }
-            serde_json::to_string(&event).map_err(|_| py_error("Unable to decode the Codex event."))
+            encode(
+                serde_json::to_string(&event)
+                    .map_err(|_| py_error("Unable to decode the Codex event."))?,
+            )
         })
     }
 

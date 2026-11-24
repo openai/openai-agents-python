@@ -13,15 +13,15 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, RunConfig, Runner, UserError
+from agents import Agent, RunConfig, Runner
 from agents.testing import ScriptedModel
 from tests.test_responses import get_function_tool_call, get_text_message
 
 pytest.importorskip("a2a")
 
-from a2a.types import a2a_pb2 as a2a
+from a2a.types import Message, Task, a2a_pb2 as a2a
 
-from agents.extensions.a2a import A2AError, A2ATaskClient
+from agents.extensions.a2a import A2AClient, A2AError
 from examples.a2a.manager import Receipt, Registry, UnresolvedCall, ask_specialist, find_specialists
 
 
@@ -125,10 +125,46 @@ class Receiver:
         )
 
 
-def stored(url: str) -> A2ATaskClient:
-    return A2ATaskClient(
-        rpc_url=url, card=json.dumps(card(url)).encode(), rpc_token=lambda: "synthetic-rpc"
+def stored(url: str) -> A2AClient:
+    return A2AClient(
+        rpc_url=url,
+        card_json=json.dumps(card(url)).encode(),
+        rpc_token_provider=lambda: "synthetic-rpc",
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_message_preserves_standard_fields_without_a_task():
+    methods = []
+    reply = {
+        "messageId": "reply",
+        "role": "ROLE_AGENT",
+        "parts": [{"text": "yes"}, {"data": {"count": 1}}, {"text": ""}],
+        "metadata": {"source": "example"},
+        "referenceTaskIds": ["earlier"],
+    }
+
+    async def handle(request):
+        body = await request.json()
+        methods.append(body["method"])
+        assert body["params"]["message"]["messageId"] == "outgoing"
+        return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": {"message": reply}})
+
+    app = web.Application()
+    app.router.add_post("/rpc", handle)
+    async with TestServer(app) as server:
+        client = stored(str(server.make_url("/rpc")))
+        message = await client.send_message("Ready?", message_id="outgoing")
+        assert isinstance(message, Message)
+        assert message.message_id == "reply" and not message.context_id
+        assert message.parts[0].text == "yes"
+        assert message.parts[1].WhichOneof("content") == "data"
+        assert message.parts[2].WhichOneof("content") == "text"
+        assert message.metadata["source"] == "example"
+        assert list(message.reference_task_ids) == ["earlier"]
+        with pytest.raises(A2AError, match="request"):
+            await client.refresh_task(message)  # type: ignore[arg-type]
+        assert methods == ["SendMessage"]
 
 
 @pytest.mark.asyncio
@@ -154,6 +190,7 @@ async def test_refresh_task_reads_once_and_checks_both_ids(mismatch):
     async with TestServer(app) as server:
         client = stored(str(server.make_url("/rpc")))
         pending = await client.send_message("Ready?", message_id=uuid4().hex)
+        assert isinstance(pending, Task)
         assert methods == ["SendMessage"]
         if mismatch:
             with pytest.raises(A2AError, match="^A2A protocol error$"):
@@ -201,11 +238,11 @@ async def test_manager_filters_500_names_and_calls_two_hosts(tmp_path: Path):
         async with TestServer(east.app) as a, TestServer(west.app) as b:
             names = {f"other-{i}": stored(f"http://127.0.0.1:1/{i}") for i in range(498)}
             names["weather-east"] = stored(str(a.make_url("/rpc")))
-            names["weather-west"] = A2ATaskClient(
+            names["weather-west"] = A2AClient(
                 card_url=str(b.make_url("/card")),
-                card_token=lambda: "synthetic-card",
+                card_token_provider=lambda: "synthetic-card",
                 rpc_url=str(b.make_url("/rpc")),
-                rpc_token=lambda: "synthetic-rpc",
+                rpc_token_provider=lambda: "synthetic-rpc",
             )
 
             def lookup(owner, url, message):
@@ -247,13 +284,13 @@ async def test_lost_ack_restart_verifies_receipt_and_projects_original_result(tm
         async with TestServer(peer.app) as server:
             port = server.port
             url = str(server.make_url("/rpc"))
-            with pytest.raises(UserError) as err:
+            with pytest.raises(A2AError) as err:
                 await run_manager(
                     registry(db, peer, url), [[ask("east", uuid4().hex, f"Is {uuid4()} ready?")]]
                 )
-            cause = err.value.__cause__
-            assert isinstance(cause, A2AError) and cause.kind == "transport"
-            assert cause.__context__ is None
+            assert err.value.reason == "transport"
+            assert err.value.run_data is not None
+            assert err.value.__cause__ is None and err.value.__context__ is None
             assert peer.methods == ["SendMessage"]
 
     with (
@@ -311,7 +348,7 @@ async def test_lost_ack_restart_verifies_receipt_and_projects_original_result(tm
 async def test_untrusted_responses_never_reroute_or_expose_credentials(fault):
     calls = []
 
-    def rpc_token():
+    def rpc_token_provider():
         calls.append("grant")
         return "synthetic-rpc"
 
@@ -341,15 +378,15 @@ async def test_untrusted_responses_never_reroute_or_expose_credentials(fault):
     app.router.add_route("*", "/{path:.*}", handle)
     async with TestServer(app) as server:
         url = str(server.make_url("/rpc"))
-        client = A2ATaskClient(
+        client = A2AClient(
             rpc_url=url,
             card_url=str(server.make_url("/card")),
-            card_token=lambda: "synthetic-card",
-            rpc_token=rpc_token,
+            card_token_provider=lambda: "synthetic-card",
+            rpc_token_provider=rpc_token_provider,
         )
         with pytest.raises(A2AError) as err:
             await client.send_message("Ready?", message_id="request")
-        assert err.value.kind == (
+        assert err.value.reason == (
             "remote" if fault.startswith("redirect") or fault == "private-error" else "protocol"
         )
         assert "synthetic" not in str(err.value)
@@ -415,8 +452,90 @@ async def test_unavailable_grant_fails_without_retaining_supplier_error():
     def deny():
         raise PermissionError("synthetic-private-detail")
 
-    client = replace(stored("http://127.0.0.1:1/rpc"), rpc_token=deny)
+    client = replace(stored("http://127.0.0.1:1/rpc"), rpc_token_provider=deny)
     with pytest.raises(A2AError) as err:
         await client.send_message("Ready?", message_id="one")
-    assert err.value.kind == "authorization"
+    assert err.value.reason == "authorization"
     assert err.value.__context__ is None and err.value.__cause__ is None
+
+
+@pytest.mark.parametrize("field", ["rpc_token_provider", "card_token_provider"])
+def test_token_providers_require_callbacks_without_echoing_values(field):
+    options = {field: "private-value"}
+    with pytest.raises(TypeError, match=field) as exc:
+        A2AClient(rpc_url="https://example.org/rpc", card_url="https://example.org/card", **options)
+    assert "private-value" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fault",
+    ["id", "role", "parts", "content", "missing", "unknown", "both", "error", "correlation"],
+)
+async def test_invalid_message_or_envelope_fails_without_replay(fault):
+    methods = []
+
+    async def handle(request):
+        body = await request.json()
+        methods.append(body["method"])
+        message = {
+            "messageId": "" if fault == "id" else "reply",
+            "role": "ROLE_USER" if fault == "role" else "ROLE_AGENT",
+            "parts": []
+            if fault == "parts"
+            else [{} if fault == "content" else {"text": "private"}],
+        }
+        result = {"message": message}
+        if fault == "missing":
+            result = {}
+        elif fault == "unknown":
+            result = {"other": message}
+        elif fault == "both":
+            result["task"] = {
+                "id": "1",
+                "contextId": "c",
+                "status": {"state": "TASK_STATE_WORKING"},
+            }
+        envelope = {"jsonrpc": "2.0", "id": body["id"], "result": result}
+        if fault == "error":
+            envelope["error"] = {"code": -32603, "message": "private"}
+        elif fault == "correlation":
+            envelope["id"] = "wrong"
+        return web.json_response(envelope)
+
+    app = web.Application()
+    app.router.add_post("/rpc", handle)
+    async with TestServer(app) as server:
+        client = stored(str(server.make_url("/rpc")))
+        with pytest.raises(A2AError) as exc:
+            await client.send_message("Ready?", message_id="outgoing")
+        assert exc.value.reason == "protocol"
+        assert "private" not in str(exc.value)
+        assert exc.value.__cause__ is None and exc.value.__context__ is None
+        assert methods == ["SendMessage"]
+
+
+@pytest.mark.asyncio
+async def test_direct_message_keeps_the_registry_reservation():
+    methods = []
+
+    async def handle(request):
+        body = await request.json()
+        methods.append(body["method"])
+        message = {"messageId": "reply", "role": "ROLE_AGENT", "parts": [{"text": "yes"}]}
+        return web.json_response(
+            {"jsonrpc": "2.0", "id": body["id"], "result": {"message": message}}
+        )
+
+    app = web.Application()
+    app.router.add_post("/rpc", handle)
+    async with TestServer(app) as server:
+        with closing(sqlite3.connect(":memory:")) as db:
+            peer = stored(str(server.make_url("/rpc")))
+            registry = Registry("owner", "run", {"east": peer}, db, lambda *_: None)
+            with pytest.raises(UnresolvedCall, match="requires a task"):
+                await registry.ask("call", "east", "Ready?")
+            with pytest.raises(UnresolvedCall):
+                await registry.ask("call", "east", "Ready?")
+            assert registry.reserved_calls() == [("call", "east")]
+            assert methods == ["SendMessage"]

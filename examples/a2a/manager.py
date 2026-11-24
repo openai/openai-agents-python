@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from itertools import islice
 from uuid import uuid4
 
-from a2a.types import a2a_pb2 as a2a
+from a2a.types import Task, a2a_pb2 as a2a
 
 from agents.decorators import tool
-from agents.extensions.a2a import A2ATaskClient
+from agents.extensions.a2a import A2AClient
 from agents.tool_context import ToolContext
 
 
@@ -37,7 +37,7 @@ class Registry:
 
     owner: str
     run_id: str
-    specialists: Mapping[str, A2ATaskClient]
+    specialists: Mapping[str, A2AClient]
     db: sqlite3.Connection
     lookup_receipt: Callable[[str, str, str], Receipt | None]
 
@@ -65,6 +65,9 @@ class Registry:
                 (*key, *binding, message_id),
             ).rowcount
         task = await specialist.send_message(question, message_id=message_id) if created else None
+        if task is not None and not isinstance(task, Task):
+            del task
+            raise UnresolvedCall("Receipt recovery requires a task")
         return await self._result(call_id, expected=binding, task=task)
 
     def reserved_calls(self) -> list[tuple[str, str]]:
@@ -89,7 +92,7 @@ class Registry:
         call_id: str,
         *,
         expected: tuple[str, str, str] | None = None,
-        task: a2a.Task | None = None,
+        task: Task | None = None,
     ) -> str:
         row = self.db.execute(
             "SELECT name, endpoint, digest, message_id FROM calls "

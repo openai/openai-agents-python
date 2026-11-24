@@ -27,6 +27,7 @@ from .._redaction import (
     current_redactor,
     redact_model_input,
     redact_response,
+    require_clean,
     require_clean_final_output,
     set_final_output_item,
 )
@@ -72,7 +73,7 @@ from ..logger import (
     log_tool_action_warning,
     logger,
 )
-from ..memory import Session
+from ..memory import Session, is_openai_responses_compaction_aware_session
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -115,6 +116,7 @@ from .agent_runner_helpers import (
     reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_for_server_model,
     validate_output_guardrails_with_server_managed_conversation,
 )
 from .agent_tool_configuration import guard_agent_tool_configuration
@@ -241,6 +243,7 @@ from .turn_preparation import (
     get_model_settings,
     get_output_schema,
     maybe_filter_model_input,
+    select_model_name,
     validate_run_hooks,
 )
 from .turn_resolution import (
@@ -369,6 +372,25 @@ async def _should_persist_stream_items(
         return False
     should_skip_session_save = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
     return should_skip_session_save is False
+
+
+def _with_feedback(
+    items: list[TResponseInputItem],
+    message: str | None,
+    tracker: OpenAIServerConversationTracker | None,
+    session: Session | None,
+) -> list[TResponseInputItem]:
+    if message is None:
+        return items
+    if tracker is not None or (
+        is_openai_responses_compaction_aware_session(session)
+        and getattr(session, "compaction_mode", None) != "input"
+    ):
+        raise UserError("ContinueWithFeedback requires SDK-managed input without response IDs")
+    # Keep the extra item out of replay and check it before exposing it to the filter.
+    request: list[TResponseInputItem] = [*items, {"role": "user", "content": message}]
+    require_clean(request)
+    return request
 
 
 def _prepare_turn_input_items(
@@ -1318,6 +1340,7 @@ async def start_streaming(
         raise
 
     try:
+        pending_feedback: str | None = None
         while True:
             validate_output_guardrails_with_server_managed_conversation(
                 current_agent,
@@ -1657,6 +1680,7 @@ async def start_streaming(
                             turn_result.tool_output_guardrail_results
                         )
                         if turn_result.next_step.continue_after_guardrails:
+                            pending_feedback = turn_result.feedback
                             if run_state is not None:
                                 run_state._current_step = NextStepRunAgain()
                             if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
@@ -1753,6 +1777,7 @@ async def start_streaming(
                     run_state._session_items = list(streamed_result.new_items)
 
             current_turn += 1
+            feedback, pending_feedback = pending_feedback, None
             streamed_result.current_turn = current_turn
             streamed_result._current_turn_persisted_item_count = 0
             if run_state is not None:
@@ -1997,6 +2022,7 @@ async def start_streaming(
                         tool_use_tracker,
                         server_conversation_tracker,
                         pending_server_items=pending_server_items,
+                        feedback=feedback,
                         session=session,
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
@@ -2241,6 +2267,7 @@ async def start_streaming(
                     if streamed_result._stored_exception is not None:
                         break
                     if turn_result.next_step.continue_after_guardrails:
+                        pending_feedback = turn_result.feedback
                         streamed_result._model_input_items = model_input_items
                         streamed_result.new_items.extend(turn_session_items)
                         streamed_result._replay_from_model_input_items = (
@@ -2456,6 +2483,7 @@ async def run_single_turn_streamed(
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    feedback: str | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -2532,18 +2560,23 @@ async def run_single_turn_streamed(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
+    selected_model_name = await select_model_name(
+        public_agent, run_config, context_wrapper, streamed_result.current_turn
+    )
     model = (
         bindings.resolved_model
         if bindings.resolved_model is not None
-        else get_model(execution_agent, run_config)
+        else get_model(execution_agent, run_config, selected_model_name=selected_model_name)
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
         run_config,
         model,
+        selected_model_name=selected_model_name,
         prepared_overrides=bindings.model_settings_overrides,
         prompt=prompt_config,
         has_tools=bool(all_tools or handoffs),
@@ -2578,7 +2611,7 @@ async def run_single_turn_streamed(
         agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
-        input_items=input,
+        input_items=_with_feedback(input, feedback, server_conversation_tracker, session),
         system_instructions=system_prompt,
     )
     redact_model_input(filtered, prompt_config)
@@ -2838,6 +2871,7 @@ async def run_single_turn_streamed(
                 tool_execution.prepare_tool_declaration is not None
                 or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
+                or tool_execution.tool_text_transforms
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
                 model_items = [
@@ -2898,6 +2932,7 @@ async def run_single_turn_streamed(
 
 async def run_single_turn(
     *,
+    feedback: str | None = None,
     current_turn: int,
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
@@ -2973,6 +3008,9 @@ async def run_single_turn(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
+    selected_model_name = await select_model_name(
+        public_agent, run_config, context_wrapper, current_turn
+    )
     output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
@@ -2982,7 +3020,7 @@ async def run_single_turn(
     new_response = await get_new_response(
         bindings,
         system_prompt,
-        input,
+        _with_feedback(input, feedback, server_conversation_tracker, session),
         output_schema,
         model_tools,
         handoffs,
@@ -2996,6 +3034,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        selected_model_name=selected_model_name,
         omitted=omitted,
         reasoning_item_id_policy=reasoning_item_id_policy,
     )
@@ -3066,6 +3105,7 @@ async def get_new_response(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     *,
     omitted: set[str] | None = None,
+    selected_model_name: str | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -3084,15 +3124,17 @@ async def get_new_response(
     model = (
         bindings.resolved_model
         if bindings.resolved_model is not None
-        else get_model(execution_agent, run_config)
+        else get_model(execution_agent, run_config, selected_model_name=selected_model_name)
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
         run_config,
         model,
+        selected_model_name=selected_model_name,
         prepared_overrides=bindings.model_settings_overrides,
         prompt=prompt_config,
         has_tools=bool(all_tools or handoffs),

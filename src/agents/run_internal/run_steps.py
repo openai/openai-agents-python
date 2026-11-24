@@ -245,6 +245,8 @@ class SingleStepResult:
     policy_error: BaseException | None = None
     """Failure to accept a guarded tool output, held only until blocked-output cleanup."""
 
+    feedback: str | None = dataclasses.field(default=None, repr=False)
+
     def check_continued_output(self) -> None:
         """Check guardrail mutations before releasing a provisional reply."""
         if (

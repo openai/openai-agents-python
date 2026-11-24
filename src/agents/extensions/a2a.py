@@ -1,4 +1,4 @@
-"""Bounded, non-streaming A2A 1.0 task calls. Requires the `a2a` extra."""
+"""Bounded, non-streaming A2A 1.0 calls. Requires the `a2a` extra."""
 
 from __future__ import annotations
 
@@ -11,24 +11,26 @@ from typing import Literal
 from uuid import uuid4
 
 import httpx2
-from a2a.types import a2a_pb2 as a2a
+from a2a.types import Message, Task, a2a_pb2 as a2a
 from google.protobuf.json_format import MessageToDict, ParseDict
 
-__all__ = ["A2AError", "A2ATaskClient"]
+from ..exceptions import AgentsException
+
+__all__ = ["A2AClient", "A2AError"]
 
 _REQUEST_BYTES = 65_536
 _RESPONSE_BYTES = 1_048_576
 
 
-class A2AError(Exception):
-    """A local call failure. A failed send may already have created a remote task."""
+class A2AError(AgentsException):
+    """A local call failure. Delivery may be uncertain after a failed send."""
 
     def __init__(
         self,
-        kind: Literal["request", "authorization", "timeout", "transport", "protocol", "remote"],
+        reason: Literal["request", "authorization", "timeout", "transport", "protocol", "remote"],
     ) -> None:
-        self.kind = kind
-        super().__init__(f"A2A {kind} error")
+        self.reason = reason
+        super().__init__(f"A2A {reason} error")
 
 
 def _origin(value: str) -> tuple[str, str, int | None]:
@@ -80,34 +82,38 @@ async def _fetch(url: str, token: Callable[[], str] | None, body: bytes | None =
 
 
 @dataclass(frozen=True, kw_only=True)
-class A2ATaskClient:
-    """One trusted RPC URL and either stored card JSON or a trusted card URL.
+class A2AClient:
+    """One trusted RPC URL and either UTF-8 card JSON bytes or a trusted card URL.
 
-    Token suppliers must be local, non-blocking and scoped to their respective URLs.
-    Treat every field of the returned Task as private, untrusted peer data.
+    Token providers must check current grants for their respective URLs without blocking.
+    Treat every field of a returned Message or Task as private, untrusted peer data.
     """
 
     rpc_url: str
-    card: bytes | None = field(default=None, repr=False)
+    card_json: bytes | None = field(default=None, repr=False)
     card_url: str | None = None
-    rpc_token: Callable[[], str] | None = field(default=None, repr=False)
-    card_token: Callable[[], str] | None = field(default=None, repr=False)
+    rpc_token_provider: Callable[[], str] | None = field(default=None, repr=False)
+    card_token_provider: Callable[[], str] | None = field(default=None, repr=False)
     timeout: float = 10.0
 
     def __post_init__(self) -> None:
         origin = _origin(self.rpc_url)
-        if (self.card is None) == (self.card_url is None):
-            raise ValueError("Provide exactly one of card and card_url")
+        if (self.card_json is None) == (self.card_url is None):
+            raise ValueError("Provide exactly one of card_json and card_url")
         if self.card_url is not None:
             if _origin(self.card_url) != origin:
                 raise ValueError("The card and RPC URLs must share an origin")
-        elif self.card_token is not None:
-            raise ValueError("card_token requires card_url")
+        elif self.card_token_provider is not None:
+            raise ValueError("card_token_provider requires card_url")
+        if self.rpc_token_provider is not None and not callable(self.rpc_token_provider):
+            raise TypeError("rpc_token_provider must be callable")
+        if self.card_token_provider is not None and not callable(self.card_token_provider):
+            raise TypeError("card_token_provider must be callable")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("timeout must be positive and finite")
 
-    async def send_message(self, text: str, *, message_id: str) -> a2a.Task:
-        """Send one user message. The caller owns the unique ID and any replay policy."""
+    async def send_message(self, text: str, *, message_id: str) -> Message | Task:
+        """Send once and return an agent message or task. The caller owns the unique message ID."""
         if not text or not message_id or len(text) + len(message_id) > _REQUEST_BYTES:
             raise A2AError("request")
         request = a2a.SendMessageRequest(
@@ -120,23 +126,26 @@ class A2ATaskClient:
         )
         return await self._call(request)
 
-    async def refresh_task(self, task: a2a.Task) -> a2a.Task:
-        """Read a task once using the same client and owner that received it."""
+    async def refresh_task(self, task: Task) -> Task:
+        """Read once by task and context IDs. Use the same client and owner that received it."""
+        if not isinstance(task, Task):
+            del task
+            raise A2AError("request")
         task_id, context_id = task.id, task.context_id
         del task  # Keep the peer's artifacts and history out of failure frames.
         return await self.get_task(task_id=task_id, context_id=context_id)
 
-    async def get_task(self, *, task_id: str, context_id: str) -> a2a.Task:
+    async def get_task(self, *, task_id: str, context_id: str) -> Task:
         """Read an existing task and require both identifiers to match."""
         if not task_id or not context_id or len(task_id) > _REQUEST_BYTES:
             raise A2AError("request")
         task = await self._call(a2a.GetTaskRequest(id=task_id, history_length=0))
-        if task.id != task_id or task.context_id != context_id:
+        if not isinstance(task, Task) or task.id != task_id or task.context_id != context_id:
             del task
             raise A2AError("protocol")
         return task
 
-    async def _call(self, request: a2a.SendMessageRequest | a2a.GetTaskRequest) -> a2a.Task:
+    async def _call(self, request: a2a.SendMessageRequest | a2a.GetTaskRequest) -> Message | Task:
         try:
             return await asyncio.wait_for(self._exchange(request), self.timeout)
         except asyncio.CancelledError as exc:
@@ -144,7 +153,7 @@ class A2ATaskClient:
         except asyncio.TimeoutError:
             failure = A2AError("timeout")
         except A2AError as exc:
-            failure = A2AError(exc.kind)
+            failure = A2AError(exc.reason)
         except httpx2.HTTPError:
             failure = A2AError("transport")
         except Exception:
@@ -152,7 +161,9 @@ class A2ATaskClient:
         # Discard private dependency exceptions and their request/response frames.
         raise failure
 
-    async def _exchange(self, request: a2a.SendMessageRequest | a2a.GetTaskRequest) -> a2a.Task:
+    async def _exchange(
+        self, request: a2a.SendMessageRequest | a2a.GetTaskRequest
+    ) -> Message | Task:
         sending = isinstance(request, a2a.SendMessageRequest)
         rpc_id = uuid4().hex
         body = json.dumps(
@@ -167,10 +178,10 @@ class A2ATaskClient:
         if len(body) > _REQUEST_BYTES:
             raise A2AError("request")
 
-        raw = self.card
+        raw = self.card_json
         if raw is None:
             assert self.card_url is not None
-            raw = await _fetch(self.card_url, self.card_token)
+            raw = await _fetch(self.card_url, self.card_token_provider)
         if len(raw) > _RESPONSE_BYTES:
             raise A2AError("protocol")
         card = ParseDict(json.loads(raw), a2a.AgentCard())
@@ -183,17 +194,34 @@ class A2ATaskClient:
         ):
             raise A2AError("protocol")
 
-        reply = json.loads(await _fetch(self.rpc_url, self.rpc_token, body))
+        reply = json.loads(await _fetch(self.rpc_url, self.rpc_token_provider, body))
         if reply.get("jsonrpc") != "2.0" or reply.get("id") != rpc_id:
+            raise A2AError("protocol")
+        if ("result" in reply) == ("error" in reply):
             raise A2AError("protocol")
         if "error" in reply:
             raise A2AError("remote")
         result = reply["result"]
-        task = (
-            ParseDict(result, a2a.SendMessageResponse()).task
-            if sending
-            else ParseDict(result, a2a.Task())
-        )
+        if sending:
+            if len(result) != 1:
+                raise A2AError("protocol")
+            response = ParseDict(result, a2a.SendMessageResponse())
+            payload = response.WhichOneof("payload")
+            if payload == "message":
+                message = response.message
+                if (
+                    message.role != a2a.ROLE_AGENT
+                    or not message.message_id
+                    or not message.parts
+                    or any(part.WhichOneof("content") is None for part in message.parts)
+                ):
+                    raise A2AError("protocol")
+                return message
+            if payload != "task":
+                raise A2AError("protocol")
+            task = response.task
+        else:
+            task = ParseDict(result, Task())
         if not task.id or not task.context_id or not task.status.state:
             raise A2AError("protocol")
         return task

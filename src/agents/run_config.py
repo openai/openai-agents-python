@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Generic, Literal
@@ -16,6 +16,7 @@ from ._config_coercion import (
     coerce_dataclass_config,
     coerce_pydantic_config,
 )
+from ._decision_types import _Decider
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import HandoffHistoryMapper, HandoffInputFilter
 from .items import TResponseInputItem
@@ -37,13 +38,17 @@ from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
     from .agent import Agent
+    from .mcp import MCPServer
     from .run_context import RunContextWrapper
     from .sandbox.manifest import Manifest
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
     from .sandbox.session.sandbox_client import BaseSandboxClient
     from .sandbox.session.sandbox_session_state import SandboxSessionState
     from .sandbox.snapshot import SnapshotBase, SnapshotSpec
-    from .tool import NativeTool, Tool
+    from .tool import FunctionTool, NativeTool, Tool
+else:
+    # Runtime config adapters must retain the registered instances. Validate them below.
+    FunctionTool = MCPServer = Any
 
 
 DEFAULT_MAX_TURNS = 10
@@ -68,8 +73,28 @@ class ModelInputData:
     instructions: str | None
 
 
+@dataclass(frozen=True)
+class ModelSelectionData(Generic[TContext]):
+    """Information available when choosing the model for one Runner turn."""
+
+    agent_name: str
+    """The name of the current agent, including after a handoff."""
+
+    model_name: str | None
+    """The agent's configured name, or None for the provider default."""
+
+    turn_number: int
+    """The one-based Runner turn. Retries of a request do not start a new turn."""
+
+    context: TContext | None
+    """The application's context object for this run."""
+
+
+ModelSelector = Callable[[ModelSelectionData[Any]], MaybeAwaitable[str | None]]
+
+
 @dataclass
-class CallModelData(Generic[TContext]):
+class CallModelData(_Decider, Generic[TContext]):
     """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
 
     model_data: ModelInputData
@@ -159,6 +184,38 @@ class ToolCallHookContext(Generic[TContext]):
     The original text is available in the function's `ToolContext.tool_arguments`.
     """
 
+    mcp_target: tuple[MCPServer, str] | None = field(default=None, kw_only=True, repr=False)
+    """Server and original tool name for a selected Runner MCP text transform."""
+
+
+class _NativeMCPContent(TypedDict):
+    content: list[dict[str, Any]]
+
+
+class NativeMCPResult(_NativeMCPContent, total=False):
+    """A native MCP result. Only content is required. Blocks may include peer-specific fields."""
+
+    structuredContent: Any
+    isError: bool | None
+    _meta: dict[str, Any] | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class NativeMCPResultTransform:
+    """Edit the whole result of one tool on a configured native Codex MCP server."""
+
+    server_name: str
+    tool_name: str
+    edit: Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]]
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(name, str) and name.strip() for name in (self.server_name, self.tool_name)
+        ):
+            raise ValueError("Native MCP server_name and tool_name must be nonblank strings.")
+        if not callable(self.edit):
+            raise ValueError("Native MCP edit must be callable.")
+
 
 @dataclass(frozen=True)
 class ToolDeclaration:
@@ -171,16 +228,50 @@ class ToolDeclaration:
     mcp_tool_name: str | None = None
 
 
+_TextEditor = Callable[
+    [ToolCallHookContext[Any], tuple[str, ...]], Awaitable[list[str] | tuple[str, ...]]
+]
+
+
+@dataclass(frozen=True, kw_only=True)
+class MCPTextTransform:
+    """Edit only text from a Runner MCP tool on the exact connected server object."""
+
+    server: MCPServer
+    tool_name: str
+    edit: _TextEditor
+
+    def __post_init__(self) -> None:
+        from .mcp import MCPServer
+
+        if not isinstance(self.server, MCPServer):
+            raise ValueError("MCPTextTransform requires an MCP server object, not a server name.")
+        if not isinstance(self.tool_name, str) or not self.tool_name.strip():
+            raise ValueError("MCPTextTransform requires a nonblank raw tool name.")
+        if not callable(self.edit):
+            raise ValueError("MCPTextTransform requires an async editor.")
+
+
 @dataclass
 class ToolExecutionConfig:
     """Configure tool execution and run-wide preparation callbacks.
 
     Input and output callbacks cover SDK-executed tools and native tools with Codex hooks.
     Codex reports native shell and patch inputs as `{"command": ...}`. A native output hook can
-    return the original result or replacement text for the model. API-hosted tools execute
-    outside the client hook lifecycle.
+    return the original result or replacement text for the model. API-hosted tools
+    execute outside the client hook lifecycle.
+
+    For Runner tools, use `tool_text_transforms` with `(report, edit_text)` for a
+    `FunctionTool` or `MCPTextTransform(server=peer, tool_name="lookup", edit=edit_text)`
+    for MCP. Use the server object and raw tool name. The async editor replaces
+    text parts and keeps the original media.
 
     Supply the same callbacks when resuming a run in another process.
+
+    For configured native Codex MCP servers, use `native_mcp_result_transforms` with
+    `NativeMCPResultTransform(server_name="catalog", tool_name="lookup", edit=edit_result)`.
+    Both names are raw. The async editor replaces the whole result, including structured
+    content and media.
     """
 
     max_function_tool_concurrency: int | None = None
@@ -255,8 +346,76 @@ class ToolExecutionConfig:
     Raw provider stream events and provider-managed history may contain the original proposal.
     """
 
+    tool_text_transforms: Sequence[tuple[FunctionTool, _TextEditor] | MCPTextTransform] = field(
+        default=(), kw_only=True
+    )
+    """Experimental. Edit selected Runner tool results before output hooks, traces and history.
+
+    Register the exact function in the agent's tools or the MCP server and raw tool name.
+    For a namespace, use the tool returned by `tool_namespace`. Reuse that object.
+    If another local function has the same dispatch key (including namespace), or
+    another MCP server has the same name and raw tool name, the Runner raises
+    `UserError` before invoking it unless it has its own exact registration.
+    This applies across agents. The SDK compares URL-based server names without
+    credentials, query strings or fragments. Register the replacement server after
+    reconnecting. For MCP, a selector matching the exposed name
+    or an SDK-normalized or server-prefixed name requires an exact raw-name registration. For
+    example, register `read.report` even if the model sees `mcp_Reports__read_report`.
+    If a different raw tool is named `read_report`, register both to call both.
+    When configured, `RunConfig.redact_text` scrubs the edited text before validation.
+    If a registered raw name is absent from this server object's unfiltered
+    discovery, the Runner blocks calls on that server without an exact editor.
+    An exact editor takes precedence and may return its input unchanged.
+    A temporarily missing name can block other calls. Built-in clients check names before filtering.
+    Custom peers with filtered or missing catalogs may miss unrelated typos. If you add an
+    editor for a previously unselected MCP call on restore and no catalog is
+    available yet, an unknown raw name may fail only after the session claim.
+
+    Here, `report` is the agent's `FunctionTool`, `server` is the object in
+    `agent.mcp_servers`, and `lookup` is the raw MCP tool name.
+
+    ```python
+    from agents import MCPTextTransform, ToolExecutionConfig
+
+    async def edit_text(call, texts):
+        return [text.replace("internal draft", "[hidden]") for text in texts]
+
+    config = ToolExecutionConfig(tool_text_transforms=[
+        (report, edit_text),
+        MCPTextTransform(server=server, tool_name="lookup", edit=edit_text),
+    ])
+    ```
+
+    The editor receives a tuple of strings. Return a list or tuple of strings of the same
+    length, with one replacement per text slot in the original order.
+    Images and function file parts stay in place. A typed function result uses one JSON
+    slot. The caller receives the accepted JSON object as a dictionary. Unchanged text
+    keeps the serialized values. Changed JSON must validate against the declared type
+    and serialize back to the same values. Ignored extra top-level fields are dropped.
+    Bare output schemas and arbitrary Python objects are unsupported.
+    MCP supports text and image blocks. If the server prefers structured content and
+    returns a JSON object, even an empty one, its JSON replaces the
+    first text slot. Remaining text slots start empty. If needed, the SDK appends a
+    text slot. Extractors see the edited result without MCP metadata or fallback data.
+
+    A tool failure, unsupported result, invalid edit or editor exception stops the run
+    without a successful output. Cancellation still cancels the call. Completed side
+    effects cannot be undone. Neither error formatters nor `prepare_tool_output` replace
+    a selected result. Other calls keep their usual behavior.
+
+    The editor and retained media are trusted. A pending selected call requires
+    an exact registration on resume. After restoring state, register the current
+    tool or server object. Only the requirement is saved in the checkpoint.
+    This option does not intercept hosted or native tools, inputs or application logging.
+    """
+
     prepare_tool_output: Callable[[ToolCallHookContext[Any], Any], Awaitable[Any]] | None = None
     """Experimental. Return the tool result to use after the tool has executed.
+
+    A selected result editor replaces this callback even when it returns its input unchanged.
+    For Runner MCP tools, custom data extraction happens before this callback. Runner text
+    editors do not cover native MCP tools, even when the names match. Enforce mandatory
+    rules in every matching editor or at the source.
 
     The runner awaits this callback before function-tool output guardrails and before building the
     tool-output item used for history and later model turns. `on_tool_end` observes the accepted
@@ -275,7 +434,79 @@ class ToolExecutionConfig:
     With input or output preparation, the Codex provider disables native workspace tools.
     """
 
+    native_mcp_result_transforms: Sequence[NativeMCPResultTransform] = field(
+        default=(), kw_only=True
+    )
+    """Experimental. Edit whole results from selected native MCP tools.
+
+    Register one async editor per configured native Codex MCP server and tool.
+    Use the exact raw names of both. This option does not select tools on `agent.mcp_servers`.
+
+    ```python
+    from agents import (
+        NativeMCPResult, NativeMCPResultTransform, ToolCallHookContext, ToolExecutionConfig,
+    )
+
+    async def edit_result(
+        call: ToolCallHookContext[object], result: NativeMCPResult
+    ) -> NativeMCPResult:
+        text = "Lookup failed." if result.get("isError") else "Lookup completed."
+        return {"content": [{"type": "text", "text": text}]}
+
+    settings = ToolExecutionConfig(native_mcp_result_transforms=[
+        NativeMCPResultTransform(server_name="catalog", tool_name="lookup", edit=edit_result),
+    ])
+    ```
+
+    This example discards all media and structured data. Before the first model request
+    on each native thread, the SDK checks the names against the configured peer's
+    available tools. This snapshot cannot detect later renames or changes of identity.
+    Supply the same selection when resuming. Unselected calls keep their usual behavior.
+
+    Each async callback receives the raw names in `call.tool_namespace` and `call.tool.name`,
+    effective arguments and a detached MCP result. Return the entire replacement with `content` and
+    optional `structuredContent`, `isError` and `_meta` (up to 1 MiB encoded). Peer errors
+    stay errors. Return the received result to keep all fields and media. Remove sensitive fields,
+    including structured content, which Codex can prefer over text. Model limits still apply.
+
+    For selected responses, this replaces `prepare_tool_output` before native completion
+    events, SDK operation traces, history and model input. If set, `RunConfig.redact_text`
+    applies to the replacement before it goes back to Codex. Core rollout recording captures
+    the original result. The SDK rejects this option if `CODEX_ROLLOUT_TRACE_ROOT` is
+    present at thread startup, even if empty. Leave it unset throughout startup.
+    The editor cannot erase earlier diagnostics or control peer and application logs.
+    SDK content tracing can include inputs and the edited result.
+    Callback or validation errors fail the run. Core may still sample with a withheld result.
+    Callbacks run one at a time in the current native thread. They exclude transport errors,
+    plugin or hosted tools, SDK-discovered tools, or independently started child threads.
+    """
+
+    def _native_mcp_editors(
+        self,
+    ) -> dict[
+        tuple[str, str],
+        Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]],
+    ]:
+        entries = self.native_mcp_result_transforms
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+            raise ValueError(
+                "native_mcp_result_transforms requires a sequence of NativeMCPResultTransform."
+            )
+        editors = {}
+        for entry in entries:
+            if not isinstance(entry, NativeMCPResultTransform):
+                raise ValueError(
+                    "Each native_mcp_result_transforms entry must be a NativeMCPResultTransform."
+                )
+            target = (entry.server_name, entry.tool_name)
+            if target in editors:
+                raise ValueError("Duplicate native MCP result transform target.")
+            editors[target] = entry.edit
+        return editors
+
     def __post_init__(self) -> None:
+        self._native_mcp_editors()
+        self.native_mcp_result_transforms = tuple(self.native_mcp_result_transforms)
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):
@@ -284,6 +515,39 @@ class ToolExecutionConfig:
             raise ValueError("tool_execution.pre_approval_tool_input_guardrails must be a bool")
         if not isinstance(self.sdk_only_tool_hooks, bool):
             raise ValueError("tool_execution.sdk_only_tool_hooks must be a bool")
+        invalid = (
+            "For tool_text_transforms, use (function_tool, edit_text) or "
+            "MCPTextTransform(server=peer, tool_name=raw_name, edit=edit_text) "
+            "with the MCP server object."
+        )
+        try:
+            self.tool_text_transforms = tuple(self.tool_text_transforms)
+        except TypeError:
+            raise ValueError(invalid) from None
+        if self.tool_text_transforms:
+            from .tool import FunctionTool
+
+            seen: set[tuple[int, str | None]] = set()
+            for entry in self.tool_text_transforms:
+                key: tuple[int, str | None]
+                if isinstance(entry, MCPTextTransform):
+                    key = (id(entry.server), entry.tool_name)
+                elif isinstance(entry, tuple) and len(entry) == 2:
+                    target, edit = entry
+                    if (
+                        not isinstance(target, FunctionTool)
+                        or target._is_agent_tool
+                        or target._is_codex_tool
+                        or target._mcp_tool_binding
+                        or not callable(edit)
+                    ):
+                        raise ValueError(invalid)
+                    key = (id(target), None)
+                else:
+                    raise ValueError(invalid)
+                if key in seen:
+                    raise ValueError("Each tool_text_transforms target requires one editor.")
+                seen.add(key)
 
 
 @dataclass
@@ -675,6 +939,17 @@ class RunConfig:
     budget: RunBudget | None = None
     """Optional limits on root model calls and observed tokens."""
 
+    model_selector: ModelSelector | None = None
+    """Choose a model by name before each new Runner request, before the input filter.
+
+    Return a name on the same provider route, or None to use the current agent's
+    configured model for this turn. The callback may be async. It runs once per
+    request, including after tools and handoffs. Retries reuse that choice.
+    RunConfig.model and agents with a Model instance bypass selection.
+    SandboxAgent requires a fixed model. With CodexProvider, selection applies
+    to the whole request, including any internal Codex calls.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -708,17 +983,20 @@ class RunConfig:
             ) = None,
             redact_text: Callable[[str], str] | None = None,
             budget: RunBudget | dict[str, Any] | None = None,
+            model_selector: ModelSelector | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
-        if self.redact_text is not None and (
-            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
-        ):
-            raise TypeError("redact_text must be a synchronous callable or None")
         if self.budget is not None:
             self.budget = coerce_dataclass_config(
                 self.budget, RunBudget, parameter_name="run_config.budget"
             )
+        if self.model_selector is not None and not callable(self.model_selector):
+            raise TypeError("model_selector must be callable or None")
+        if self.redact_text is not None and (
+            not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
+        ):
+            raise TypeError("redact_text must be a synchronous callable or None")
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message
@@ -807,11 +1085,14 @@ __all__ = [
     "OutputGuardrailBlockedMessageArgs",
     "OutputGuardrailBlockedMessageFormatter",
     "ReasoningItemIdPolicy",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunConfig",
     "RunOptions",
     "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",
     "SandboxRunConfig",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",

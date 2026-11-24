@@ -56,6 +56,8 @@ async def test_v2_streamable_http_negotiates_modern_protocol():
         server = MCPServerStreamableHttp(params={"url": f"http://127.0.0.1:{port}/mcp"})
         async with server:
             tools = await server.list_tools()
+            assert (await server.list_resources()).resources == []
+            assert (await server.list_resource_templates()).resource_templates == []
             protocol_version = server.session.protocol_version if server.session else None
             session_id = server.session_id
 
