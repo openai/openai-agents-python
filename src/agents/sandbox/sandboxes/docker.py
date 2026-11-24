@@ -39,13 +39,7 @@ from ..entries import (
     Mount,
     resolve_workspace_path,
 )
-from ..entries.mounts import (
-    FuseMountPattern,
-    InContainerMountStrategy,
-    MountpointMountPattern,
-    RcloneMountPattern,
-    S3FilesMountPattern,
-)
+from ..entries.mounts import InContainerMountStrategy
 from ..errors import (
     ExecTimeoutError,
     ExecTransportError,
@@ -1622,7 +1616,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         session_id = uuid.uuid4()
         manifest = manifest if manifest is not None else Manifest()
         self._validate_manifest_for_create(manifest)
-        _validate_docker_path_grants(manifest)
+        _validate_docker_manifest(manifest)
         volume_names = _docker_volume_names_for_manifest(manifest, session_id=session_id)
         container: Container | None = None
         try:
@@ -1763,12 +1757,22 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         if not isinstance(state, DockerSandboxSessionState):
             raise TypeError("DockerSandboxClient.resume expects a DockerSandboxSessionState")
         state.assert_path_grants_rebound()
-        _validate_docker_path_grants(state.manifest)
+        _validate_docker_manifest(state.manifest)
         configured_authority = _manifest_has_configured_mount_authority(state.manifest)
         requires_fresh_resource = state.mount_authority_rebound or configured_authority
         container = None if requires_fresh_resource else self.get_container(state.container_id)
         reused_existing_container = container is not None
         if container is not None:
+            host_config = container.attrs.get("HostConfig")
+            if (
+                not isinstance(host_config, dict)
+                or host_config.get("Privileged")
+                or host_config.get("CapAdd")
+            ):
+                raise ValueError(
+                    "Existing Docker sandbox must have an inspectable host configuration "
+                    "without privileged mode or added capabilities; create a fresh sandbox session"
+                )
             existing_service = self._removal_service
             if existing_service is not None:
                 await run_blocking_workspace_io(
@@ -1863,7 +1867,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         labels: dict[str, str] | None = None,
     ) -> Container:
         if manifest is not None:
-            _validate_docker_path_grants(manifest)
+            _validate_docker_manifest(manifest)
         # create image if it does not exist
         if not self.image_exists(image):
             repo, tag = parse_repository_tag(image)
@@ -1888,17 +1892,6 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
             if docker_mounts:
                 create_kwargs["mounts"] = docker_mounts
-            if _manifest_requires_fuse(manifest):
-                create_kwargs.update(
-                    devices=["/dev/fuse"],
-                    cap_add=["SYS_ADMIN"],
-                    security_opt=["apparmor:unconfined"],
-                )
-            elif _manifest_requires_sys_admin(manifest):
-                create_kwargs.update(
-                    cap_add=["SYS_ADMIN"],
-                    security_opt=["apparmor:unconfined"],
-                )
         if exposed_ports:
             create_kwargs["ports"] = {
                 _docker_port_key(port): ("127.0.0.1", None) for port in exposed_ports
@@ -1921,37 +1914,6 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
 
 def _docker_port_key(port: int) -> str:
     return f"{port}/tcp"
-
-
-def _manifest_requires_fuse(manifest: Manifest | None) -> bool:
-    if manifest is None:
-        return False
-    for _path, artifact in manifest.iter_entries():
-        if not isinstance(artifact, Mount):
-            continue
-        strategy = artifact.mount_strategy
-        if not isinstance(strategy, InContainerMountStrategy):
-            continue
-        if isinstance(strategy.pattern, FuseMountPattern | MountpointMountPattern):
-            return True
-        if isinstance(strategy.pattern, RcloneMountPattern) and strategy.pattern.mode == "fuse":
-            return True
-    return False
-
-
-def _manifest_requires_sys_admin(manifest: Manifest | None) -> bool:
-    if manifest is None:
-        return False
-    for _path, artifact in manifest.iter_entries():
-        if not isinstance(artifact, Mount):
-            continue
-        strategy = artifact.mount_strategy
-        if isinstance(strategy, InContainerMountStrategy):
-            if isinstance(strategy.pattern, RcloneMountPattern) and strategy.pattern.mode == "nfs":
-                return True
-            if isinstance(strategy.pattern, S3FilesMountPattern):
-                return True
-    return False
 
 
 def _build_docker_volume_mounts(
@@ -1996,15 +1958,15 @@ def _docker_mount_path_identity(path: str | PurePath) -> PurePosixPath:
     return PurePosixPath(posixpath.normpath(re.sub(r"^/+", "/", sandbox_path_str(path))))
 
 
-def _validate_docker_path_grants(manifest: Manifest) -> None:
+def _validate_docker_manifest(manifest: Manifest) -> None:
     if any(
-        grant.host_path is not None and grant.read_only for grant in manifest.extra_path_grants
-    ) and (_manifest_requires_fuse(manifest) or _manifest_requires_sys_admin(manifest)):
-        # SYS_ADMIN can allow sandbox processes to remount a read-only host bind writable.
+        isinstance(entry, Mount) and isinstance(entry.mount_strategy, InContainerMountStrategy)
+        for _, entry in manifest.iter_entries()
+    ):
         error = MountConfigError(
-            message="Docker read-only host_path grants cannot be combined with in-container "
-            "storage mounts that require SYS_ADMIN; remove the host grant or use a "
-            "storage strategy that does not require container mount privileges"
+            message="Docker does not support in-container storage mounts. Use "
+            "DockerVolumeMountStrategy with a compatible volume driver or mount the storage "
+            "on the Docker host and expose it through a trusted host_path grant."
         )
         _mark_mount_validation_error(error)
         raise error

@@ -45,12 +45,21 @@ def local_worker(tmp_path: Path) -> Iterator[tuple[_Worker, Path]]:
     trace = tmp_path / "worker-events.jsonl"
     script = """
 import errno, json, os, runpy, signal, sys
+from types import SimpleNamespace
 namespace = runpy.run_path(sys.argv[1])["main"].__globals__
 trace = sys.argv[2]
 def record(**event):
     with open(trace, "a") as stream:
         stream.write(json.dumps(event) + "\\n")
 namespace["_enter_container"] = lambda pid: None
+# Model the container root on the test filesystem and retain real O_PATH on Linux.
+worker_os = SimpleNamespace(**vars(os))
+root_stat = os.stat(os.path.dirname(trace))
+def container_stat(path, *args, **kwargs):
+    return root_stat if path == "/" else os.stat(path, *args, **kwargs)
+worker_os.stat = container_stat
+worker_os.O_PATH = getattr(os, "O_PATH", os.O_RDONLY)
+namespace["os"] = worker_os
 inspect = namespace["_inspect"]
 resource = namespace["resource"]
 set_limit = resource.setrlimit
@@ -70,7 +79,7 @@ def reap(pid, options):
     result = waitpid(pid, options)
     record(operation="reap", pid=result[0], status=result[1])
     return result
-os.waitpid = reap
+worker_os.waitpid = reap
 sys.argv = ["worker", "0"]
 namespace["main"]()
 """
@@ -106,7 +115,9 @@ def test_local_worker_inspects_with_child_limit_and_reaps(
     workspace.mkdir()
     sentinel = workspace / "sentinel"
     sentinel.write_text("unchanged")
-    long_path = workspace.joinpath(*(["é" * 90] * 8))
+    # Use single-byte names that expand in JSON to exercise multiple pipe reads.
+    long_path = workspace.joinpath(*(["\x7f" * 90] * 8))
+    assert len(json.dumps(str(long_path)).encode()) > 4096
     long_path.mkdir(parents=True)
     worker.request(operation="bind", paths=[str(workspace)])
     for path, is_directory in [
