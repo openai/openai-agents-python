@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from .._redaction import redact_payload, require_clean
-from .._tool_identity import get_function_tool_lookup_key_for_tool
+from .._tool_identity import get_function_tool_lookup_key_for_tool, get_function_tool_lookup_keys
 from ..exceptions import (
     UserError,
     _mark_error_data_redacted,
@@ -20,6 +20,7 @@ from ..exceptions import (
 from ..run_config import ToolCallHookContext
 from ..tool import (
     FunctionTool,
+    ToolOriginType,
     ToolOutputText,
     ValidToolOutputPydanticModelsTypeAdapter,
     _FunctionToolInvocationResult,
@@ -27,7 +28,9 @@ from ..tool import (
     _parse_function_tool_json_input,
     _protect_selected_task,
     _SelectedTaskExit,
+    _unique_enabled_function,
 )
+from .agent_tool_configuration import snapshot_agent_tools
 from .tool_hooks import _await_hook
 
 if TYPE_CHECKING:
@@ -35,8 +38,8 @@ if TYPE_CHECKING:
 
     from ..agent import Agent
     from ..mcp import MCPServer
-    from ..run_config import RunConfig, ToolExecutionConfig
-    from ..run_context import _ToolInvocationRecord
+    from ..run_config import ToolExecutionConfig
+    from ..run_context import RunContextWrapper, _ToolInvocationRecord
     from ..run_state import RunState
     from ..tool_context import ToolContext
 
@@ -75,6 +78,9 @@ def bind_text_transform(
                 if target[1] != binding[1]:
                     from ..mcp.util import MCPUtil
 
+                    if server is target[0] and tool is not None:
+                        names = tool._mcp_raw_names
+                        ambiguous |= names is not None and target[1] not in names
                     # A filtered catalog cannot prove absence. A visible alias can
                     # signal a mistake, but only the exact raw name can select.
                     ambiguous |= target[1] in (
@@ -109,10 +115,15 @@ def bind_text_transform(
     return None
 
 
-def validate_pending_text_transforms(
-    state: RunState[Any, Any], settings: ToolExecutionConfig | None
+async def validate_pending_text_transforms(
+    state: RunState[Any, Any],
+    settings: ToolExecutionConfig | None,
+    owner: RunContextWrapper[Any],
+    *,
+    local_only: bool = False,
+    delegate_replaced: bool = False,
 ) -> bool:
-    """Keep a paused session retryable when a required editor is missing."""
+    """Check required editors before claiming a checkpoint or dispatching siblings."""
     from .run_steps import NextStepInterruption
 
     processed = state._last_processed_response
@@ -125,14 +136,6 @@ def validate_pending_text_transforms(
     ):
         return False
     required = False
-    for delegate, child, _ in state._pending_agent_tool_states():
-        impl = getattr(delegate.on_invoke_tool, "_invoke_tool_impl", None)
-        override: RunConfig | None = getattr(impl, "__agents_run_config__", None)
-        child_settings = override.tool_execution if override is not None else settings
-        if validate_pending_text_transforms(child, child_settings):
-            if not any(candidate is delegate for candidate in agent.tools):
-                raise UserError("Reload the paused state after replacing a selected delegate.")
-            required = True
     for item in state._current_step.interruptions:
         call_id = item.call_id
         record = context._tool_invocations.get(call_id) if call_id else None
@@ -151,6 +154,8 @@ def validate_pending_text_transforms(
             is False
         ):
             continue
+        if delegate_replaced and record.requires_text_transform:
+            raise UserError("A pending text editor requires the same unique enabled agent tool.")
         tool = next(
             (run.function_tool for run in processed.functions if run.tool_call.call_id == call_id),
             None,
@@ -158,6 +163,8 @@ def validate_pending_text_transforms(
         # Protected loads defer MCP discovery. Check the saved recipient before the
         # session claim. Reconciliation still checks the live binding before execution.
         binding = processed.mcp_tool_bindings.get(call_id)
+        if local_only and (binding is not None or (tool and tool._mcp_tool_binding)):
+            continue
         if tool is None and state._requires_redaction and binding is not None:
             from ..mcp._logging import get_mcp_server_log_name
 
@@ -165,32 +172,65 @@ def validate_pending_text_transforms(
             if index is not None and 0 <= index < len(agent.mcp_servers):
                 peer = agent.mcp_servers[index]
                 if get_mcp_server_log_name(peer.name) == name:
-                    bind_text_transform(
+                    selected = bind_text_transform(
                         settings,
                         None,
                         record if record.requires_text_transform else None,
                         deferred_mcp=(peer, raw_name, item.tool_name or ""),
                     )
-                    required |= record.requires_text_transform
+                    required |= selected is not None
                     continue
-        if not record.requires_text_transform:
-            # An editor added on resume can also name an alias. Check before
-            # claiming the session, without changing the saved requirement.
-            if tool is not None and tool._mcp_tool_binding is not None:
-                bind_text_transform(settings, tool, None)
-            continue
-        if tool is not None:
-            if tool._mcp_tool_binding is None:
-                configured = any(candidate is tool for candidate in agent.tools)
-            else:
-                server = tool._mcp_server_ref() if tool._mcp_server_ref else None
-                configured = any(peer is server for peer in agent.mcp_servers)
-            if not configured:
+        if tool is not None and tool._mcp_tool_binding is not None:
+            server = tool._mcp_server_ref() if tool._mcp_server_ref else None
+            if record.requires_text_transform and not any(
+                peer is server for peer in agent.mcp_servers
+            ):
                 raise UserError(
                     "Reload the paused state after replacing a selected tool or server."
                 )
-        bind_text_transform(settings, tool, record)
-        required = True
+        elif tool is not None or (
+            item.tool_origin is not None and item.tool_origin.type == ToolOriginType.FUNCTION
+        ):
+            # Load may omit a disabled function. Use the saved key to find the current
+            # local candidate, then require the exact selected object below.
+            if (
+                not record.requires_text_transform
+                and tool is not None
+                and (tool._is_agent_tool or tool._is_codex_tool)
+            ):
+                continue
+            key = item.tool_lookup_key
+            if key is None and tool is not None:
+                key = get_function_tool_lookup_key_for_tool(tool)
+            if not record.requires_text_transform and not (
+                settings
+                and any(
+                    isinstance(target, FunctionTool)
+                    and key in get_function_tool_lookup_keys(target)
+                    for target, _ in settings.tool_text_transforms
+                )
+            ):
+                continue
+            matches = [
+                candidate
+                for candidate in snapshot_agent_tools(agent)
+                if isinstance(candidate, FunctionTool)
+                and candidate.is_enabled is not False
+                and key in get_function_tool_lookup_keys(candidate)
+            ]
+            current = await _unique_enabled_function(matches, owner, agent)
+            if current is None:
+                raise UserError("A pending text editor requires a unique enabled function tool.")
+            if record.requires_text_transform and tool is not None and current is not tool:
+                raise UserError(
+                    "Reload the paused state after replacing a selected tool or server."
+                )
+            tool = current
+        # Validate new selectors without changing the saved requirement.
+        selected = bind_text_transform(
+            settings, tool, record if record.requires_text_transform else None
+        )
+        required |= selected is not None
     return required
 
 

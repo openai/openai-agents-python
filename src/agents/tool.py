@@ -605,6 +605,10 @@ class FunctionTool:
         default=None, init=False, repr=False, compare=False
     )
 
+    _mcp_raw_names: frozenset[str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
     @property
     def mcp_annotations(self) -> ToolAnnotations | None:
         """Return a copy of the MCP annotations captured when this tool was converted.
@@ -829,6 +833,14 @@ async def _function_tool_enabled(
         return enabled
     result = enabled(context, get_public_agent(agent))
     return bool(await result if inspect.isawaitable(result) else result)
+
+
+async def _unique_enabled_function(
+    bindings: list[FunctionTool], context: RunContextWrapper[Any], agent: AgentBase[Any]
+) -> FunctionTool | None:
+    """Resolve a protected approval key without probing unrelated tools."""
+    enabled = [tool for tool in bindings if await _function_tool_enabled(tool, context, agent)]
+    return enabled[0] if len(enabled) == 1 else None
 
 
 def get_function_tool_origin(function_tool: FunctionTool) -> ToolOrigin | None:

@@ -29,6 +29,7 @@ from .memory.session_settings import (
 from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
 from .models.interface import Model, ModelProvider
 from .models.multi_provider import MultiProvider
+from .run_budget import RunBudget
 from .run_context import TContext
 from .run_error_handlers import RunErrorHandlers
 from .tracing import TracingConfig
@@ -256,9 +257,7 @@ class ToolExecutionConfig:
     approval. Codex calls it from its native pre-tool event, before its own permission checks.
     Responses executes hosted tools such as web search inside the API, outside this callback.
 
-    Caution: If the hook relay fails to deliver a decision, Codex may execute the native tool
-    with its original arguments. This can happen if this callback raises and the relay cannot
-    report the error.
+    Codex blocks a native tool call if a synchronous pre-tool hook fails or times out.
 
     Raw provider stream events and provider-managed history may contain the original proposal.
     """
@@ -283,8 +282,13 @@ class ToolExecutionConfig:
     example, register `read.report` even if the model sees `mcp_Reports__read_report`.
     If a different raw tool is named `read_report`, register both to call both.
     When configured, `RunConfig.redact_text` scrubs the edited text before validation.
-    An editor can return its input unchanged. Catalogs may be filtered or change
-    between calls, so unrelated misspellings can go undetected.
+    If a registered raw name is absent from this server object's unfiltered
+    discovery, the Runner blocks calls on that server without an exact editor.
+    An exact editor takes precedence and may return its input unchanged.
+    A temporarily missing name can block other calls. With a tool filter or no
+    discovery list, unrelated misspellings can go undetected. If you add an
+    editor for a previously unselected MCP call on restore and no catalog is
+    available yet, an unknown raw name may fail only after the session claim.
 
     For example,
 
@@ -764,6 +768,9 @@ class RunConfig:
     metadata. No redactor is active by default.
     """
 
+    budget: RunBudget | None = None
+    """Optional limits on root model admissions and observed response usage."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -796,6 +803,7 @@ class RunConfig:
                 str | OutputGuardrailBlockedMessageFormatter | None
             ) = None,
             redact_text: Callable[[str], str] | None = None,
+            budget: RunBudget | dict[str, Any] | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
@@ -803,6 +811,10 @@ class RunConfig:
             not callable(self.redact_text) or inspect.iscoroutinefunction(self.redact_text)
         ):
             raise TypeError("redact_text must be a synchronous callable or None")
+        if self.budget is not None:
+            self.budget = coerce_dataclass_config(
+                self.budget, RunBudget, parameter_name="run_config.budget"
+            )
         if self.tool_name_collision_policy not in ("warn", "error"):
             raise ValueError("tool_name_collision_policy must be either 'warn' or 'error'")
         blocked_message = self.output_guardrail_blocked_message

@@ -127,6 +127,7 @@ from .run import (
     ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
 )
+from .run_budget import RunBudget, RunBudgetError
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
     RunErrorData,
@@ -493,6 +494,8 @@ __all__ = [
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
+    "RunBudget",
+    "RunBudgetError",
     "RunConfig",
     "OutputGuardrailBlockedMessageArgs",
     "OutputGuardrailBlockedMessageFormatter",

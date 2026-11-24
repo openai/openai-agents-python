@@ -347,7 +347,7 @@ class ResumableSession:
                     _check_workspace_approvals(pending, tool_hooks.agent, processed)
                 if tool_not_found_behavior == "raise_error":
                     _check_approved_functions(pending, tool_hooks.agent, tool_hooks.context)
-            validate_pending_text_transforms(input, tool_hooks.settings)
+            await validate_pending_text_transforms(input, tool_hooks.settings, tool_hooks.context)
         active = self._checkpoint.model_copy(
             update={
                 "version": 2 if current_redactor() is not None else self._checkpoint.version,

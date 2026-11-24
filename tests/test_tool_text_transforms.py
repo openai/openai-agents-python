@@ -845,9 +845,13 @@ async def test_pending_mcp_edit_requires_current_exact_selector(restored, select
 
 
 @pytest.mark.asyncio
-async def test_pending_text_requirement_uses_current_checkpoint_schema():
+@pytest.mark.parametrize("historical", ["1.23", "1.24", "1.25"])
+async def test_pending_text_requirement_uses_current_checkpoint_schema(historical):
+    effects = []
+
     @function_tool(needs_approval=True)
     def report():
+        effects.append(True)
         return RAW
 
     async def edit(call, texts):
@@ -857,14 +861,16 @@ async def test_pending_text_requirement_uses_current_checkpoint_schema():
     config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(report, edit)]))
     paused = await Runner.run(agent, "go", run_config=config)
     snapshot = paused.to_state().to_json()
-    snapshot["$schemaVersion"] = "1.23"
-    with pytest.raises(UserError, match="require RunState schema"):
+    assert snapshot["$schemaVersion"] == "1.26"
+    snapshot["$schemaVersion"] = historical
+    with pytest.raises(UserError, match="require RunState schema 1.26"):
         await RunState.from_json(agent, snapshot)
     del snapshot["context"]["tool_invocations"]["one"]["requires_text_transform"]
     state = await RunState.from_json(agent, snapshot)
+    assert not effects and state.to_json()["$schemaVersion"] == "1.26"
     state.approve(state.get_interruptions()[0])
     result = await Runner.run(agent, state, run_config=config)
-    assert RAW not in result.to_state().to_string()
+    assert effects == [True] and RAW not in result.to_state().to_string()
 
 
 @pytest.mark.asyncio
@@ -974,7 +980,17 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
         return worker, settings
 
     agent, settings = configure(correct)
-    await Runner.run(agent, "go", session=session, run_config=settings)
+    paused = await Runner.run(agent, "go", session=session, run_config=settings)
+    if route == "child":
+        snapshot = paused.to_state().to_json()
+        child = snapshot["last_processed_response"]["functions"][0]["agent_run_state"]
+        assert child["$schemaVersion"] == snapshot["$schemaVersion"] == "1.26"
+        for node in (child, snapshot):
+            node["$schemaVersion"] = "1.25"
+            with pytest.raises(UserError, match="require RunState schema 1.26"):
+                await RunState.from_json(agent, snapshot)
+            node["$schemaVersion"] = "1.26"
+        assert not effects
     saved = store.records[session.session_id]
 
     async def resume(settings, reject=False):
@@ -1019,8 +1035,8 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-@pytest.mark.parametrize("selector", ["read_report", "mcp_Reports__read_report"])
-async def test_mcp_alias_cannot_silently_skip_an_editor(streamed, selector):
+@pytest.mark.parametrize("selector", ["read_report", "mcp_Reports__read_report", "read.reprot"])
+async def test_mcp_wrong_name_cannot_silently_skip_an_editor(streamed, selector):
     peer = Source()
     prefixed = selector.startswith("mcp_")
     model = model_for(selector if prefixed else "read.report")
@@ -1048,7 +1064,8 @@ async def test_mcp_alias_cannot_silently_skip_an_editor(streamed, selector):
 
 
 @pytest.mark.asyncio
-async def test_mcp_alias_added_on_resume_leaves_approval_retryable():
+@pytest.mark.parametrize("selector", ["read_report", "read.reprot"])
+async def test_mcp_wrong_name_added_on_resume_leaves_approval_retryable(selector):
     from agents import ResumableSession
 
     from .memory.test_resumable_session import MemoryStore
@@ -1073,7 +1090,7 @@ async def test_mcp_alias_added_on_resume_leaves_approval_retryable():
         )
 
     with pytest.raises(UserError, match="original tool name"):
-        await Runner.run(agent, state, run_config=config("read_report"))
+        await Runner.run(agent, state, run_config=config(selector))
     assert store.records[session.session_id] == saved and not peer.tool_calls
     result = await Runner.run(agent, state, run_config=config("read.report"))
     assert peer.tool_calls == ["read.report"] and result.final_output == "done"
@@ -1221,3 +1238,281 @@ async def test_redact_text_after_selected_edit_on_approval_resume(streamed, remo
         (observed, spans, otel, model.calls[-1].input, store.records, result.to_input_list())
     )
     assert secret not in published and RAW not in published
+
+
+@pytest.mark.asyncio
+async def test_mcp_missing_name_check_uses_this_servers_unfiltered_discovery():
+    peer = Source()
+    peer.add_tool("sibling", {})
+
+    async def edit(call, texts):
+        return tuple(SAFE for _ in texts)
+
+    entries = [((peer, "sibling"), edit)]
+
+    async def dispatch(server):
+        model = model_for("read.report")
+        agent = Agent(name="reports", model=model, mcp_servers=[server])
+        config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=entries))
+        await Runner.run(agent, "go", run_config=config)
+        return repr(model.calls[-1].input)
+
+    assert RAW in await dispatch(peer)
+    peer.tool_filter = {"allowed_tool_names": ["read.report"]}
+    assert RAW in await dispatch(peer)
+    peer.tool_filter = None
+    peer.tools.pop()
+    assert RAW in await dispatch(Source())
+    with pytest.raises(UserError, match="original tool name"):
+        await dispatch(peer)
+    assert peer.tool_calls == ["read.report"] * 2
+    entries.append(((peer, "read.report"), edit))
+    accepted = await dispatch(peer)
+    assert SAFE in accepted and RAW not in accepted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("deny_child", [False, True])
+async def test_missing_child_editor_blocks_approved_sibling_before_effects(
+    streamed, restored, deny_child
+):
+    effects = []
+
+    @function_tool(needs_approval=True)
+    def sibling():
+        effects.append("sibling")
+        return "ok"
+
+    @function_tool(needs_approval=True)
+    def report():
+        effects.append("report")
+        return RAW
+
+    async def edit(call, texts):
+        return (SAFE,)
+
+    child_model = model_for("report")
+    child = Agent(name="reports", tools=[report], model=child_model)
+    model = ScriptedModel(
+        [
+            [
+                function_call("sibling", {}, call_id="first"),
+                function_call("delegate", {"input": "go"}, call_id="parent"),
+            ],
+            [assistant_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="root",
+        model=model,
+        tools=[sibling, child.as_tool("delegate", "Delegate", failure_error_function=None)],
+    )
+    config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(report, edit)]))
+    paused = await Runner.run(agent, "go", run_config=config)
+    state = paused.to_state()
+    if restored:
+        state = await RunState.from_string(agent, state.to_string())
+    assert len(state.get_interruptions()) == 2
+    for item in state.get_interruptions():
+        if deny_child and item.tool_name == "report":
+            state.reject(item)
+        else:
+            state.approve(item)
+
+    async def resume(settings):
+        if streamed:
+            result = Runner.run_streamed(agent, state, run_config=settings)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, state, run_config=settings)
+
+    if deny_child:
+        result = await resume(RunConfig())
+        assert effects == ["sibling"] and result.final_output == "done"
+        return
+
+    with pytest.raises(UserError, match="exact tool_text_transforms target"):
+        await resume(RunConfig())
+    assert not effects and len(model.calls) == len(child_model.calls) == 1
+    result = await resume(config)
+    assert sorted(effects) == ["report", "sibling"]
+    assert result.final_output == "done" and RAW not in repr(child_model.calls[-1].input)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize(
+    ("nested", "change"),
+    [
+        (nested, change)
+        for nested in (False, True)
+        for change in (
+            "grant",
+            "new_editor",
+            "replacement",
+            "disabled_at_load",
+            "absent_at_load",
+            "ambiguous",
+            "marked_switch",
+        )
+    ]
+    + [
+        (True, change)
+        for change in ("delegate", "new_child_editor", "new_child_budget", "marked_child")
+    ],
+)
+async def test_local_editor_preflight_keeps_approved_calls_retryable(
+    streamed, managed, nested, change
+):
+    from agents import ResumableSession, RunBudget
+
+    from .memory.test_resumable_session import MemoryStore
+
+    effects = []
+    available = True
+
+    @function_tool(needs_approval=True)
+    def sibling():
+        effects.append("sibling")
+        return "ok"
+
+    @function_tool(
+        needs_approval=True, is_enabled=lambda ctx, agent: available and ctx.context["allowed"]
+    )
+    def report():
+        effects.append("report")
+        return RAW
+
+    async def edit(call, texts):
+        effects.append("edit")
+        return (SAFE,)
+
+    def config(target):
+        return RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(target, edit)]))
+
+    model = model_for("report")
+    child = Agent(name="reports", model=model, tools=[report])
+    agent = child
+    settings = (
+        config(report)
+        if change in ("grant", "marked_switch", "ambiguous", "marked_child")
+        else RunConfig()
+    )
+    outer = RunConfig() if nested else settings
+    if nested:
+        parent_model = ScriptedModel(
+            [
+                [
+                    function_call("sibling", {}, call_id="first"),
+                    function_call("delegate", {"input": "go"}, call_id="parent"),
+                ],
+                [assistant_message("done")],
+            ]
+        )
+        agent = Agent(
+            name="parent",
+            model=parent_model,
+            tools=[
+                sibling,
+                Agent(name="other").as_tool(
+                    "delegate",
+                    "Other",
+                    is_enabled=False if change == "new_editor" else lambda *_: False,
+                ),
+                child.as_tool(
+                    "delegate",
+                    "Ask",
+                    failure_error_function=None,
+                    run_config=settings,
+                    is_enabled=lambda ctx, agent: ctx.context.get("delegate", True),
+                ),
+            ],
+        )
+
+    switch = change in ("new_child_editor", "new_child_budget", "marked_child")
+    if switch:
+        alternate = RunConfig()
+        agent.tools[1] = child.as_tool(
+            "delegate",
+            "Other",
+            failure_error_function=None,
+            run_config=alternate,
+            is_enabled=lambda ctx, agent: not ctx.context.get("delegate", True),
+        )
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store) if managed else None
+    paused = await Runner.run(
+        agent,
+        "go",
+        context={"allowed": True},
+        session=session,
+        run_config=outer,
+    )
+    if session:
+        saved = store.records[session.session_id]
+        session = await ResumableSession.resume(store, session.session_id)
+    available = change != "disabled_at_load"
+    if change == "absent_at_load":
+        child.tools = []
+    state = (
+        await session.load_state(agent)
+        if session
+        else await RunState.from_string(agent, paused.to_state().to_string())
+    )
+    available = True
+    child.tools = [report]
+    for item in state.get_interruptions():
+        state.approve(item)
+
+    async def resume(target, *, allowed=True, delegate=True):
+        context = {"allowed": allowed, "delegate": delegate}
+        recipient = alternate if switch and not delegate else settings
+        if change == "new_child_budget" and not delegate:
+            recipient.budget = RunBudget(max_requests=2)
+        else:
+            recipient.tool_execution = config(target).tool_execution
+        if streamed:
+            result = Runner.run_streamed(agent, state, context=context, run_config=outer)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, state, context=context, run_config=outer)
+
+    if change == "replacement":
+        child.tools = [replace(report), replace(report, is_enabled=False)]
+    if change == "ambiguous":
+        child.tools.append(replace(report))
+    stale = (
+        replace(report)
+        if change in ("new_editor", "disabled_at_load", "absent_at_load", "new_child_editor")
+        else report
+    )
+    if change == "marked_switch":
+        stale = replace(report)
+        child.tools = [stale]
+    with pytest.raises(
+        UserError,
+        match="enabled .*tool|exact tool_text_transforms|Reload the paused state|same RunBudget",
+    ):
+        await resume(stale, allowed=change != "grant", delegate=not switch and change != "delegate")
+    if session:
+        assert store.records[session.session_id] == saved
+    assert not effects and len(model.calls) == 1
+    if nested:
+        assert len(parent_model.calls) == 1
+    if change == "ambiguous":
+        child.tools[-1].is_enabled = lambda ctx, agent: not ctx.context["allowed"]
+    if change == "marked_switch":
+        child.tools = [report]
+    result = await resume(child.tools[0], delegate=change != "new_child_editor")
+    assert sorted(effects) == (["edit", "report", "sibling"] if nested else ["edit", "report"])
+    assert result.final_output == "done"
+    assert SAFE in repr(model.calls[-1].input)
+    assert RAW not in result.to_state().to_string() + repr(model.calls[-1].input)
+    if session:
+        assert RAW not in store.records[session.session_id]

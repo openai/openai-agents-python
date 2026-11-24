@@ -29,6 +29,32 @@ pytestmark = pytest.mark.allow_call_model_methods
 MODEL = "fixture-model"
 
 
+def test_worker_exit_joins_native_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.environ.get("CODEX_TRACING_NATIVE_TEST") != "1":
+        pytest.skip("Set CODEX_TRACING_NATIVE_TEST=1 and use an installed SDK wheel.")
+
+    workers: list[threading.Thread] = []
+
+    async def close() -> None:
+        provider = CodexProvider(cwd=tmp_path)
+        provider._native_manager()
+        loop = asyncio.get_running_loop()
+        schedule = loop.call_soon_threadsafe
+
+        def observe(*args: Any, **kwargs: Any) -> asyncio.Handle:
+            workers.append(threading.current_thread())
+            return schedule(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "call_soon_threadsafe", observe)
+            await provider.aclose()
+
+    # The worker can exit immediately after asyncio.run, even after an approval pause.
+    asyncio.run(close())
+    assert workers
+    assert all(t is threading.current_thread() or not t.is_alive() for t in workers)
+
+
 class _LoopbackServer(ThreadingHTTPServer):
     def server_bind(self) -> None:
         # Numeric loopback avoids reverse DNS and never reaches a model service.

@@ -164,9 +164,9 @@ Commands that require more permission fail under this configuration. SDK tool ap
 
 A `SandboxAgent`, `ShellTool`, or `ApplyPatchTool` uses the SDK's executor or editor instead. The provider disables competing native workspace tools for these runs. Disable inherited Codex MCP servers when using isolated SDK execution tools; otherwise the provider rejects the configuration. SDK-managed MCP tools remain available through the SDK's own connection and approval policy. See [MCP](../mcp.md).
 
-!!! warning "When a tool requires a policy check"
+Codex blocks a native tool call if a synchronous `PreToolUse` hook fails or times out. After an approval pause, the replacement worker runs any configured `on_tool_start` callbacks before executing the call. The worker reuses the approved input, including any changes from the original `prepare_tool_input` callback.
 
-    If the native hook relay cannot deliver a decision, Codex may run the tool with its original arguments. If a failed check must always stop execution, enforce the check inside an SDK-managed tool and disable the corresponding native tool. Raw stream events and provider-managed history can still contain the original arguments.
+Use [Runner text redaction](https://github.com/openai/openai-agents-python/blob/feat/simple-codex/docs/tracing.md#runner-text-redaction) to protect completed SDK items and stored session data. Raw provider stream events and provider-managed history can contain the original arguments.
 
 Input guardrails with `run_in_parallel=False` finish before model execution. Cancellation and output guardrails do not roll back native commands or tool side effects. Inspect the workspace before retrying a failed operation.
 
@@ -184,7 +184,7 @@ Strict structured output uses Codex's output schema. With `strict_json_schema=Fa
 
 ## Operation tracing
 
-The SDK preview uses two [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) for operation tracing and approval recovery in the embedded Core. Installing the wheel leaves any separate Codex CLI unchanged. Runner text redaction runs in Python.
+The SDK preview bundles [Codex patches](https://github.com/openai/openai-agents-python/tree/feat/simple-codex/native/codex/patches) for operation tracing, approval recovery, and blocking tools on synchronous pre-execution hook failure. Installing the wheel leaves any separate Codex CLI unchanged. Runner text redaction runs in Python.
 
 Use the same SDK trace processors for Responses and embedded Codex. See **OpenTelemetry** in the English [tracing guide](../tracing.md) for a runnable example with a console exporter or collector. To capture metadata for a Codex run, pass this configuration to the Runner.
 

@@ -792,6 +792,9 @@ class Agent(AgentBase, Generic[TContext]):
             resolved_run_config = run_config
             if resolved_run_config is None and isinstance(context, ToolContext):
                 resolved_run_config = context.run_config
+                if resolved_run_config is not None and resolved_run_config.budget is not None:
+                    resolved_run_config = copy.copy(resolved_run_config)
+                    resolved_run_config.budget = None
             tool_state_scope_id = get_agent_tool_state_scope(context)
             if isinstance(context, ToolContext):
                 # Use a fresh ToolContext to avoid sharing approval state with parent runs.
@@ -1009,8 +1012,16 @@ class Agent(AgentBase, Generic[TContext]):
                                 diagnostic_extra=diagnostic_extra,
                             )
 
+                    stopped = False
+
+                    def stop_stream() -> None:
+                        nonlocal stopped
+                        stopped = True
+                        run_result_streaming.cancel()
+
                     async def dispatch_stream_events() -> None:
-                        while True:
+                        # A handler can suppress cancellation or raise during cleanup.
+                        while not stopped:
                             payload = await event_queue.get()
                             is_sentinel = payload is None  # None marks the end of the stream.
                             try:
@@ -1054,27 +1065,24 @@ class Agent(AgentBase, Generic[TContext]):
                         finally:
                             event_queue.put_nowait(None)
 
-                    try:
-                        await run_producer_consumer(
-                            enqueue_stream_events(),
-                            dispatch_stream_events(),
-                            fail_fast_exceptions=(_AgentToolStreamOverflow,),
-                            # Stop upstream work before awaiting callback cancellation cleanup.
-                            on_failure=lambda: run_result_streaming.cancel(),
-                        )
-                    except BaseException:
-                        # Cancellation can interrupt the producer between iterator advances.
-                        # Explicitly close the iterator after its owning task has stopped.
+                    async def close_stream() -> None:
+                        # Cancellation can leave the iterator suspended between advances.
                         try:
                             await stream_events.aclose()
                         except BaseException as close_error:
-                            # Cleanup cancellation must not replace the primary failure either.
                             log_model_and_tool_action_error(
                                 logger,
                                 "Error while closing an agent tool stream after failure",
                                 close_error,
                             )
-                        raise
+
+                    await run_producer_consumer(
+                        enqueue_stream_events(),
+                        dispatch_stream_events(),
+                        fail_fast_exceptions=(_AgentToolStreamOverflow,),
+                        on_failure=stop_stream,
+                        close_producer=close_stream,
+                    )
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(

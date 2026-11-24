@@ -387,7 +387,10 @@ class MCPUtil:
             )
             for index, tool in enumerate(tools)
         ]
+        # Share one snapshot from this discovery, before agent-level omissions.
+        names = frozenset(t.name for t in tools) if server.tool_filter is None else None
         for function_tool in function_tools:
+            function_tool._mcp_raw_names = names
             assert function_tool._mcp_tool_binding is not None
             server_name, raw_tool_name, _ = function_tool._mcp_tool_binding
             function_tool._mcp_tool_binding = (server_name, raw_tool_name, server_index)
