@@ -1480,6 +1480,7 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
             input="hi",
             model_settings=ModelSettings(
                 reasoning=Reasoning(effort="xhigh"),
+                prompt_cache_key="shared-prefix",
                 prompt_cache_retention="24h",
                 prompt_cache_options={"mode": "explicit", "ttl": "30m"},
             ),
@@ -1505,6 +1506,7 @@ async def test_fetch_response_non_stream(monkeypatch) -> None:
     assert kwargs["response_format"] is omit
     assert kwargs["stream_options"] is omit
     assert kwargs["reasoning_effort"] == "xhigh"
+    assert kwargs["prompt_cache_key"] == "shared-prefix"
     assert kwargs["prompt_cache_retention"] == "24h"
     assert kwargs["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
 

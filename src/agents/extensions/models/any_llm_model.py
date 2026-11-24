@@ -1380,12 +1380,11 @@ class AnyLLMModel(Model):
             extra_kwargs["metadata"] = copy(model_settings.metadata)
         if model_settings.extra_body is not None:
             extra_kwargs["extra_body"] = copy(model_settings.extra_body)
-        if model_settings.extra_args:
-            extra_kwargs.update(model_settings.extra_args)
+        extra_kwargs.update(model_settings._request_extra_args())
         return extra_kwargs
 
     def _build_responses_extra_kwargs(self, model_settings: ModelSettings) -> dict[str, Any]:
-        extra_kwargs = dict(model_settings.extra_args or {})
+        extra_kwargs = model_settings._request_extra_args()
         if model_settings.top_logprobs is not None:
             extra_kwargs["top_logprobs"] = model_settings.top_logprobs
         if model_settings.metadata is not None:

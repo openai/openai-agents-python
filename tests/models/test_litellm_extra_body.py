@@ -224,6 +224,7 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
     settings = ModelSettings(
         extra_body={"reasoning_effort": "none"},
         extra_args={"reasoning_effort": "low", "custom_param": "custom"},
+        prompt_cache_key="shared-prefix",
     )
     model = LitellmModel(model="test-model")
 
@@ -240,6 +241,7 @@ async def test_extra_body_reasoning_effort_overrides_extra_args(monkeypatch):
 
     assert captured["reasoning_effort"] == "none"
     assert captured["custom_param"] == "custom"
+    assert captured["prompt_cache_key"] == "shared-prefix"
     assert "extra_body" not in captured
     assert settings.extra_args == {"reasoning_effort": "low", "custom_param": "custom"}
 

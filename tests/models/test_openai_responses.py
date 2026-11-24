@@ -1827,6 +1827,59 @@ async def test_get_response_with_official_client_applies_transport_extra_kwargs(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_runner_prompt_cache_key_override_reaches_responses_request(stream: bool) -> None:
+    """Exercise automatic key generation and the real client's serializer on a mock transport."""
+    requests = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(json.loads(request.content))
+        frame = _response_completed_frame("resp_fixture", 0)
+        if stream:
+            return httpx2.Response(
+                200, content=f"data: {frame}\n\n", headers={"content-type": "text/event-stream"}
+            )
+        return httpx2.Response(200, json=json.loads(frame)["response"])
+
+    async with AsyncOpenAI(
+        api_key="synthetic",
+        base_url="https://api.openai.com/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)),
+    ) as client:
+        agent = Agent(
+            name="test",
+            model=OpenAIResponsesModel(model="fixture", openai_client=client),
+            model_settings=ModelSettings(
+                prompt_cache_key="agent-key",
+                prompt_cache_options={"mode": "explicit", "ttl": "30m"},
+            ),
+        )
+        config = RunConfig(model_settings={"prompt_cache_key": "run-key"}, tracing_disabled=True)
+        if stream:
+            async for _ in Runner.run_streamed(agent, "hi", run_config=config).stream_events():
+                pass
+        else:
+            await Runner.run(agent, "hi", run_config=config)
+
+    (body,) = requests
+    assert body["prompt_cache_key"] == "run-key"
+    assert body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+    assert agent.clone().model_settings.prompt_cache_key == "agent-key"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["extra_args", "extra_body"])
+async def test_explicit_prompt_cache_key_rejects_duplicate_sources(source: str) -> None:
+    settings = ModelSettings(prompt_cache_key="typed").resolve(
+        {source: {"prompt_cache_key": "legacy"}}
+    )
+    with pytest.raises(TypeError, match="multiple values.*prompt_cache_key"):
+        await _run_responses_model_with_custom_base_url(model_settings=settings)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_custom_base_url_prompt_cache_key_uses_model_settings_only() -> None:
     default_kwargs = await _run_responses_model_with_custom_base_url()
     explicit_kwargs = await _run_responses_model_with_custom_base_url(
@@ -2659,6 +2712,7 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
         model_settings={
             "reasoning": {"mode": "pro", "effort": "max", "context": "all_turns"},
             "context_management": [{"type": "compaction", "compact_threshold": 200000}],
+            "prompt_cache_key": "shared-prefix",
             "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
             "prompt_cache_retention": "24h",
             "store": False,
@@ -2696,6 +2750,8 @@ async def test_websocket_model_reuses_connection_and_sends_response_create_frame
         "effort": "max",
         "mode": "pro",
     }
+    assert ws.sent_messages[0]["prompt_cache_key"] == "shared-prefix"
+    assert "prompt_cache_key" not in ws.sent_messages[1]
     assert ws.sent_messages[0]["prompt_cache_options"] == {
         "mode": "explicit",
         "ttl": "30m",

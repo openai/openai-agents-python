@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import fields, replace
+from dataclasses import field, fields, replace
 from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias, cast
 
 from openai import Omit as _Omit
@@ -220,6 +220,20 @@ class ModelSettings:
     phase timeout configuration or bound the full run, tool calls, or retry backoff.
     """
 
+    prompt_cache_key: str | None = field(default=None, kw_only=True, repr=False)
+    """Use a stable, non-sensitive key for requests that share a prompt prefix.
+
+    For example, ``ModelSettings(prompt_cache_key="shared-prefix")``.
+    A key does not guarantee a cache hit or savings. Check the provider's cached
+    token count when available. If usage or the count is missing, the cache outcome
+    is unknown even if normalized usage shows zero. See ``preserve_raw_usage``.
+
+    Leave unset for the Runner or provider default. Set the key here or in extras, never both.
+
+    Embedded Codex accepts this field and keeps its session ID separate.
+    It rejects retention and TTL overrides.
+    """
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -249,6 +263,8 @@ class ModelSettings:
             prompt_cache_options: PromptCacheOptions | None = None,
             preserve_raw_usage: bool | None = None,
             timeout: Annotated[FiniteFloat, Field(gt=0)] | None = None,
+            *,
+            prompt_cache_key: str | None = None,
         ) -> None: ...
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -294,6 +310,16 @@ class ModelSettings:
             changes["retry"] = _merge_retry_settings(self.retry, override.retry)
 
         return replace(self, **changes)
+
+    def _request_extra_args(self) -> dict[str, Any]:
+        args = dict(self.extra_args or {})
+        if self.prompt_cache_key is not None:
+            if "prompt_cache_key" in args or (
+                isinstance(self.extra_body, Mapping) and "prompt_cache_key" in self.extra_body
+            ):
+                raise TypeError("Got multiple values for prompt_cache_key in ModelSettings.")
+            args["prompt_cache_key"] = self.prompt_cache_key
+        return args
 
     def to_json_dict(self) -> dict[str, Any]:
         adapter: TypeAdapter[ModelSettings] = TypeAdapter(ModelSettings)

@@ -418,7 +418,9 @@ async def test_routed_any_llm_chat_preserves_explicit_reasoning_effort(
         Agent(name="test", model="any-llm/openai/gpt-6-astra"),
         "hi",
         run_config=RunConfig(
-            model_settings=ModelSettings(extra_args={"reasoning_effort": "high"}),
+            model_settings=ModelSettings(
+                prompt_cache_key="shared-prefix", extra_args={"reasoning_effort": "high"}
+            ),
             tracing_disabled=True,
         ),
     )
@@ -427,6 +429,7 @@ async def test_routed_any_llm_chat_preserves_explicit_reasoning_effort(
     (call,) = provider.chat_calls
     assert call["model"] == "gpt-6-astra"
     assert call["reasoning_effort"] == "high"
+    assert call["prompt_cache_key"] == "shared-prefix"
 
 
 @pytest.mark.allow_call_model_methods
@@ -1616,7 +1619,9 @@ async def test_any_llm_responses_path_forwards_prompt_cache_retention(stream: bo
     await cast(Any, model)._fetch_responses_response(
         system_instructions=None,
         input="hi",
-        model_settings=ModelSettings(prompt_cache_retention="24h"),
+        model_settings=ModelSettings(
+            prompt_cache_key="shared-prefix", prompt_cache_retention="24h"
+        ),
         tools=[],
         output_schema=None,
         handoffs=[],
@@ -1628,6 +1633,7 @@ async def test_any_llm_responses_path_forwards_prompt_cache_retention(stream: bo
 
     assert len(provider.private_responses_calls) == 1
     assert provider.private_responses_calls[0]["params"].prompt_cache_retention == "24h"
+    assert provider.private_responses_calls[0]["params"].prompt_cache_key == "shared-prefix"
 
 
 @pytest.mark.allow_call_model_methods
