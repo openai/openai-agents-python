@@ -2,6 +2,7 @@
 mod approval_files;
 mod children;
 mod config;
+mod mcp_results;
 mod native_approval;
 mod operation_tracing;
 mod tool_hooks;
@@ -100,6 +101,7 @@ impl ThreadRecord {
                     .await;
                     // Detach even when a joined shutdown returns an error; the buffer remains drainable.
                     operations.close();
+                    services.mcp_results.close(&id.to_string());
                     result
                 });
                 async move {
@@ -125,6 +127,7 @@ impl ThreadRecord {
 /// Dropping a cancelled startup result therefore closes the thread, while manager
 /// shutdown can still wait for the detached cleanup task to finish.
 struct ThreadLease {
+    mcp_results: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<mcp_results::PendingResult>>>,
     record: Arc<ThreadRecord>,
 }
 
@@ -150,6 +153,7 @@ struct Settings {
 }
 
 struct StartRequest {
+    mcp_tools: Vec<(String, String)>,
     tools: String,
     instructions: Option<String>,
     settings: serde_json::Value,
@@ -210,11 +214,30 @@ async fn start_thread(
     }
     options.dynamic_tools = normalize_dynamic_tool_specs(values)
         .map_err(|_| "Invalid Codex dynamic tools.".to_owned())?;
+    let mcp_results = if request.mcp_tools.is_empty() {
+        None
+    } else {
+        mcp_results::check_recording()?;
+        let (requests, receiver) = mpsc::unbounded_channel();
+        options
+            .thread_extension_init
+            .insert(mcp_results::Selection {
+                tools: request.mcp_tools.clone(),
+                requests,
+            });
+        Some(tokio::sync::Mutex::new(receiver))
+    };
     let created = Box::pin(services.manager.start_thread(options))
         .await
         .map_err(|_| "Unable to start the Codex thread.".to_owned())?;
     let operations = services.operations.root(created.thread_id.to_string());
+    if mcp_results.is_some() && settings["sdk_tool_hooks"]["prepare_tool_output"] == true {
+        services
+            .mcp_results
+            .guard_calls(created.thread_id.to_string());
+    }
     Ok(Arc::new(ThreadLease {
+        mcp_results,
         record: Arc::new(ThreadRecord {
             approval_hooks: settings["sdk_tool_hooks"]["server"]
                 .as_str()
@@ -377,12 +400,14 @@ impl Manager {
         }
     }
 
+    #[pyo3(signature = (dynamic_tools_json, instructions, settings_json, *, mcp_tools=None))]
     fn start_thread<'py>(
         &self,
         py: Python<'py>,
         dynamic_tools_json: String,
         instructions: Option<String>,
         settings_json: String,
+        mcp_tools: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(py_error("The Codex provider is closed."));
@@ -391,6 +416,7 @@ impl Manager {
         self.state
             .commands
             .send(ManagerCommand::Start(StartRequest {
+                mcp_tools: mcp_tools.clone().unwrap_or_default(),
                 tools: dynamic_tools_json,
                 instructions,
                 settings: serde_json::from_str(&settings_json)
@@ -403,6 +429,9 @@ impl Manager {
                 .await
                 .map_err(|_| py_error("The Codex manager stopped unexpectedly."))?
                 .map_err(py_error)?;
+            if let Some(tools) = mcp_tools {
+                mcp_results::verify(&lease.thread, &tools).await?;
+            }
             Python::attach(|py| Py::new(py, Thread { lease }))
         })
     }
@@ -533,22 +562,34 @@ impl Thread {
         let lease = self.lease.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             lease.ensure_open().map_err(py_error)?;
-            let mut event = lease
-                .thread
-                .next_event()
-                .await
-                .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            let next = lease.thread.next_event();
+            let mut event = if let Some(requests) = &lease.mcp_results {
+                let mut receiver = requests.lock().await;
+                tokio::select! {
+                    Some(request) = receiver.recv() => {
+                        return Python::attach(|py| Py::new(py, request).map(Py::into_any));
+                    }
+                    event = next => event,
+                }
+            } else {
+                next.await
+            }
+            .map_err(|_| py_error("The Codex event stream ended unexpectedly."))?;
+            let encode =
+                |text: String| Python::attach(|py| pyo3::IntoPyObjectExt::into_py_any(text, py));
             match &event.msg {
                 EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_) => {
                     let (preconditions, input_hash) = native_approval::checkpoint(&lease.thread, &mut event)
                         .await.ok_or_else(|| py_error(
                             "Cannot save this Codex approval. Use session=ResumableSession with a supported local command or file edit."
                         ))?;
-                    return Ok(serde_json::json!({
-                        "id": event.id, "msg": event.msg, "preconditions": preconditions,
-                        "input_hash": input_hash,
-                    })
-                    .to_string());
+                    return encode(
+                        serde_json::json!({
+                            "id": event.id, "msg": event.msg, "preconditions": preconditions,
+                            "input_hash": input_hash,
+                        })
+                        .to_string(),
+                    );
                 }
                 EventMsg::RequestPermissions(_)
                 | EventMsg::RequestUserInput(_)
@@ -560,7 +601,10 @@ impl Thread {
                 EventMsg::RawResponseItem(raw) => lease.operations.observe_item(&raw.item),
                 _ => {}
             }
-            serde_json::to_string(&event).map_err(|_| py_error("Unable to decode the Codex event."))
+            encode(
+                serde_json::to_string(&event)
+                    .map_err(|_| py_error("Unable to decode the Codex event."))?,
+            )
         })
     }
 

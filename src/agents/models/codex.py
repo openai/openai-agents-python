@@ -6,7 +6,9 @@ import os
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
+from copy import deepcopy
 from dataclasses import fields
+from functools import partial
 from importlib import import_module
 from importlib.resources import files
 from pathlib import Path
@@ -35,6 +37,7 @@ from openai.types.responses import (
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from openai.types.responses.response_reasoning_summary_part_added_event import Part as SummaryPart
 
+from .._redaction import hook_payload_diagnostics, redact_payload
 from ..agent_output import AgentOutputSchemaBase
 from ..exceptions import UserError
 from ..handoffs import Handoff
@@ -42,7 +45,9 @@ from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..memory.session import await_session_mutation as _join_close
 from ..model_settings import ModelSettings
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
-from ..tool import ApplyPatchTool, ShellTool, Tool, WebSearchTool
+from ..run_config import ToolCallHookContext
+from ..run_internal.tool_hooks import _await_hook
+from ..tool import ApplyPatchTool, NativeTool, ShellTool, Tool, WebSearchTool
 from ..usage import (
     Usage,
     _attach_raw_usage_snapshot,
@@ -519,6 +524,10 @@ class _CodexModel(Model):
         provider = self._provider
         bindings = get_model_tool_hooks()
         sdk_sandbox = _uses_sdk_workspace(tools, bindings)
+        tool_execution = bindings.settings if bindings is not None else None
+        transforms = tool_execution._native_mcp_editors() if tool_execution else {}
+        if transforms and (sdk_sandbox or (tool_execution and tool_execution.sdk_only_tool_hooks)):
+            raise UserError("Native MCP result transforms require native Codex tools.")
         native_hooks = None if sdk_sandbox else CodexToolHooks.for_run(bindings, identities)
         children = provider._children
         if children is not None and (tools or handoffs or sdk_sandbox or native_hooks):
@@ -620,7 +629,10 @@ class _CodexModel(Model):
             if native_hooks is not None:
                 settings["sdk_tool_hooks"] = await native_hooks.configure(resources)
             thread = await provider._native_manager().start_thread(
-                json.dumps(dynamic_tools), system_instructions, json.dumps(settings)
+                json.dumps(dynamic_tools),
+                system_instructions,
+                json.dumps(settings),
+                **({"mcp_tools": list(transforms)} if transforms else {}),
             )
             resources.push_async_callback(thread.close)
             if native_hooks is not None:
@@ -668,6 +680,42 @@ class _CodexModel(Model):
                 observations.drain()
                 if encoded is None:
                     raise RuntimeError("Codex finished without a completed response.")
+                if transforms and bindings is not None and not isinstance(encoded, str):
+                    try:
+                        request = json.loads(encoded.request)
+                        if request["turn_id"] != turn_id:
+                            raise RuntimeError("Unexpected native MCP result turn.")
+                        server, name = request["server"], request["name"]
+                        mcp_call = ToolCallHookContext(
+                            bindings.context,
+                            bindings.agent,
+                            NativeTool(name),
+                            request["call_id"],
+                            server,
+                            deepcopy(request["arguments"]),
+                        )
+                        with hook_payload_diagnostics(
+                            "Native MCP result transform failed or returned an invalid replacement "
+                            "(limit 1 MiB)."
+                        ):
+                            replacement = await _await_hook(
+                                partial(transforms[server, name], mcp_call, request["result"]),
+                                "native_mcp_result_transforms",
+                                name,
+                            )
+                            hook_name = encoded.respond(
+                                json.dumps(
+                                    redact_payload(replacement),
+                                    allow_nan=False,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            )
+                            if native_hooks is not None:
+                                native_hooks.confirm_mcp_result(request, hook_name)
+                    finally:
+                        encoded.discard()
+                    continue
                 event = json.loads(encoded)
                 message = event["msg"]
                 kind = message["type"]
