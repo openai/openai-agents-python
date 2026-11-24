@@ -62,7 +62,7 @@ from .._tool_invocation import (
     tool_invocation_identity_and_scope,
     tool_output_identity,
 )
-from ..agent import Agent, ProposedFinalOutput, ToolsToFinalOutputResult
+from ..agent import Agent, ContinueWithFeedback, ProposedFinalOutput, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
     agent_tool_resume_checkpoint_owns_approval,
@@ -483,7 +483,7 @@ async def execute_final_output(
         )
 
         # Isolate even synchronous cancellation from cancellation of the owning run.
-        async def decide() -> Literal["continue", "finish"]:
+        async def decide() -> Literal["continue", "finish"] | ContinueWithFeedback:
             value = policy(context_wrapper, proposal)
             return await value if inspect.isawaitable(value) else value
 
@@ -493,16 +493,24 @@ async def execute_final_output(
                 if on_tool_error_selected is not None:
                     on_tool_error_selected()
 
+        feedback: str | None = None
         policy_error: BaseException | None = None
         try:
             require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
             (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+            if isinstance(decision, ContinueWithFeedback):
+                if not isinstance(decision.message, str) or not decision.message.strip():
+                    raise UserError("ContinueWithFeedback requires a nonblank message")
+                feedback = decision.message
+                decision = "continue"
             if decision == "continue":
                 require_clean_final_output(
                     final_output, original_input, pre_step_items, new_step_items
                 )
             if decision not in ("continue", "finish"):
-                raise UserError('Agent final_output_policy must return "continue" or "finish"')
+                raise UserError(
+                    'final_output_policy must return "continue", "finish" or ContinueWithFeedback'
+                )
         except (Exception, asyncio.CancelledError) as exc:
             if not guarded_tool:
                 raise
@@ -517,6 +525,7 @@ async def execute_final_output(
                 new_step_items=new_step_items,
                 next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
                 policy_error=policy_error,
+                feedback=feedback,
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )

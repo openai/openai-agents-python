@@ -9,12 +9,16 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     AgentHooks,
+    ContinueWithFeedback,
     GuardrailFunctionOutput,
     MaxTurnsExceeded,
     ModelBehaviorError,
     ModelRefusalError,
+    ModelRetrySettings,
+    ModelSettings,
     OutputGuardrailTripwireTriggered,
     ProposedFinalOutput,
+    RetryDecision,
     RunConfig,
     RunContextWrapper,
     RunHooks,
@@ -380,7 +384,8 @@ async def test_invalid_candidate_or_decision_cannot_finish(streamed):
     assert hooks.outputs == []
 
 
-async def test_cancel_discards_late_finish_and_joins_policy(streamed):
+@pytest.mark.parametrize("feedback", [False, True])
+async def test_cancel_discards_late_decision_and_joins_policy(streamed, feedback):
     entered = asyncio.Event()
     cleaned = asyncio.Event()
     hooks = EndHooks()
@@ -390,7 +395,7 @@ async def test_cancel_discards_late_finish_and_joins_policy(streamed):
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            return "finish"
+            return ContinueWithFeedback("Try again.") if feedback else "finish"
         finally:
             cleaned.set()
 
@@ -716,3 +721,204 @@ async def test_continued_reply_is_clean_at_each_callback_boundary(streamed, stag
         expected.append(("guardrail", "ok"))
     assert seen == expected
     assert len(model.calls) == 1
+
+
+async def test_feedback_is_one_user_turn_including_retries(streamed):
+    from agents.stream_events import RunCompleted
+
+    correction = "Count both groups."
+    seen = []
+
+    async def decide(ctx, proposal):
+        seen.append(proposal.output.count)
+        if proposal.turn == 1:
+            return ContinueWithFeedback(correction)
+        return "continue" if proposal.turn == 2 else "finish"
+
+    model = ScriptedModel(
+        [
+            [get_text_message('{"count":1}')],
+            ModelStep(error=ConnectionError("retry")),
+            [get_text_message('{"count":2}')],
+            [get_text_message('{"count":3}')],
+        ]
+    )
+    retry = ModelRetrySettings(max_retries=1, policy=lambda _: RetryDecision(retry=True, delay=0))
+    agent = Agent(
+        name="worker",
+        instructions="Count",
+        model=model,
+        model_settings=ModelSettings(retry=retry),
+        output_type=Answer,
+        hooks=AgentHooks(final_output_policy=decide),
+    )
+    hooks = EndHooks()
+    session = SQLiteSession("feedback")
+    try:
+        if streamed:
+            stream = Runner.run_streamed(agent, "start", hooks=hooks, session=session)
+            events = [event async for event in stream.subscribe_approved_output()]
+            async for _ in stream.stream_events():
+                pass
+            assert sum(isinstance(event, RunCompleted) for event in events) == 1
+            result = stream
+        else:
+            result = await run(False, agent, hooks=hooks, session=session)
+        assert seen == [1, 2, 3]
+        assert hooks.outputs == [Answer(count=3)] == [result.final_output]
+        assert all(c.system_instructions == "Count" for c in model.calls)
+        assert [str(c.input).count(correction) for c in model.calls] == [0, 1, 1, 0]
+        assert model.calls[1].input[-1] == {"role": "user", "content": correction}
+        assert correction not in str(
+            (result.to_input_list(), result.to_state().to_string(), await session.get_items())
+        )
+    finally:
+        session.close()
+
+
+async def test_feedback_between_two_approvals_is_not_saved(streamed):
+    effects = []
+
+    @tool(needs_approval=True)
+    def record() -> str:
+        effects.append("record")
+        return "saved"
+
+    correction = "Record one more entry."
+
+    def decide(ctx, proposal):
+        if proposal.turn == 1:
+            return ContinueWithFeedback(correction)
+        return "continue" if proposal.kind == "tool" else "finish"
+
+    model = ScriptedModel(
+        [[get_function_tool_call("record", "{}", str(i))] for i in range(2)]
+        + [[get_text_message("done")]]
+    )
+    agent = Agent(
+        name="worker",
+        model=model,
+        tools=[record],
+        tool_use_behavior="stop_on_first_tool",
+        hooks=AgentHooks(final_output_policy=decide),
+    )
+    result = await run(streamed, agent)
+    for i in range(2):
+        assert len(effects) == i
+        saved = result.to_state().to_string()
+        assert correction not in saved
+        state = await RunState.from_string(agent, saved)
+        state.approve(state.get_interruptions()[0])
+        result = await run(streamed, agent, state)
+    assert result.final_output == "done" and len(effects) == 2
+    assert [str(c.input).count(correction) for c in model.calls] == [0, 1, 0]
+
+
+@pytest.mark.parametrize("protected", [True, False])
+async def test_feedback_is_checked_before_filter_and_filter_can_remove_it(streamed, protected):
+    correction = "Use SI units."
+    observed = []
+
+    def filter_input(data):
+        items = data.model_data.input
+        if items[-1].get("content") == correction:
+            observed.append(items.pop())
+        return data.model_data
+
+    model = ScriptedModel([[get_text_message("draft")], [get_text_message("done")]])
+    agent = Agent(
+        name="worker",
+        model=model,
+        hooks=AgentHooks(
+            final_output_policy=lambda ctx, p: (
+                ContinueWithFeedback(correction) if p.turn == 1 else "finish"
+            )
+        ),
+    )
+    config = RunConfig(
+        call_model_input_filter=filter_input,
+        redact_text=(lambda s: s.replace(correction, "-")) if protected else None,
+    )
+    if protected:
+        with pytest.raises(UserError, match="redact_text"):
+            await run(streamed, agent, run_config=config)
+        assert not observed and len(model.calls) == 1
+    else:
+        assert (await run(streamed, agent, run_config=config)).final_output == "done"
+        assert observed == [{"role": "user", "content": correction}]
+        assert correction not in str(model.calls[1].input)
+
+
+@pytest.mark.parametrize("case", ["blank", "nonstring", "limit", "blocked", "linked"])
+async def test_feedback_cannot_bypass_admission(streamed, case):
+    @output_guardrail
+    def block(ctx, agent, output):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    message = {"blank": "  ", "nonstring": None}.get(case, "Check units.")
+    model = ScriptedModel([[get_text_message("draft")]])
+    agent = Agent(
+        name="worker",
+        model=model,
+        hooks=AgentHooks(final_output_policy=lambda *_: ContinueWithFeedback(message)),
+        output_guardrails=[block] if case == "blocked" else [],
+    )
+    error = {"limit": MaxTurnsExceeded, "blocked": OutputGuardrailTripwireTriggered}.get(
+        case, UserError
+    )
+    with pytest.raises(error):
+        await run(
+            streamed,
+            agent,
+            max_turns=1 if case == "limit" else 2,
+            auto_previous_response_id=case == "linked",
+        )
+    assert len(model.calls) == 1
+
+
+async def test_concurrent_runs_keep_feedback_local(streamed):
+    async def decide(ctx, proposal):
+        await asyncio.sleep(0)
+        return ContinueWithFeedback(ctx.context) if proposal.turn == 1 else "finish"
+
+    agent = Agent(name="worker", hooks=AgentHooks(final_output_policy=decide))
+
+    async def check(message):
+        model = ScriptedModel([[get_text_message("draft")], [get_text_message("done")]])
+        result = await run(streamed, agent, context=message, run_config=RunConfig(model=model))
+        assert result.final_output == "done"
+        assert model.calls[1].input[-1] == {"role": "user", "content": message}
+
+    await asyncio.gather(check("Check length."), check("Check width."))
+
+
+@pytest.mark.parametrize("mode", ["input", "auto", "previous_response_id"])
+async def test_feedback_requires_input_based_compaction(streamed, mode):
+    from unittest.mock import MagicMock
+
+    from agents.memory import OpenAIResponsesCompactionSession
+
+    def decide(ctx, proposal):
+        return ContinueWithFeedback("Check units.") if proposal.turn == 1 else "finish"
+
+    model = ScriptedModel([[get_text_message("draft")], [get_text_message("done")]])
+    agent = Agent(name="worker", model=model, hooks=AgentHooks(final_output_policy=decide))
+    backend = SQLiteSession("feedback")
+    try:
+        session = OpenAIResponsesCompactionSession(
+            "feedback",
+            backend,
+            client=MagicMock(),
+            compaction_mode=mode,
+            should_trigger_compaction=lambda _: False,
+        )
+        if mode == "input":
+            assert (await run(streamed, agent, session=session)).final_output == "done"
+            assert model.calls[1].input[-1] == {"role": "user", "content": "Check units."}
+        else:
+            with pytest.raises(UserError, match="SDK-managed"):
+                await run(streamed, agent, session=session)
+            assert len(model.calls) == 1
+        assert "Check units." not in str(await session.get_items())
+    finally:
+        backend.close()

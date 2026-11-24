@@ -83,6 +83,13 @@ class _AgentToolStreamOverflow(UserError):
 
 
 @dataclass(frozen=True)
+class ContinueWithFeedback:
+    """Continue with one application-authored user message on the next model turn."""
+
+    message: str
+
+
+@dataclass(frozen=True)
 class ProposedFinalOutput(Generic[TContext]):
     """A proposed final output from one SDK model turn. Treat its contents as read-only."""
 
