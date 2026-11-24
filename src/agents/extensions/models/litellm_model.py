@@ -325,6 +325,7 @@ class LitellmModel(Model):
                     # The request completed, so it counts even when the provider omits usage.
                     else Usage(requests=1)
                 )
+                usage._total_missing = response_usage is None or response_usage.total_tokens is None
             else:
                 usage = Usage(requests=1)
                 logger.warning("No usage information returned from Litellm")
