@@ -24,7 +24,6 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     ModelBehaviorError,
-    OutputGuardrailTripwireTriggered,
     RunErrorDetails,
     UserError,
     _await_data_redacted_error_boundary,
@@ -104,6 +103,7 @@ from .run_internal.agent_tool_configuration import agent_tool_configuration_run
 from .run_internal.approvals import approvals_from_step
 from .run_internal.blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
+    _blocked_output_errors,
     _blocked_output_failure_items,
     _BlockedOutputOwnerStarts,
     _current_response_boundary,
@@ -1459,6 +1459,8 @@ class AgentRunner:
                                 )
                                 output_guardrail_result_start = len(output_guardrail_results)
                                 try:
+                                    if turn_result.policy_error is not None:
+                                        raise turn_result.policy_error
                                     await run_output_guardrails(
                                         current_agent.output_guardrails
                                         + (run_config.output_guardrails or []),
@@ -1467,11 +1469,17 @@ class AgentRunner:
                                         context_wrapper,
                                         output_guardrail_results,
                                     )
-                                except OutputGuardrailTripwireTriggered as exc:
-                                    if not _is_terminal_tool_output_response(
-                                        turn_session_items,
-                                        current_processed_response,
-                                        run_state,
+                                    turn_result.check_continued_output()
+                                except _blocked_output_errors(
+                                    turn_result.next_step.continue_after_guardrails
+                                ) as exc:
+                                    if (
+                                        not turn_result.next_step.continue_after_guardrails
+                                        and not _is_terminal_tool_output_response(
+                                            turn_session_items,
+                                            current_processed_response,
+                                            run_state,
+                                        )
                                     ):
                                         raise
                                     sanitized_results = _sanitize_blocked_output_guardrail_results(
@@ -1602,12 +1610,15 @@ class AgentRunner:
                                     store=store_setting,
                                     wrapper=context_wrapper,
                                 )
-                                if session is None:
-                                    take_held_session_write(run_state)
                                 # The append and any post-append maintenance both succeeded,
                                 # so the turn is durable and the state is open again.
                                 if run_state is not None:
                                     run_state._terminal_unrecoverable = False
+                                if turn_result.next_step.continue_after_guardrails:
+                                    run_state._current_step = NextStepRunAgain()
+                                    continue
+                                if session is None:
+                                    take_held_session_write(run_state)
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
@@ -1900,6 +1911,7 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 preserve_tool_task_cancellation(
                                     run_single_turn(
+                                        current_turn=current_turn,
                                         bindings=current_bindings,
                                         original_input=original_input,
                                         generated_items=items_for_model,
@@ -2008,6 +2020,7 @@ class AgentRunner:
                                 turn_result = await model_task
                         else:
                             turn_result = await run_single_turn(
+                                current_turn=current_turn,
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 generated_items=items_for_model,
@@ -2215,6 +2228,8 @@ class AgentRunner:
                                 )
                             output_guardrail_result_start = len(output_guardrail_results)
                             try:
+                                if turn_result.policy_error is not None:
+                                    raise turn_result.policy_error
                                 await run_output_guardrails(
                                     current_agent.output_guardrails
                                     + (run_config.output_guardrails or []),
@@ -2223,11 +2238,17 @@ class AgentRunner:
                                     context_wrapper,
                                     output_guardrail_results,
                                 )
-                            except OutputGuardrailTripwireTriggered as exc:
-                                if not _is_terminal_tool_output_response(
-                                    turn_session_items,
-                                    turn_result.processed_response,
-                                    run_state,
+                                turn_result.check_continued_output()
+                            except _blocked_output_errors(
+                                turn_result.next_step.continue_after_guardrails
+                            ) as exc:
+                                if (
+                                    not turn_result.next_step.continue_after_guardrails
+                                    and not _is_terminal_tool_output_response(
+                                        turn_session_items,
+                                        turn_result.processed_response,
+                                        run_state,
+                                    )
                                 ):
                                     raise
                                 sanitized_results = _sanitize_blocked_output_guardrail_results(
@@ -2333,6 +2354,11 @@ class AgentRunner:
                             )
                             if run_state is not None:
                                 run_state._terminal_unrecoverable = False
+
+                            if turn_result.next_step.continue_after_guardrails:
+                                if run_state is not None:
+                                    run_state._current_step = NextStepRunAgain()
+                                continue
 
                             if session is None and run_state is not None:
                                 # A detached completion has no Session to settle against

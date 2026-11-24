@@ -5,7 +5,7 @@ import random
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from inspect import isawaitable
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx2
 from openai import APIConnectionError, APITimeoutError, BadRequestError
@@ -39,6 +39,9 @@ from ..run_budget import _BudgetState
 from ..tracing._model import ModelRetrySpans, model_retry_scope
 from ..usage import RequestUsage, Usage
 from ..util._error_tracing import mark_model_timeout_task
+
+if TYPE_CHECKING:
+    from ._approved_output import ApprovedOutput
 
 GetResponseCallable = Callable[[], Awaitable[ModelResponse]]
 GetStreamCallable = Callable[[], AsyncIterator[TResponseStreamEvent]]
@@ -270,10 +273,11 @@ async def _run_stream_attempt_in_one_task(
     get_stream: GetStreamCallable,
     requests: asyncio.Queue[None],
     results: asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]],
+    preview: ApprovedOutput | None,
 ) -> None:
     """Own stream construction, pulls, and cleanup in one task context."""
     stream: AsyncIterator[TResponseStreamEvent] | None = None
-    terminal_result: tuple[str, TResponseStreamEvent | BaseException | None] | None = None
+    terminal_result: tuple[str, BaseException | None] = ("done", None)
     try:
         stream = get_stream()
         while True:
@@ -281,19 +285,22 @@ async def _run_stream_attempt_in_one_task(
             try:
                 event = await stream.__anext__()
             except StopAsyncIteration:
-                terminal_result = ("done", None)
                 break
-            except BaseException as error:
-                terminal_result = ("error", error)
-                break
+            if preview is not None:
+                preview.feed(event)
             results.put_nowait(("event", event))
     except BaseException as error:
         terminal_result = ("error", error)
     finally:
-        if stream is not None:
-            await _close_async_iterator_quietly(stream)
-    if terminal_result is not None:
-        results.put_nowait(terminal_result)
+        try:
+            if preview is not None:
+                preview.retire()
+            if stream is not None:
+                await _close_async_iterator_quietly(stream)
+        finally:
+            # Wake the consumer even if close was cancelled. It joins this task
+            # before interpreting the terminal result.
+            results.put_nowait(terminal_result)
 
 
 async def _await_model_attempt(
@@ -728,6 +735,7 @@ async def stream_response_with_retry(
     timeout: float | None = None,
     failed_retry_attempts_out: list[int] | None = None,
     replay_unsafe_request: bool = False,
+    preview: ApprovedOutput | None = None,
 ) -> AsyncGenerator[TResponseStreamEvent, None]:
     request_attempt = 1
     policy_attempt = 1
@@ -760,7 +768,10 @@ async def stream_response_with_retry(
                 stream_results: (
                     asyncio.Queue[tuple[str, TResponseStreamEvent | BaseException | None]] | None
                 ) = None
-                if timeout is None:
+                # Keep cancellation outside provider cleanup while an approval can publish.
+                if preview is not None:
+                    preview.begin(deadline)
+                if timeout is None and preview is None:
                     # Pull stream events under the retry-disable context, but yield them outside it
                     # so unrelated model calls made by the consumer do not inherit this setting.
                     with (
@@ -782,12 +793,13 @@ async def stream_response_with_retry(
                                 get_stream,
                                 stream_requests,
                                 stream_results,
+                                preview,
                             )
                         )
                 try:
                     while True:
                         try:
-                            if timeout is None:
+                            if stream_owner is None:
                                 assert stream is not None
                                 with (
                                     provider_managed_retries_disabled(
@@ -803,9 +815,12 @@ async def stream_response_with_retry(
                                 assert stream_owner is not None
                                 assert stream_requests is not None
                                 assert stream_results is not None
-                                assert deadline is not None
                                 stream_requests.put_nowait(None)
-                                remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+                                remaining = (
+                                    None
+                                    if deadline is None
+                                    else max(deadline - asyncio.get_running_loop().time(), 0.0)
+                                )
                                 try:
                                     result_kind, result_value = await _await_model_attempt(
                                         stream_results.get(),
@@ -813,34 +828,27 @@ async def stream_response_with_retry(
                                         timeout_error_seconds=timeout,
                                     )
                                 except ModelTimeoutError as error:
+                                    if preview is not None:
+                                        preview.retire()
                                     await _cancel_and_drain_model_attempt_task(
                                         stream_owner,
                                         error,
                                         cancel_cleanup=True,
                                     )
                                     raise
-                                except asyncio.CancelledError:
-                                    await _cancel_and_drain_model_attempt_task(stream_owner)
-                                    raise
-                                if result_kind == "done":
-                                    remaining = max(
-                                        deadline - asyncio.get_running_loop().time(), 0.0
+                                if result_kind in ("done", "error"):
+                                    remaining = (
+                                        None
+                                        if deadline is None
+                                        else max(deadline - asyncio.get_running_loop().time(), 0.0)
                                     )
                                     await _await_model_attempt(
                                         stream_owner,
                                         remaining,
                                         timeout_error_seconds=timeout,
                                     )
-                                    return
-                                if result_kind == "error":
-                                    remaining = max(
-                                        deadline - asyncio.get_running_loop().time(), 0.0
-                                    )
-                                    await _await_model_attempt(
-                                        stream_owner,
-                                        remaining,
-                                        timeout_error_seconds=timeout,
-                                    )
+                                    if result_kind == "done":
+                                        return
                                     assert isinstance(result_value, BaseException)
                                     raise result_value
                                 assert result_kind == "event"
@@ -860,6 +868,8 @@ async def stream_response_with_retry(
                         yield event
                 finally:
                     if stream_owner is not None and not stream_owner.done():
+                        if preview is not None:
+                            preview.retire()
                         await _cancel_and_drain_model_attempt_task(stream_owner)
                 return
             except _StreamAttemptSkipped as skipped:
