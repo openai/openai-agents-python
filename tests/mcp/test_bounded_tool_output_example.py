@@ -119,6 +119,9 @@ async def test_sdk_discovery_and_function_results_before_publication():
                 {"type": "input_text", "text": ""},
             ]
         )
+        saved = reports.saved(OWNER)
+        assert isinstance(saved, tuple) and len(saved) == 6
+        by_summary = {summary: (ref, parts) for ref, summary, parts in saved}
         for summary, count, original in [
             (outputs["site"], 20, ("WARN: synthetic site detail\n" * 20,)),
             (outputs["json"][0]["text"], 8, (structured,)),
@@ -132,8 +135,9 @@ async def test_sdk_discovery_and_function_results_before_publication():
             (outputs["text"][0]["text"], 0, ("Sample reading. " * 12,)),
         ]:
             assert len(summary.encode()) <= 128
-            label, ref = summary.split(" Reference: ")
-            assert label == f"Inspection report with {count} warning markers."
+            ref, parts = by_summary.pop(summary)
+            assert summary == f"Inspection report with {count} warning markers. Reference: {ref}"
+            assert parts == len(original)
             assert ref in repr(events) and ref in repr(history) and ref in repr(result.new_items)
             for part, expected in enumerate(original):
                 for offset in range(0, len(expected), 64):
@@ -197,8 +201,13 @@ async def test_local_output_is_bounded_before_an_independent_editor():
         await Runner.run(agent, "Inspect", context=OWNER, run_config=config)
         (summary,) = seen
         assert len(summary.encode()) <= 128
-        label, ref = summary.split(" Reference: ")
-        assert label == "Inspection report with 20 warning markers."
+        ((ref, saved_summary, parts),) = reports.saved(OWNER)
+        assert parts == 1
+        assert (
+            saved_summary
+            == summary
+            == f"Inspection report with 20 warning markers. Reference: {ref}"
+        )
         assert reports.fetch(OWNER, ref) == (await recipe.site_report())[:64]
         assert "Reviewed" in repr(model.calls[1].input)
 
@@ -348,7 +357,10 @@ async def test_reader_ignores_pass_through_and_forged_references(monkeypatch, ca
 @pytest.mark.asyncio
 async def test_reader_requires_live_owner(capsys):
     with closing(recipe.Reports(OWNER)) as reports:
+        assert reports.saved(OWNER) == ()
         await reports.bound(("WARN: " * 25,))
+        assert reports.saved("other-user") == ()
         reports.show("other-user")
+    assert reports.saved(OWNER) == ()
     reports.show(OWNER)
     assert capsys.readouterr().out.splitlines() == ["No saved reports available."] * 2

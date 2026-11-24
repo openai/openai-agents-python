@@ -52,12 +52,22 @@ class Reports:
         _, texts = self._reports[reference]
         return texts[part][offset : offset + 64]
 
+    def saved(self, requester: str) -> tuple[tuple[str, str, int], ...]:
+        """List the owner's references, display summaries and text part counts."""
+        if requester != self._owner or not self._reports:
+            return ()
+        return tuple(
+            (reference, summary, len(texts))
+            for reference, (summary, texts) in self._reports.items()
+        )
+
     def show(self, requester: str) -> None:
         """Display only summaries issued by this store to its owner."""
-        if requester != self._owner or not self._reports:
+        saved = self.saved(requester)
+        if not saved:
             print("No saved reports available.")
             return
-        for reference, (summary, _) in self._reports.items():
+        for reference, summary, _ in saved:
             page = self.fetch(requester, reference)
             print(summary)
             print("Retrieved the first page privately." if page else "The first page is empty.")

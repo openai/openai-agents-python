@@ -23,7 +23,15 @@ At the tool boundary, the budget covers the sum of UTF-8 text bytes per result, 
 
 Create one `Reports` instance per run. Load the owner from a trusted application record. Pass only the authenticated requester as the run context. Never accept either identity from tool arguments or a reference. The reader uses only summaries and references issued by this store. It ignores tool output, including short reports, errors and text that looks like a reference. Without an authorized saved report, it prints a fixed message.
 
-Call `reports.fetch(requester, reference, part=0, offset=0)` in application code. Each page contains up to 64 characters. Advance the offset by the page length, or select another text part. Structured reports have one JSON part.
+After the run, inside the `closing` block, application code can read the first page of each saved text part. Keep these pages out of tool results and model input.
+
+```python
+for reference, summary, part_count in reports.saved(requester):
+    for part in range(part_count):
+        first_page = reports.fetch(requester, reference, part=part)
+```
+
+`saved()` returns an empty tuple for an empty or closed store or a different requester. Images do not count as text parts. A structured report has one JSON part. Each `fetch()` checks access again and returns up to 64 characters. To read the next page, advance `offset` by the page length.
 
 The originals stay in process memory outside SDK context. Leaving the `closing` block revokes every reference, including on failure or cancellation. Saved conversations cannot restore the originals. This example has no storage quota or durable store.
 

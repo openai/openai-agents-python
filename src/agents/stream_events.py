@@ -60,3 +60,27 @@ class AgentUpdatedStreamEvent:
 
 StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpdatedStreamEvent
 """A streaming event from an agent."""
+
+
+@dataclass(frozen=True)
+class ApprovedText:
+    """Text the application approved for preview only. Later failures cannot retract it."""
+
+    submission_id: str
+    session_id: str | None
+    turn: int
+    turn_id: str
+    item_id: str
+    content_index: int
+    text: str
+
+
+@dataclass(frozen=True)
+class RunCompleted:
+    """The run completed successfully after guardrails, persistence and cleanup.
+
+    This event carries no output and grants no permission to display final_output.
+    """
+
+    submission_id: str
+    session_id: str | None
