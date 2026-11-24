@@ -30,7 +30,28 @@ def _delegation_error(
 
 @dataclass(frozen=True)
 class CodexRole:
-    """A specialist the native parent can select by name and description."""
+    """A named specialist that inherits the native parent's model and permissions.
+
+    Codex uses the name and description to select a role. Its instructions cannot
+    restrict access. Choose permissions for the whole tree on the parent.
+
+    To choose a specialist's model and tools in Python, use `Agent.as_tool`
+    without native children or a run-wide model override.
+
+    ```python
+    from agents import Agent, Runner
+
+    async def review(manager_model, editor_model, editor_tools, draft):
+        editor = Agent(name="Editor", model=editor_model, tools=editor_tools)
+        manager = Agent(
+            name="Manager", model=manager_model, tools=[editor.as_tool("edit", "Review a draft")]
+        )
+        return await Runner.run(manager, f"Ask the editor to review this draft: {draft}")
+    ```
+
+    The editor returns its answer to the manager. Native child limits do not
+    apply to these Runner calls.
+    """
 
     name: str
     description: str

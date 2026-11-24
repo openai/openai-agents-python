@@ -80,10 +80,17 @@ class CodexProvider(ModelProvider):
 
     To enable native children, run `codex debug models` with a CLI that matches
     the Codex Core revision in the SDK wheel. Use the same workspace,
-    credentials, provider and catalog settings. Under `models`, look for
-    `visibility="list"` and `multi_agent_version="v1"`.
-    For API keys also require `supported_in_api=true`. A catalog entry does
-    not guarantee access. If none qualifies, there is no listed V1 candidate.
+    credentials, provider and catalog settings. With `jq`, list candidate slugs:
+
+    ```sh
+    codex debug models | jq -r '.models[]
+        | select(.visibility == "list" and .multi_agent_version == "v1")
+        | .slug'
+    ```
+
+    For API keys, add `and .supported_in_api == true` inside `select(...)`.
+    A catalog entry does not guarantee access. If none qualifies, there is
+    no listed V1 candidate.
 
     With a saved Codex login, pass the exact `slug` to `get_model`:
 
