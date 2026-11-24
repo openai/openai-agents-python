@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from agents import (
@@ -14,6 +14,7 @@ from agents import (
     RunConfig,
     RunHooks,
     Runner,
+    RunResultStreaming,
 )
 from agents.decorators import tool
 from agents.model_preflight import tool_ownership
@@ -107,6 +108,27 @@ class RequestCounter(RunHooks[Any]):
             self.view.tool_owners.append("unknown")
 
 
+async def _cancel_unsubscribed_run(run: RunResultStreaming) -> None:
+    """Stop a run whose approved reader never took ownership."""
+    run.cancel()
+
+    async def drain() -> None:
+        async for _ in run.stream_events():
+            pass
+
+    # Keep cleanup independent of caller cancellation. Subscription already failed.
+    cleanup = asyncio.gather(drain(), return_exceptions=True)
+    cancellation = None
+    while not cleanup.done():
+        try:
+            await asyncio.wait((cleanup,))
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+    if cancellation is not None:
+        raise cancellation
+
+
 async def display(
     agent: Agent[Any],
     prompt: str,
@@ -117,8 +139,7 @@ async def display(
 ) -> View:
     """Drain the producer and approve complete final text after successful cleanup.
 
-    Preview approval always returns an empty prefix. This deliberately withholds
-    all partial text, including a secret split across arbitrary delta boundaries.
+    The reader skips previews, so it never buffers partial text for approval.
     The application supplies allow_final using its disclosure policy. Completion
     itself grants no permission to display output. Exceptions remain available
     to the caller's private diagnostics; this UI emits only fixed status labels.
@@ -129,13 +150,21 @@ async def display(
             run = Runner.run_streamed(
                 agent,
                 prompt,
-                run_config=replace(run_config or RunConfig(), trace_include_sensitive_data=False),
+                run_config=run_config,
                 hooks=RequestCounter(view),
             )
-            async with run.stream_approved_output(lambda pending: "") as events:
-                async for event in events:
-                    if isinstance(event, RunCompleted):
-                        view.states.append("producer_complete")
+            subscribed = False
+            try:
+                async with run.stream_approved_output() as events:
+                    subscribed = True
+                    async for event in events:
+                        if isinstance(event, RunCompleted):
+                            view.states.append("producer_complete")
+            except RuntimeError:
+                if not subscribed:
+                    # An eager task factory can start the producer before we subscribe.
+                    await _cancel_unsubscribed_run(run)
+                raise
             if run.interruptions:
                 view.states.append("paused")
             elif isinstance(run.final_output, str) and allow_final(run.final_output):
@@ -170,19 +199,22 @@ async def main() -> None:
         ],
         emit_traces=True,
     )
-    view = await display(
-        Agent(name="demo", model=model, tools=[lookup]),
-        "Return a synthetic public answer.",
-        allow_final=lambda text: text == "Public result",
-        run_config=RunConfig(
-            model_settings=ModelSettings(
-                retry=ModelRetrySettings(
-                    max_retries=1,
-                    backoff={"initial_delay": 0},
-                    policy=lambda ctx: True,
-                )
+    agent = Agent(
+        name="demo",
+        model=model,
+        tools=[lookup],
+        model_settings=ModelSettings(
+            retry=ModelRetrySettings(
+                max_retries=1,
+                backoff={"initial_delay": 0},
+                policy=lambda ctx: True,
             )
         ),
+    )
+    view = await display(
+        agent,
+        "Return a synthetic public answer.",
+        allow_final=lambda text: text == "Public result",
     )
     print(view)
     for observation in counter.observations:
