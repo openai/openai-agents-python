@@ -128,14 +128,14 @@ class ReportServer(MCPServerStdio):
         )
 
     def authorize_call(self, call: MCPToolMetaContext) -> None:
-        if call.server_name == SERVER and call.tool_name == "read.report":
+        if call.tool_name == "read.report":
             self.reports.authorize(call.run_context.context)
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any] | None, meta: dict[str, Any] | None = None
     ) -> CallToolResult:
         result = await super().call_tool(tool_name, arguments, meta=meta)
-        if self.name != SERVER or tool_name != "read.report":
+        if tool_name != "read.report":
             return result
         # Wire aliases are the same in both supported MCP client versions.
         fields = result.model_dump(by_alias=True, exclude={"content", "meta"})

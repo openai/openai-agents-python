@@ -13,9 +13,9 @@ Both inspection reports exceed the example's 128-byte text budget. The next mode
 [main.py](main.py) uses two routes.
 
 - `reports.site_tool()` binds `inspect_site` to the private store. The function checks access before reading the report, applies the budget and checks access again before returning. Any output editor receives the result after those checks.
-- For SDK-discovered MCP tools, `ReportServer.call_tool` awaits the peer and selects successful `read.report` calls on the configured `Inspection reports` server. At this point the wrapper can still check `isError` and see every block. It replaces large reports before SDK conversion, custom data extraction and function span output capture.
+- For SDK-discovered MCP tools, each `ReportServer` applies the policy to `read.report` by raw tool name, regardless of the server's display name. Its `call_tool` method checks `isError` and sees every block. It replaces large successful reports before SDK conversion, custom data extraction and function span output capture. Other tools and ordinary `MCPServerStdio` instances keep their usual behavior.
 
-For a nonempty structured object, the wrapper uses its JSON in place of the fallback text. It resolves the sample `{"ticket": "site"}` by awaiting a local report. The SDK calls `authorize_call` with the run context before sending the request. Never let a server pick another user's record or an arbitrary file or URL.
+For a nonempty structured object, the wrapper uses its JSON in place of the fallback text. It resolves the sample `{"ticket": "site"}` by awaiting a local report. Runner calls `authorize_call` with the run context before sending the request. Direct calls to `server.call_tool()` skip this access check. Never let a server pick another user's record or an arbitrary file or URL.
 
 At the tool boundary, the budget covers the sum of UTF-8 text bytes per result, including the reference. Smaller reports pass through in full. For large reports, the summary shares only the count of literal `WARN:` markers. Choose facts safe to disclose for your data. The first text slot holds the replacement and the other text slots stay empty. A structured result without a text slot gets one.
 

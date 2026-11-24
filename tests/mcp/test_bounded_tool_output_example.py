@@ -14,7 +14,7 @@ from agents import (
     ToolExecutionConfig,
     UserError,
 )
-from agents.mcp import MCPToolCustomDataContext
+from agents.mcp import MCPServerStdio, MCPToolCustomDataContext
 from agents.testing import ScriptedModel, assistant_message, function_call
 from agents.tool_context import ToolContext
 from examples.mcp.bounded_tool_output import main as recipe
@@ -39,7 +39,7 @@ async def test_sdk_discovery_and_function_results_before_publication():
             result.is_error,
         )
 
-    name = "mcp_Inspection_reports__read_report"
+    name = "mcp_Reports__read_report"
     model = ScriptedModel(
         [
             [
@@ -58,8 +58,11 @@ async def test_sdk_discovery_and_function_results_before_publication():
     )
     with closing(recipe.Reports(OWNER)) as reports, closing(SQLiteSession("reports")) as session:
         async with (
-            recipe.ReportServer(reports) as selected,
-            recipe.ReportServer(reports, "Other") as other,
+            recipe.ReportServer(reports, name="Reports") as selected,
+            MCPServerStdio(
+                name="Other",
+                params={"command": selected.params.command, "args": selected.params.args},
+            ) as other,
         ):
             selected.custom_data_extractor = observe
             agent = Agent(
@@ -81,7 +84,7 @@ async def test_sdk_discovery_and_function_results_before_publication():
         detail = "WARN: synthetic detail " * 4
         structured = json.dumps({"report": detail * 2})
         image = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
-        assert observed["json"][:3] == (OWNER, "Inspection reports", "read.report")
+        assert observed["json"][:3] == (OWNER, "Reports", "read.report")
         assert observed["json"][4:6] == (None, None)
         assert observed["error"][-1] is True
         assert observed["mixed"][3][1] == {"type": "image", "image_url": image}
@@ -152,6 +155,18 @@ async def test_sdk_discovery_and_function_results_before_publication():
             other_session.fetch(OWNER, ref)
     with pytest.raises(PermissionError):
         reports.fetch(OWNER, ref)
+
+
+@pytest.mark.asyncio
+async def test_renamed_report_server_denies_other_users():
+    model = ScriptedModel([[function_call("read.report", {"kind": "text"}, call_id="report")]])
+    with closing(recipe.Reports(OWNER)) as reports:
+        async with recipe.ReportServer(reports, name="Reports") as server:
+            agent = Agent(name="Inspector", model=model, mcp_servers=[server])
+            with pytest.raises(AgentsException, match="Report unavailable"):
+                await Runner.run(agent, "Inspect", context="other-user")
+            assert not reports.saved(OWNER)
+            assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
