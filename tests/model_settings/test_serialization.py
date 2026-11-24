@@ -129,7 +129,12 @@ def test_all_fields_serialization() -> None:
         prompt_cache_options={"mode": "explicit", "ttl": "30m"},
         preserve_raw_usage=True,
         timeout=1.25,
+        prompt_cache_key="shared-prefix",
     )
+
+    assert model_settings.to_json_dict()["prompt_cache_key"] == "shared-prefix"
+    assert "prompt_cache_key" not in model_settings.to_traceable_dict()
+    assert "shared-prefix" not in repr(model_settings)
 
     # Verify that every single field is set to a non-None value
     for field in fields(model_settings):
@@ -157,14 +162,15 @@ def test_gpt_5_6_reasoning_and_prompt_cache_serialization() -> None:
     }
 
 
-def test_usage_preservation_is_appended_to_public_field_order() -> None:
+def test_public_model_settings_field_order() -> None:
     field_names = [field.name for field in fields(ModelSettings)]
 
-    assert field_names[-4:] == [
+    assert field_names[-5:] == [
         "context_management",
         "prompt_cache_options",
         "preserve_raw_usage",
         "timeout",
+        "prompt_cache_key",
     ]
 
 

@@ -51,8 +51,6 @@ class PromptCacheKeyResolver:
 
         Returns None when the runner should not add one.
         """
-        # A prompt_cache_key in ModelSettings extras is already forwarded to the model adapter, so
-        # the runner should not also generate one.
         if _model_settings_has_prompt_cache_key(model_settings):
             return None
 
@@ -89,9 +87,11 @@ class PromptCacheKeyResolver:
 
 
 def _model_settings_has_prompt_cache_key(model_settings: ModelSettings) -> bool:
-    return _mapping_has_prompt_cache_key(
-        model_settings.extra_args
-    ) or _mapping_has_prompt_cache_key(model_settings.extra_body)
+    return (
+        model_settings.prompt_cache_key is not None
+        or _mapping_has_prompt_cache_key(model_settings.extra_args)
+        or _mapping_has_prompt_cache_key(model_settings.extra_body)
+    )
 
 
 def model_settings_with_prompt_cache_key(

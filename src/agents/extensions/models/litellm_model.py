@@ -325,6 +325,7 @@ class LitellmModel(Model):
                     # The request completed, so it counts even when the provider omits usage.
                     else Usage(requests=1)
                 )
+                usage._total_missing = response_usage is None or response_usage.total_tokens is None
             else:
                 usage = Usage(requests=1)
                 logger.warning("No usage information returned from Litellm")
@@ -633,9 +634,7 @@ class LitellmModel(Model):
             if extra_body is not None:
                 extra_kwargs["extra_body"] = extra_body
 
-        # Add kwargs from model_settings.extra_args, filtering out None values
-        if model_settings.extra_args:
-            extra_kwargs.update(model_settings.extra_args)
+        extra_kwargs.update(model_settings._request_extra_args())
 
         if converted_tools:
             # SDK tools are already converted to ordinary function tools, so LiteLLM's proxy-only

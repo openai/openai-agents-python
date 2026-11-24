@@ -7,6 +7,7 @@ from mcp.types import (
     ListResourcesResult,
     PaginatedRequestParams,
     ReadResourceResult,
+    ServerCapabilities,
 )
 
 from agents.mcp import MCPServerStreamableHttp
@@ -17,12 +18,32 @@ from .model_compat import (
     Resource,
     ResourceTemplate,
     TextResourceContents,
+    create_mcp_error,
 )
 
 
 @pytest.fixture
 def server():
     return MCPServerStreamableHttp(params={"url": "http://localhost:8000/mcp"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "capabilities",
+    [None, ServerCapabilities.model_validate({"resources": {}})],
+    ids=["unknown", "advertised"],
+)
+async def test_resource_listings_propagate_peer_errors(server, capabilities):
+    session = MagicMock()
+    session.server_capabilities = capabilities
+    session.get_server_capabilities.return_value = capabilities
+    server.session = session
+    error = create_mcp_error(-32601, "Method not found")
+    session.list_resources = AsyncMock(side_effect=error)
+    session.list_resource_templates = AsyncMock(side_effect=error)
+    for listing in (server.list_resources, server.list_resource_templates):
+        with pytest.raises(type(error), match="Method not found"):
+            await listing()
 
 
 @pytest.mark.asyncio

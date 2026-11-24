@@ -5,7 +5,7 @@ import json
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Generic
+from typing import TYPE_CHECKING, Annotated, Any, Generic, cast
 from uuid import uuid4
 
 from pydantic import (
@@ -39,9 +39,11 @@ from ._tool_invocation import (
     tool_output_identity,
 )
 from .exceptions import ModelBehaviorError, UserError
+from .run_budget import _BudgetState
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from ._run_state_agent_identity import _DecisionPath
     from .items import ToolApprovalItem, TResponseInputItem
     from .run_internal.tool_declarations import PreparedTool
 else:
@@ -156,6 +158,7 @@ class _ToolInvocationRecord:
     fingerprint: str
     executed: bool = False
     completed: bool = False
+    requires_text_transform: bool = field(default=False, kw_only=True)
     # The input admitted under this ID, paired with the digest of the original proposal.
     input_rewrite: tuple[str, dict[str, Any]] | None = None
     requires_declaration: bool = False
@@ -217,6 +220,18 @@ class RunContextWrapper(Generic[TContext]):
         init=False,
         repr=False,
     )
+
+    # Runtime-only state. RunState owns its portable representation.
+    _decision_path = cast("_DecisionPath", ())
+    _budget = cast("_BudgetState | None", None)
+
+    def _for_new_root(self, budget: _BudgetState | None) -> RunContextWrapper[TContext]:
+        if budget is None and self._budget is None and not self._decision_path:
+            return self
+        root = copy.copy(self)
+        root._decision_path = ()
+        root._budget = budget
+        return root
 
     @model_validator(mode="wrap")
     @classmethod
@@ -293,6 +308,8 @@ class RunContextWrapper(Generic[TContext]):
         # checkpoint's tokens land on every other checkpoint and on the result
         # the checkpoints came from.
         copied.usage = copy.deepcopy(self.usage)
+        if self._budget is not None:
+            copied._budget = copy.copy(self._budget)
         copied._approvals = copy.deepcopy(self._approvals)
         copied._tool_invocations = copy.deepcopy(self._tool_invocations)
         copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)
@@ -1638,6 +1655,11 @@ class RunContextWrapper(Generic[TContext]):
                 )
             if not isinstance(serialized_invocation, Mapping):
                 raise validation_error_factory("RunState tool invocation must be a mapping.")
+            requires_edit = serialized_invocation.get("requires_text_transform", False)
+            if not isinstance(requires_edit, bool):
+                raise validation_error_factory(
+                    "RunState tool text transform requirement is invalid."
+                )
             invocation_type = serialized_invocation.get("type")
             approval_scope = serialized_invocation.get("approval_scope")
             fingerprint = serialized_invocation.get("fingerprint")
@@ -1679,6 +1701,7 @@ class RunContextWrapper(Generic[TContext]):
                 invocation_type=invocation_type,
                 approval_scope=approval_scope,
                 fingerprint=fingerprint,
+                requires_text_transform=requires_edit,
                 executed=executed,
                 completed=completed,
                 input_rewrite=input_rewrite,

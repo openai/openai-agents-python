@@ -320,6 +320,7 @@ class OpenAIChatCompletionsModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             # Record the request and token usage on the span before the terminal
             # branches below, so a ModelBehaviorError raised for a truncated empty
@@ -748,13 +749,12 @@ class OpenAIChatCompletionsModel(Model):
         # extra_args={"logprobs": ...} keeps passing through and setting both top_logprobs
         # and extra_args["logprobs"] (a pre-existing workaround) does not collide with the
         # duplicate-key check below.
-        if model_settings.top_logprobs is not None and "logprobs" not in (
-            model_settings.extra_args or {}
-        ):
+        extra_args = model_settings._request_extra_args()
+        if model_settings.top_logprobs is not None and "logprobs" not in extra_args:
             create_kwargs["logprobs"] = True
         duplicate_extra_arg_keys = sorted(
             key
-            for key in model_settings.extra_args or {}
+            for key in extra_args
             if key in create_kwargs and not isinstance(create_kwargs[key], Omit)
         )
         if duplicate_extra_arg_keys:
@@ -767,7 +767,7 @@ class OpenAIChatCompletionsModel(Model):
             raise TypeError(
                 f"chat.completions.create() got multiple values for keyword arguments {keys}"
             )
-        create_kwargs.update(model_settings.extra_args or {})
+        create_kwargs.update(extra_args)
 
         client = self._get_client()
         ret = await create_with_retry_observation(client, client.chat.completions, create_kwargs)

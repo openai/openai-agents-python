@@ -64,6 +64,11 @@ class ResumableRun:
             self._items, state, codex_checklist=self.codex_checklist
         )
 
+    async def finish_budget_stop(self) -> None:
+        """Keep completed work when the next request was refused before dispatch."""
+        assert self._source is not None
+        await self._source._save_checkpoint(self._items, None)
+
     def configure_stream(self, result: RunResultStreaming) -> None:
         queue = _CheckpointEventQueue()
         result._event_queue = queue

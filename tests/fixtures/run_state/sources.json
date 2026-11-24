@@ -171,6 +171,20 @@
       "fixture": "features/v1_23_requires_resumable_session.json",
       "provenance": "historical_writer",
       "version": "1.23"
+    },
+    {
+      "commit": "6463d16ca5b680107df2e37386ed94c1bbb8ff81",
+      "feature": "requires_declaration",
+      "fixture": "features/v1_24_requires_declaration.json",
+      "provenance": "historical_writer",
+      "version": "1.24"
+    },
+    {
+      "commit": "827149084e196f724035733e9146291bab7755ea",
+      "feature": "run_budget",
+      "fixture": "features/v1_25_run_budget.json",
+      "provenance": "historical_writer",
+      "version": "1.25"
     }
   ],
   "resume": {
@@ -269,6 +283,14 @@
     "1.23": {
       "commit": "d48e3c89ecdb71ad78d9eb90ed97bf632598d51c",
       "fixture": "minimal/v1_23.json"
+    },
+    "1.24": {
+      "commit": "6463d16ca5b680107df2e37386ed94c1bbb8ff81",
+      "fixture": "minimal/v1_24.json"
+    },
+    "1.25": {
+      "commit": "827149084e196f724035733e9146291bab7755ea",
+      "fixture": "minimal/v1_25.json"
     },
     "1.3": {
       "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",

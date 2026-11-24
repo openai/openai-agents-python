@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
+import re
 import threading
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
 from ._tool_identity import get_function_tool_namespace, get_function_tool_qualified_name
 from .agent import Agent
+from .exceptions import UserError
 from .handoffs import Handoff
 from .logger import logger
+from .run_context import RunContextWrapper, TContext
 from .sandbox.capabilities.capability import Capability
 from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
@@ -26,8 +30,66 @@ from .tool import (
     ShellTool,
 )
 
+_DECISION_PREFIX = "decision:"
 
-def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
+
+_PATH_PREFIX = "decision:path:"
+
+
+def _is_decision_identity(value: object) -> bool:
+    return isinstance(value, str) and (
+        value.startswith(_PATH_PREFIX)
+        or re.fullmatch(_DECISION_PREFIX + r"[0-9a-f]{64}", value) is not None
+    )
+
+
+class _DecisionHandoff(Handoff[TContext, Agent[TContext]]):
+    """Static graph edges and the live admission check owned by decision_handoff."""
+
+    _source: Agent[TContext]
+    _roster: Mapping[str, tuple[Agent[TContext], str]]
+    _can_restore: Callable[[RunContextWrapper[TContext] | None, str], bool]
+
+
+# Only accepted transfers belong here. Filters can erase every model-facing receipt.
+_DecisionPath = tuple[tuple[Agent[Any], tuple[_DecisionHandoff[Any], str] | None], ...]
+
+
+def _path_key(key: str, selected: bool) -> str:
+    # Ordinary names and protected identities belong to different domains.
+    return hashlib.sha256(
+        ("selected:" if selected else "ordinary:").encode() + key.encode()
+    ).hexdigest()
+
+
+def _encode_decision_path(path: _DecisionPath, keys: Mapping[int, str]) -> str:
+    return _PATH_PREFIX + ".".join(
+        _path_key(keys[id(agent)], selection is not None) for agent, selection in path
+    )
+
+
+def _decode_decision_path(
+    identity: str, agents: Mapping[str, Agent[Any]], root: Agent[Any]
+) -> _DecisionPath:
+    if not identity.startswith(_PATH_PREFIX):
+        return ()
+    keys = identity[len(_PATH_PREFIX) :].split(".")
+    bindings = _decision_bindings(root)
+    lookup = {_path_key(key, id(agent) in bindings): agent for key, agent in agents.items()}
+    if len(keys) != len(set(keys)) or any(key not in lookup for key in keys):
+        return ()
+    path = tuple((lookup[key], bindings.get(id(lookup[key]))) for key in keys)
+    return path if any(binding for _, binding in path) else ()
+
+
+def _ordinary_target(route: Any) -> Any:
+    ref = getattr(route, "_agent_ref", None)
+    return ref() if callable(ref) else getattr(route, "agent", route)
+
+
+def _iter_agent_graph(
+    initial_agent: Agent[Any], *, include_tools: bool = True, include_decisions: bool = True
+) -> Iterator[Agent[Any]]:
     """Yield agents reachable from the starting agent in breadth-first order."""
     queue: deque[Agent[Any]] = deque([initial_agent])
     seen_agent_ids: set[int] = set()
@@ -41,6 +103,10 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
         yield current
 
         for handoff_item in current.handoffs:
+            if isinstance(handoff_item, _DecisionHandoff):
+                if include_decisions and handoff_item._source is current:
+                    queue.extend(agent for agent, _ in handoff_item._roster.values())
+                continue
             handoff_agent: Any | None = None
             handoff_agent_name: str | None = None
 
@@ -92,6 +158,8 @@ def _iter_agent_graph(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
             if handoff_agent is not None and handoff_agent_name:
                 queue.append(cast(Agent[Any], handoff_agent))
 
+        if not include_tools:
+            continue
         # Include agent-as-tool instances so nested approvals can be restored.
         tools = getattr(current, "tools", None)
         if tools:
@@ -489,6 +557,38 @@ def _has_ambiguous_hook_identities(initial_agent: Agent[Any]) -> bool:
     )
 
 
+def _decision_bindings(root: Agent[Any]) -> dict[int, tuple[_DecisionHandoff[Any], str]]:
+    """Require a unique incoming route for each protected checkpoint identity."""
+    bindings: dict[int, tuple[_DecisionHandoff[Any], str]] = {}
+    ordinary = {id(root)}
+    for source in _iter_agent_graph(root):
+        for route in source.handoffs:
+            if isinstance(route, _DecisionHandoff):
+                if route._source is not source:
+                    continue
+                names = (
+                    h.tool_name if isinstance(h, Handoff) else Handoff.default_tool_name(h)
+                    for h in source.handoffs
+                )
+                if sum(name == route.tool_name for name in names) != 1:
+                    raise UserError("Give each decision handoff a unique tool_name on its source.")
+                for label, (target, _) in route._roster.items():
+                    if id(target) in bindings:
+                        raise UserError("Create a separate specialist for each decision label.")
+                    bindings[id(target)] = (route, label)
+            else:
+                ordinary.add(id(_ordinary_target(route)))
+        for tool in source.tools:
+            if getattr(tool, "_is_agent_tool", False):
+                ordinary.add(id(getattr(tool, "_agent_instance", None)))
+    if ordinary.intersection(bindings):
+        raise UserError(
+            "A decision specialist cannot also be a root, agent tool or ordinary handoff "
+            "target. Create a separate specialist for each route."
+        )
+    return bindings
+
+
 def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
     """Build a stable identity map that preserves duplicate agent names."""
     ordered_agents = list(_iter_agent_graph(initial_agent))
@@ -532,6 +632,20 @@ def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]
             agent_identity_map[candidate] = duplicate_agent
             next_index += 1
 
+    # Keep ordinary identities stable. Bind specialist identities to their incoming
+    # selectors so another edge cannot silently replace a removed selector or label.
+    bindings = _decision_bindings(initial_agent)
+    if bindings:
+        source_keys = {id(agent): key for key, agent in agent_identity_map.items()}
+        for key, target in list(agent_identity_map.items()):
+            if id(target) in bindings:
+                route, label = bindings[id(target)]
+                edge = (source_keys[id(route._source)], route.tool_name, label)
+                data = _stable_identity_text([key, [edge]])
+                identity = _DECISION_PREFIX + hashlib.sha256(data.encode()).hexdigest()
+                if identity in agent_identity_map:
+                    raise ValueError("Conflicting specialist identity")
+                agent_identity_map[identity] = agent_identity_map.pop(key)
     return agent_identity_map
 
 

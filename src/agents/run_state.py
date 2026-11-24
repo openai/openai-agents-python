@@ -48,10 +48,16 @@ from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
     _build_agent_map,
+    _decision_bindings,
+    _DecisionPath,
+    _decode_decision_path,
+    _encode_decision_path,
     _get_ambiguous_agent_ids,
     _has_ambiguous_hook_identities,
     _has_legacy_hook_identity_ambiguity,
+    _is_decision_identity,
     _iter_agent_graph,
+    _ordinary_target,
 )
 from ._tool_identity import (
     FunctionToolLookupKey,
@@ -60,6 +66,7 @@ from ._tool_identity import (
     deserialize_function_tool_lookup_key,
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_tool,
+    get_function_tool_lookup_keys,
     get_function_tool_namespace,
     get_function_tool_qualified_name,
     serialize_function_tool_lookup_key,
@@ -121,6 +128,7 @@ from .models._codex_items import (
     native_approval_checkpoint,
     restore_native_approval_call,
 )
+from .run_budget import _BudgetCheckpointError, _BudgetState
 from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -258,7 +266,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.24"
+CURRENT_SCHEMA_VERSION = "1.26"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -326,6 +334,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "records required ResumableSession ownership, and preserves native approval receipts."
     ),
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
+    "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
+    "1.26": "Requires an exact text editor when resuming selected tool calls.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1002,6 +1012,109 @@ class RunState(Generic[TContext, TAgent]):
     reproduce, and it is cleared only once that turn is fully persisted.
     """
 
+    def _check_specialist(
+        self,
+        root: Agent[Any],
+        context: RunContextWrapper[Any] | None,
+        *,
+        restore_error: RunStateValidationErrorFactory | None = None,
+    ) -> bool:
+        path = self._context._decision_path if self._context else ()
+        bindings = _decision_bindings(root)
+        if not path and not bindings:
+            return False
+
+        def unavailable() -> Exception:
+            return (restore_error or _default_run_state_validation_error)(
+                "Decision specialist unavailable. Check the roster and context_override.", UserError
+            )
+
+        # An ordinary checkpoint may restart at a later source. It cannot establish
+        # a protected selection. Only a committed path carries those identities.
+        start = path[0][0] if path else self._current_agent
+        if start is not root and not any(
+            agent is start
+            for agent in _iter_agent_graph(root, include_tools=False, include_decisions=False)
+        ):
+            raise unavailable()
+        if not path:
+            return False
+        if path[-1][0] is not self._current_agent:
+            raise unavailable()
+        previous = None
+        protected = False
+        for agent, selection in path:
+            binding = bindings.get(id(agent))
+            if selection is None:
+                if binding is not None or (
+                    previous is not None
+                    and not any(_ordinary_target(route) is agent for route in previous.handoffs)
+                ):
+                    raise unavailable()
+            else:
+                route, label = selection
+                if (
+                    binding is None
+                    or route is not binding[0]
+                    or label != binding[1]
+                    or route._source is not previous
+                    or (
+                        (restore_error is not None or context is not None)
+                        and not route._can_restore(context, label)
+                    )
+                ):
+                    raise unavailable()
+                protected = True
+            previous = agent
+        return protected
+
+    async def _check_pending_specialists(
+        self, root: Agent[Any], context: RunContextWrapper[Any]
+    ) -> bool:
+        from ._tool_identity import (
+            get_function_tool_lookup_key_for_call,
+            get_function_tool_lookup_keys,
+        )
+        from .agent_tool_state import get_agent_tool_resume_state, peek_agent_tool_run_result
+        from .tool import FunctionTool, _function_tool_enabled
+
+        protected = self._check_specialist(root, context)
+        for action in getattr(self._last_processed_response, "functions", ()):
+            delegate = action.function_tool
+            if not delegate._is_agent_tool:
+                continue
+            result = peek_agent_tool_run_result(
+                action.tool_call, scope_id=self._agent_tool_state_scope_id
+            )
+            child = get_agent_tool_resume_state(result)
+            if child is None and result is not None and result.interruptions:
+                child = result.to_state()
+            if child is None or child._starting_agent is None:
+                continue
+            owner = copy.copy(child._context or context)
+            owner.context, owner.usage = context.context, context.usage
+            if not await child._check_pending_specialists(child._starting_agent, owner):
+                continue
+            key = get_function_tool_lookup_key_for_call(action.tool_call)
+            agent = self._current_agent
+            bindings = (
+                [
+                    tool
+                    for tool in agent.tools
+                    if isinstance(tool, FunctionTool)
+                    and key in get_function_tool_lookup_keys(tool)
+                    and await _function_tool_enabled(tool, context, agent)
+                ]
+                if agent is not None
+                else []
+            )
+            if len(bindings) != 1 or bindings[0]._agent_instance is not child._starting_agent:
+                raise UserError(
+                    "A pending decision specialist requires the same enabled agent tool."
+                )
+            protected = True
+        return protected
+
     def __init__(
         self,
         context: RunContextWrapper[TContext],
@@ -1548,6 +1661,9 @@ class RunState(Generic[TContext, TAgent]):
                 "executed": invocation.executed,
                 "completed": invocation.completed,
             }
+            # Schema 1.26 retains the requirement, never the editor or selector objects.
+            if invocation.requires_text_transform and not invocation.completed:
+                record["requires_text_transform"] = True
             if invocation.input_rewrite is not None:
                 fingerprint, arguments = invocation.input_rewrite
                 record["input_rewrite"] = {
@@ -2062,6 +2178,8 @@ class RunState(Generic[TContext, TAgent]):
             # Preserve metadata so deserialization can warn when context types were erased.
             "context_meta": context_meta,
         }
+        if self._context._budget is not None:
+            context_entry["budget"] = self._context._budget.checkpoint()
         tool_input = self._serialize_tool_input(self._context.tool_input)
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
@@ -2080,6 +2198,15 @@ class RunState(Generic[TContext, TAgent]):
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
         )
+        if (
+            self._starting_agent is not None
+            and self._context._decision_path
+            and self._check_specialist(self._starting_agent, None)
+        ):
+            assert agent_identity_keys_by_id is not None
+            current_agent_entry["identity"] = _encode_decision_path(
+                self._context._decision_path, agent_identity_keys_by_id
+            )
         generated_items = self._merge_generated_items_with_processed()
 
         result = {
@@ -2617,8 +2744,8 @@ class RunState(Generic[TContext, TAgent]):
                 validation_error_factory=validation_error_factory,
             )
 
-            if _unsupported_native_approvals(state_json):
-                raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
+            required_children: set[int] = set()
+            _validate_pending_approvals(state_json, validation_error_factory, required_children)
 
             from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
 
@@ -2638,15 +2765,23 @@ class RunState(Generic[TContext, TAgent]):
                 )
                 state_json["sandbox"] = sanitized_sandbox
 
-            return await _build_run_state_from_json(
+            restored = await _build_run_state_from_json(
                 initial_agent=initial_agent,
                 state_json=state_json,
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
+            if required_children:
+                raise validation_error_factory(_REQUIRED_CHILD_MISSING, UserError)
+            return restored
         except BaseException as error:
+            if isinstance(error, _BudgetCheckpointError):
+                error = validation_error_factory(
+                    "Invalid RunBudget checkpoint or schema version.", UserError
+                )
             trusted_error_message = _trusted_run_state_validation_message(
                 error,
                 trusted_validation_errors,
@@ -2674,29 +2809,64 @@ _UNSUPPORTED_NATIVE_APPROVALS = (
     "Run state contains unsupported native tool approvals. "
     "Check for prior effects before starting a new run with SDK tools."
 )
+_REQUIRED_CHILD_MISSING = "Cannot restore a required pending agent tool."
 
 
-def _unsupported_native_approvals(state: dict[str, Any], *, nested: bool = False) -> bool:
-    """Check nested agent runs before best-effort context restoration can skip a child."""
+def _validate_pending_approvals(
+    state: dict[str, Any],
+    validation_error_factory: RunStateValidationErrorFactory,
+    required_children: set[int],
+    *,
+    nested: bool = False,
+) -> tuple[bool, bool]:
+    """Check pending approvals and propagate budget and editor requirements to ancestors."""
+    context = state.get("context")
+    requires_budget = isinstance(context, dict) and "budget" in context
+    invocations = context.get("tool_invocations") if isinstance(context, dict) else None
+    requires_editor = isinstance(invocations, dict) and any(
+        isinstance(record, dict) and "requires_text_transform" in record
+        for record in invocations.values()
+    )
     response = state.get("last_processed_response")
     if not isinstance(response, dict):
-        return False
+        response = {}
+    if nested and _has_pending_specialist(state):
+        required_children.add(id(state))
     approvals = response.get("native_approvals")
     if approvals:
         # Only the root session has a claimed checkpoint. A nested state cannot
         # authorize an action, even when it contains an otherwise valid receipt.
         if nested or not isinstance(approvals, list) or len(approvals) != 1:
-            return True
+            raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
         item = approvals[0]
         if not isinstance(item, dict) or not isinstance(item.get("codex_native_checkpoint"), dict):
-            return True
+            raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
     functions = response.get("functions")
     if isinstance(functions, list):
         for entry in functions:
             child = entry.get("agent_run_state") if isinstance(entry, dict) else None
-            if isinstance(child, dict) and _unsupported_native_approvals(child, nested=True):
-                return True
-    return False
+            if not isinstance(child, dict):
+                continue
+            budget, editor = _validate_pending_approvals(
+                child, validation_error_factory, required_children, nested=True
+            )
+            if budget or editor:
+                # Track the exact child snapshot until its pending run is registered.
+                required_children.add(id(child))
+                requires_budget |= budget
+                requires_editor |= editor
+    if requires_budget or requires_editor:
+        version = _validate_run_state_schema_version(
+            state, validation_error_factory=validation_error_factory
+        )
+        schema = tuple(map(int, version.split(".")))
+        if requires_editor and schema < (1, 26):
+            raise validation_error_factory(
+                "Tool text transforms require RunState schema 1.26.", UserError
+            )
+        if requires_budget and schema < (1, 25):
+            raise _BudgetCheckpointError("Run budgets require schema 1.25 or later.")
+    return requires_budget, requires_editor
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -3321,14 +3491,32 @@ def _build_handoffs_map(current_agent: Agent[Any]) -> dict[str, Handoff[Any, Age
     return handoffs_map
 
 
+def _has_pending_specialist(snapshot: Mapping[str, Any]) -> bool:
+    """Identify the interrupted branch even when its selector has been removed."""
+    agent = snapshot.get("current_agent")
+    if isinstance(agent, Mapping) and _is_decision_identity(agent.get("identity")):
+        return True
+    response = snapshot.get("last_processed_response")
+    if not isinstance(response, Mapping):
+        return False
+    return any(
+        _has_pending_specialist(nested)
+        for entry in response.get("functions") or ()
+        if isinstance(entry, Mapping)
+        and isinstance(nested := entry.get("agent_run_state"), Mapping)
+    )
+
+
 async def _restore_pending_nested_agent_tool_runs(
     *,
     current_agent: Agent[Any],
     function_actions: Sequence[_DeserializedFunctionAction],
     scope_id: str | None = None,
+    specialist_context: RunContextWrapper[Any] | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> None:
     """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
     if not function_actions:
@@ -3351,16 +3539,26 @@ async def _restore_pending_nested_agent_tool_runs(
         if not isinstance(nested_root_agent, Agent):
             nested_root_agent = current_agent
 
+        specialist = _has_pending_specialist(nested_state_data)
         try:
             nested_state = await _build_run_state_from_json(
                 initial_agent=nested_root_agent,
                 state_json=dict(nested_state_data),
+                # Agent.as_tool shares the application value but owns separate approvals.
+                context_override=(
+                    RunContextWrapper(context=specialist_context.context)
+                    if specialist and specialist_context is not None
+                    else None
+                ),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
+        except _BudgetCheckpointError:
+            raise
         except Exception:
-            if strict_context:
+            if strict_context or specialist:
                 raise
             logger.warning(
                 "Failed to deserialize nested agent run state for tool call %s.",
@@ -3376,6 +3574,8 @@ async def _restore_pending_nested_agent_tool_runs(
         # older pending interruptions after consuming this restored entry.
         drop_agent_tool_run_result(tool_call, scope_id=scope_id)
         record_agent_tool_run_result(tool_call, cast(Any, pending_result), scope_id=scope_id)
+        if required_children:
+            required_children.discard(id(nested_state_data))
 
 
 async def _deserialize_processed_response(
@@ -3386,12 +3586,14 @@ async def _deserialize_processed_response(
     *,
     agent_identity_map: Mapping[str, Agent[Any]] | None = None,
     scope_id: str | None = None,
+    specialist_context: RunContextWrapper[Any] | None = None,
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     defer_mcp_discovery: bool = False,
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -3599,6 +3801,18 @@ async def _deserialize_processed_response(
                 )
 
                 nested_state_data = entry.get("agent_run_state")
+                if required_children and id(nested_state_data) in required_children:
+                    if (
+                        not function_tool._is_agent_tool
+                        or not isinstance(function_tool._agent_instance, Agent)
+                        or sum(
+                            tool_name in get_function_tool_lookup_keys(tool)
+                            for tool in all_tools
+                            if isinstance(tool, FunctionTool)
+                        )
+                        != 1
+                    ):
+                        raise validation_error_factory(_REQUIRED_CHILD_MISSING, UserError)
                 deserialized.append(
                     _DeserializedFunctionAction(
                         action=ToolRunFunction(
@@ -3716,9 +3930,11 @@ async def _deserialize_processed_response(
     await _restore_pending_nested_agent_tool_runs(
         current_agent=current_agent,
         function_actions=function_actions,
+        specialist_context=specialist_context,
         scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
+        required_children=required_children,
         validation_error_factory=validation_error_factory,
     )
 
@@ -3924,6 +4140,18 @@ def _resolve_agent_from_data(
             if resolved is not None:
                 return resolved
         resolved = agent_map.get(agent_name)
+        if (
+            resolved is not None
+            and agent_identity_map
+            and any(
+                agent is resolved and _is_decision_identity(key)
+                for key, agent in agent_identity_map.items()
+            )
+        ):
+            # A specialist name alone cannot establish the original route and label.
+            raise validation_error_factory(
+                "Decision specialist unavailable. Check the roster and context_override.", UserError
+            )
         return resolved if resolved is not None else fallback_agent
     return fallback_agent
 
@@ -4358,6 +4586,7 @@ async def _build_run_state_from_json(
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> RunState[Any, Agent[Any]]:
     """Shared helper to rebuild RunState from JSON payload.
 
@@ -4414,16 +4643,31 @@ async def _build_run_state_from_json(
     agent_map = _build_agent_map(initial_agent)
 
     current_agent_data = state_json["current_agent"]
-    current_agent = _resolve_agent_from_data(
-        current_agent_data,
-        agent_map,
-        agent_identity_map=agent_identity_map,
-        validation_error_factory=validation_error_factory,
+    identity = (
+        current_agent_data.get("identity") if isinstance(current_agent_data, Mapping) else None
     )
+    path: _DecisionPath = ()
+    current_agent: Agent[Any] | None
+    if isinstance(identity, str) and _is_decision_identity(identity):
+        path = _decode_decision_path(identity, agent_identity_map, initial_agent)
+        if not path or current_agent_data.get("name") != path[-1][0].name:
+            raise validation_error_factory(
+                "Run state references an agent identity that is not present in the restored graph",
+                UserError,
+            )
+        current_agent = path[-1][0]
+    else:
+        current_agent = _resolve_agent_from_data(
+            current_agent_data,
+            agent_map,
+            agent_identity_map=agent_identity_map,
+            validation_error_factory=validation_error_factory,
+        )
     if current_agent is None:
         raise validation_error_factory("Run state agent not found in agent map", UserError)
 
     context_data = state_json["context"]
+    budget = _BudgetState.restore(context_data["budget"]) if "budget" in context_data else None
     usage = deserialize_usage(context_data.get("usage", {}))
 
     serialized_context: Any = context_data.get("context", _MISSING_CONTEXT_SENTINEL)
@@ -4486,10 +4730,12 @@ async def _build_run_state_from_json(
             "Serialized run state context must be a mapping. Please provide one.",
             UserError,
         )
+    context = context._for_new_root(budget)
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
+    context._decision_path = path
     saved_invocations = context_data.get("tool_invocations", {})
     if (
         (schema_major, schema_minor) < (1, 23)
@@ -4613,6 +4859,11 @@ async def _build_run_state_from_json(
         [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
     )
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
+    state._check_specialist(
+        initial_agent,
+        context if context_override is not None else None,
+        restore_error=validation_error_factory,
+    )
     serialized_generated_items = state_json.get("generated_items", [])
     state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
         serialized_generated_items,
@@ -4641,11 +4892,13 @@ async def _build_run_state_from_json(
             agent_map,
             agent_identity_map=agent_identity_map,
             scope_id=state._agent_tool_state_scope_id,
+            specialist_context=context if context_override is not None else None,
             context_deserializer=context_deserializer,
             strict_context=strict_context,
             defer_mcp_discovery=state._requires_redaction,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
+            required_children=required_children,
             validation_error_factory=validation_error_factory,
         )
     else:
@@ -5818,6 +6071,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         ),
         "Run state agent not found in agent map",
+        "Decision specialist unavailable. Check the roster and context_override.",
         (
             "RunState cannot distinguish same-name agents without hook instance state. "
             "Use unique agent names before starting a persistable run."
@@ -5863,8 +6117,12 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state nested history ownership references a missing input item",
         "Run state nested history ownership session digest does not match",
         "Run state nested history ownership input digest does not match",
+        "Invalid RunBudget checkpoint or schema version.",
+        _REQUIRED_CHILD_MISSING,
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
+        "Tool text transforms require RunState schema 1.26.",
+        "RunState tool text transform requirement is invalid.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
         "Tool input rewrites require RunState schema 1.23.",

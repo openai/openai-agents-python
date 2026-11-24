@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import sys
 from collections import deque
@@ -321,13 +322,22 @@ async def test_runner_replays_typed_function_tool_result(tmp_path, threads):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_settings_fail_before_launch(tmp_path, threads):
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"temperature": 0.1},
+        {"prompt_cache_retention": "24h"},
+        {"prompt_cache_options": {"ttl": "30m"}},
+        {"extra_args": {"prompt_cache_key": "legacy"}},
+    ],
+    ids=["temperature", "retention", "ttl", "extras"],
+)
+async def test_unsupported_settings_fail_before_launch(tmp_path, threads, settings):
     queue, opened = threads
-    from agents import ModelSettings
 
-    with pytest.raises(UserError, match="temperature"):
+    with pytest.raises(UserError, match=next(iter(settings))):
         await Runner.run(
-            Agent(name="test", model_settings=ModelSettings(temperature=0.1)),
+            Agent(name="test", model_settings=settings),
             "Hello",
             run_config=config(tmp_path),
         )
@@ -2255,6 +2265,16 @@ class PlanThread(FakeThread):
         return json.dumps(event)
 
 
+def test_checklist_constructors_show_python_field_names():
+    from agents.memory.resumable_session import CodexChecklist, CodexChecklistStep
+
+    step = CodexChecklistStep(text="Review", status="pending")
+    checklist = CodexChecklist(thread_id="thread", turn_id="turn", steps=(step,))
+    assert checklist.steps[0].text == "Review"
+    assert "text" in inspect.signature(CodexChecklistStep).parameters
+    assert "steps" in inspect.signature(CodexChecklist).parameters
+
+
 @pytest.mark.parametrize("streamed", [False, True])
 async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, threads, streamed):
     from agents import ResumableSession, ResumableSessionError
@@ -2294,12 +2314,16 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
         "turn_1",
         "Two passes",
     )
-    assert [(s.step, s.status) for s in saved.plan] == [
+    assert [(s.text, s.status) for s in saved.steps] == [
         ("Review", "completed"),
         ("Review", "pending"),
     ]
     record = store.checkpoint(session.session_id)
     assert record["version"] == 3
+    assert record["codex_checklist"]["plan"] == revision["plan"]
+    assert json.loads(saved.model_dump_json()) == record["codex_checklist"]
+    assert type(saved).model_validate_json(saved.model_dump_json()) == saved
+    assert "Review" not in repr(saved) and "Two passes" not in repr(saved)
     record["version"] = 1  # Earlier writers stored checklists without a distinct version.
     store.records[session.session_id] = json.dumps(record)
     session = await ResumableSession.resume(store, session.session_id)
@@ -2309,7 +2333,7 @@ async def test_checklist_is_latest_owned_update_in_idle_checkpoint(tmp_path, thr
     await turn([clear])
     assert store.checkpoint(session.session_id)["version"] == 3
     cleared = session.codex_checklist
-    assert cleared is not None and cleared.plan == () and cleared.explanation is None
+    assert cleared is not None and cleared.steps == () and cleared.explanation is None
 
     store.fail_checkpoint = True
     with pytest.raises(ResumableSessionError):
@@ -2346,7 +2370,7 @@ async def test_checklist_survives_approval_and_excludes_nested_updates(tmp_path,
     resumed = await ResumableSession.resume(store, session.session_id)
     assert resumed.is_paused
     saved = resumed.codex_checklist
-    assert saved is not None and saved.plan[0].step == "Consult"
+    assert saved is not None and saved.steps[0].text == "Consult"
     state = await resumed.load_state(manager)
     state.approve(state.get_interruptions()[0])
     queue.append(PlanThread(events=[{"type": "plan_update", "plan": []}]))
@@ -2395,7 +2419,7 @@ async def test_checklist_redacts_display_text_before_saving(tmp_path, threads, s
     reopened = await ResumableSession.resume(store, session.session_id)
     saved = reopened.codex_checklist
     assert saved is not None and saved.explanation == "[hidden]"
-    assert [(s.step, s.status) for s in saved.plan] == [("Check [hidden]", "pending")]
+    assert [(s.text, s.status) for s in saved.steps] == [("Check [hidden]", "pending")]
 
     with pytest.raises(UserError, match="redact_text"):
         await Runner.run(agent, "Next", session=reopened, run_config=config(tmp_path))

@@ -465,6 +465,7 @@ class AnyLLMModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             span_response.span_data.usage = model_usage_to_span_usage(usage)
 
@@ -672,6 +673,7 @@ class AnyLLMModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             # Some providers signal a filtered non-streaming completion only through
             # finish_reason="content_filter" and an otherwise empty message. Preserve
@@ -1378,12 +1380,11 @@ class AnyLLMModel(Model):
             extra_kwargs["metadata"] = copy(model_settings.metadata)
         if model_settings.extra_body is not None:
             extra_kwargs["extra_body"] = copy(model_settings.extra_body)
-        if model_settings.extra_args:
-            extra_kwargs.update(model_settings.extra_args)
+        extra_kwargs.update(model_settings._request_extra_args())
         return extra_kwargs
 
     def _build_responses_extra_kwargs(self, model_settings: ModelSettings) -> dict[str, Any]:
-        extra_kwargs = dict(model_settings.extra_args or {})
+        extra_kwargs = model_settings._request_extra_args()
         if model_settings.top_logprobs is not None:
             extra_kwargs["top_logprobs"] = model_settings.top_logprobs
         if model_settings.metadata is not None:
