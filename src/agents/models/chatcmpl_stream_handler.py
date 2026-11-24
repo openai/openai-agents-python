@@ -1369,7 +1369,7 @@ class ChatCmplStreamHandler:
         """Convert the streamed provider usage into a Responses usage payload."""
         if usage is None:
             return None
-        return ResponseUsage(
+        result = ResponseUsage(
             input_tokens=usage.prompt_tokens or 0,
             output_tokens=usage.completion_tokens or 0,
             total_tokens=usage.total_tokens or 0,
@@ -1386,3 +1386,7 @@ class ChatCmplStreamHandler:
                 cache_write_tokens=_cache_write_tokens(usage.prompt_tokens_details),
             ),
         )
+        if usage.total_tokens is None:
+            # Keep the public numeric default without reporting a measured zero.
+            object.__setattr__(result, "_agents_sdk_total_missing", True)
+        return result
