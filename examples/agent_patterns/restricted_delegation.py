@@ -4,6 +4,11 @@ Run this deterministic example without credentials or network access. Replace th
 ScriptedModel instances with production models after retaining the same restrictions.
 The tool-start count includes the delegate wrapper and the child's lookup handler.
 The deadline cancels the owned Runner task; it is not a token or billing limit.
+
+The parent grants lookup so the catalog reader can use it. Any other agent sharing
+this budget could also use its own lookup handler. To deny all SDK function tools
+in another child, pass run_config={"budget": RunBudget(allowed_tools=())} to that
+child's as_tool call. The parent keeps its own grants.
 """
 
 import asyncio
