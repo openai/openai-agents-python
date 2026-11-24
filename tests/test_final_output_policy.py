@@ -924,8 +924,10 @@ async def test_feedback_requires_input_based_compaction(streamed, mode):
         backend.close()
 
 
-@pytest.mark.parametrize("route", ["direct", "to_policy", "from_policy", "custom"])
-async def test_agent_tool_empty_answer_uses_finishing_policy(streamed, route):
+@pytest.mark.parametrize(
+    "route", ["direct", "to_policy", "from_policy", "middle", "no_policy", "custom"]
+)
+async def test_agent_tool_empty_answer_after_final_output_policy(streamed, route):
     def decide(ctx, proposal):
         return ContinueWithFeedback("Reconsider.") if proposal.output == "draft" else "finish"
 
@@ -936,22 +938,23 @@ async def test_agent_tool_empty_answer_uses_finishing_policy(streamed, route):
     hooks = AgentHooks(final_output_policy=decide)
     draft = [get_text_message("draft")]
     empty = [get_text_message("")]
-    if route == "from_policy":
+    if route in ("from_policy", "middle", "no_policy", "custom"):
         target = Agent(name="target", model=ScriptedModel([empty]))
+        transfer = [get_handoff_tool_call(target)]
         worker = Agent(
-            name="worker",
-            model=ScriptedModel([draft, [get_handoff_tool_call(target)]]),
-            hooks=hooks,
+            name="editor",
+            model=ScriptedModel([draft + transfer] if route == "no_policy" else [draft, transfer]),
+            hooks=None if route == "no_policy" else hooks,
             handoffs=[target],
         )
     else:
         worker = Agent(name="editor", model=ScriptedModel([draft, empty]), hooks=hooks)
-        if route == "to_policy":
-            worker = Agent(
-                name="worker",
-                model=ScriptedModel([[get_handoff_tool_call(worker)]]),
-                handoffs=[worker],
-            )
+    if route in ("to_policy", "middle"):
+        worker = Agent(
+            name="worker",
+            model=ScriptedModel([[get_handoff_tool_call(worker)]]),
+            handoffs=[worker],
+        )
 
     edit = worker.as_tool(
         "edit",
@@ -963,7 +966,7 @@ async def test_agent_tool_empty_answer_uses_finishing_policy(streamed, route):
         [[get_function_tool_call("edit", '{"input":"Review"}', "c")], [get_text_message("done")]]
     )
     await Runner.run(Agent(name="manager", model=model, tools=[edit]), "Review")
-    expected = {"custom": "custom", "from_policy": "draft"}.get(route, "")
+    expected = {"custom": "custom", "no_policy": "draft"}.get(route, "")
     assert model.calls[1].input[-1] == {
         "type": "function_call_output",
         "call_id": "c",

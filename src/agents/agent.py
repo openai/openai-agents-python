@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Seque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -701,7 +702,9 @@ class Agent(AgentBase, Generic[TContext]):
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
                 provided, the final output is used. Output guardrails preserve empty outputs.
-                If the finishing agent has a final output policy, empty text is preserved too.
+                Empty text is also preserved if the finishing agent or any agent represented
+                in the nested run's `new_items` has a final output policy, even if the
+                policy was never invoked.
                 Otherwise, empty outputs fall back to the latest nonempty message or tool
                 output from the nested run. Nested run results expose
                 `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
@@ -818,6 +821,9 @@ class Agent(AgentBase, Generic[TContext]):
             resolved_run_config = run_config
             if resolved_run_config is None and isinstance(context, ToolContext):
                 resolved_run_config = context.run_config
+                if resolved_run_config is not None and resolved_run_config.budget is not None:
+                    resolved_run_config = copy.copy(resolved_run_config)
+                    resolved_run_config.budget = None
             tool_state_scope_id = get_agent_tool_state_scope(context)
             if isinstance(context, ToolContext):
                 # Use a fresh ToolContext to avoid sharing approval state with parent runs.
@@ -1151,10 +1157,14 @@ class Agent(AgentBase, Generic[TContext]):
             if run_result.output_guardrail_results:
                 return run_result.final_output
 
-            # After a handoff, the finishing agent may have accepted empty text.
+            # An earlier agent may have continued past a draft before handing off.
             if run_result.final_output == "":
-                final_hooks = run_result.last_agent.hooks
-                if final_hooks is not None and final_hooks.final_output_policy is not None:
+                agents = chain(
+                    (run_result.last_agent,), (item.agent for item in run_result.new_items)
+                )
+                if any(
+                    a.hooks is not None and a.hooks.final_output_policy is not None for a in agents
+                ):
                     return run_result.final_output
 
             for item in reversed(run_result.new_items):
@@ -1172,6 +1182,8 @@ class Agent(AgentBase, Generic[TContext]):
 
             return run_result.final_output
 
+        # Keep the live policy with the implementation, which survives tool rebinding.
+        cast(Any, _run_agent_impl).__agents_run_config__ = run_config
         run_agent_tool = _build_wrapped_function_tool(
             name=tool_name_resolved,
             description=tool_description_resolved,
