@@ -127,7 +127,6 @@ from .openai_client_utils import is_official_openai_base_url, is_official_openai
 if TYPE_CHECKING:
     from ..model_settings import ModelSettings
 
-
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
 

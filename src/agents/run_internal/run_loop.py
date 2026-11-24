@@ -2609,6 +2609,7 @@ async def run_single_turn_streamed(
     redact_model_input(filtered, prompt_config)
     if isinstance(filtered.input, list):
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
+
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_pending_input_filter(filtered.input)
         logger.debug(
@@ -2675,6 +2676,7 @@ async def run_single_turn_streamed(
             server_conversation_tracker.rewind_input(filtered.input)
 
     stream_failed_retry_attempts: list[int] = [0]
+    stream_reported_usage: dict[int, Usage] = {}
 
     compaction_input_digests = prepare_compaction_model_input(
         session, context_wrapper, filtered.input
@@ -2713,7 +2715,15 @@ async def run_single_turn_streamed(
                 preview.retire()
             await _close_async_iterator_quietly(stream)
 
-    await _admit(context_wrapper._budget, model, session, streamed_result=streamed_result)
+    await _admit(
+        context_wrapper._budget,
+        model,
+        session,
+        all_tools,
+        streamed_result=streamed_result,
+        settings=model_settings,
+        prompt=prompt_config,
+    )
     preview = (
         streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
         if streamed_result._approved_output is not None and current_redactor() is None
@@ -2729,6 +2739,8 @@ async def run_single_turn_streamed(
         conversation_id=conversation_id,
         timeout=model_settings.timeout,
         failed_retry_attempts_out=stream_failed_retry_attempts,
+        reported_usage=stream_reported_usage,
+        budget=context_wrapper._budget,
         replay_unsafe_request=any(
             isinstance(tool, ProgrammaticToolCallingTool) for tool in all_tools
         ),
@@ -2752,6 +2764,9 @@ async def run_single_turn_streamed(
                     resumable=isinstance(session, ResumableRun),
                 ),
             )
+        )
+        stack.enter_context(
+            record_failed_attempt_usage_on_error(context_wrapper.usage, stream_reported_usage)
         )
         model_events = await stack.enter_async_context(aclosing(retry_stream))
         async for event in model_events:
@@ -2794,6 +2809,10 @@ async def run_single_turn_streamed(
                     maybe_response if isinstance(maybe_response, Response) else None,
                 )
                 if terminal_error._terminal_usage is not None:
+                    if context_wrapper._budget is not None:
+                        context_wrapper._budget.observe_failed_attempt(
+                            terminal_error._terminal_usage
+                        )
                     context_wrapper.usage.add(terminal_error._terminal_usage)
                 raise terminal_error
             elif getattr(event, "type", None) in {"error", "response.error"}:
@@ -2813,7 +2832,9 @@ async def run_single_turn_streamed(
                 )
                 if context_wrapper._budget is not None:
                     context_wrapper._budget.observe(usage)
-                usage = apply_retry_attempt_usage(usage, stream_failed_retry_attempts[0])
+                usage = apply_retry_attempt_usage(
+                    usage, stream_failed_retry_attempts[0], stream_reported_usage
+                )
                 final_response = ModelResponse(
                     output=terminal_response.output,
                     usage=usage,
@@ -3243,7 +3264,14 @@ async def get_new_response(
                 prompt=prompt_config,
             )
 
-        await _admit(context_wrapper._budget, model, session)
+        await _admit(
+            context_wrapper._budget,
+            model,
+            session,
+            all_tools,
+            settings=model_settings,
+            prompt=prompt_config,
+        )
         new_response = await get_response_with_retry(
             budget=context_wrapper._budget,
             get_response=request_response,

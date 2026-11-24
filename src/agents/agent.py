@@ -810,7 +810,11 @@ class Agent(AgentBase, Generic[TContext]):
             resolved_run_config = run_config
             if resolved_run_config is None and isinstance(context, ToolContext):
                 resolved_run_config = context.run_config
-                if resolved_run_config is not None and resolved_run_config.budget is not None:
+                if (
+                    resolved_run_config is not None
+                    and resolved_run_config.budget is not None
+                    and not resolved_run_config.budget._controlled_children
+                ):
                     resolved_run_config = copy.copy(resolved_run_config)
                     resolved_run_config.budget = None
             tool_state_scope_id = get_agent_tool_state_scope(context)
@@ -827,6 +831,8 @@ class Agent(AgentBase, Generic[TContext]):
                     agent=context.agent,
                     run_config=resolved_run_config,
                 )
+                if context._budget is not None and context._budget.controlled_children:
+                    nested_context._budget = context._budget
                 set_agent_tool_state_scope(nested_context, tool_state_scope_id)
                 if should_capture_tool_input:
                     nested_context.tool_input = params_data

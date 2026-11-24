@@ -256,6 +256,7 @@ class ToolContext(RunContextWrapper[TContext]):
             run_config=tool_run_config,
             **base_values,
         )
+        tool_context._budget = context._budget
         context._share_tool_state_with(tool_context)
         set_agent_tool_state_scope(tool_context, get_agent_tool_state_scope(context))
         return tool_context

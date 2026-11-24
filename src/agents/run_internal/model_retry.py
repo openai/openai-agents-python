@@ -371,9 +371,12 @@ def apply_retry_attempt_usage(
 
 
 @contextmanager
-def record_failed_attempt_usage_on_error(run_usage: Usage) -> Iterator[dict[int, Usage]]:
+def record_failed_attempt_usage_on_error(
+    run_usage: Usage, reported_usage: dict[int, Usage] | None = None
+) -> Iterator[dict[int, Usage]]:
     """Keep provider-reported usage when the retry loop exits without a model response."""
-    reported_usage: dict[int, Usage] = {}
+    if reported_usage is None:
+        reported_usage = {}
     try:
         yield reported_usage
     except BaseException:
@@ -656,6 +659,8 @@ async def get_response_with_retry(
                 return response
             except Exception as error:
                 if isinstance(error, ModelBehaviorError) and error._terminal_usage is not None:
+                    if budget is not None:
+                        budget.observe_failed_attempt(error._terminal_usage)
                     reported_usage[request_attempt] = error._terminal_usage
                 if (
                     not replay_unsafe_request
@@ -735,7 +740,11 @@ async def stream_response_with_retry(
     failed_retry_attempts_out: list[int] | None = None,
     replay_unsafe_request: bool = False,
     preview: ApprovedOutput | None = None,
+    reported_usage: dict[int, Usage] | None = None,
+    budget: _BudgetState | None = None,
 ) -> AsyncGenerator[TResponseStreamEvent, None]:
+    if reported_usage is None:
+        reported_usage = {}
     request_attempt = 1
     policy_attempt = 1
     failed_policy_attempts = 0
@@ -874,6 +883,10 @@ async def stream_response_with_retry(
             except _StreamAttemptSkipped as skipped:
                 raise skipped.reason from None
             except BaseException as error:
+                if isinstance(error, ModelBehaviorError) and error._terminal_usage is not None:
+                    if budget is not None:
+                        budget.observe_failed_attempt(error._terminal_usage)
+                    reported_usage[request_attempt] = error._terminal_usage
                 if isinstance(error, ModelTimeoutError):
                     # The timed owner has already been cancelled and drained. Do not retain its
                     # task, result queues, or previous event in the public timeout traceback frame.

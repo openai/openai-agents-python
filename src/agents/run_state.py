@@ -3193,6 +3193,8 @@ def _serialize_pending_nested_agent_tool_runs(
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
+        except _BudgetCheckpointError:
+            raise
         except Exception:
             if strict_context:
                 raise
