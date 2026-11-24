@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Iterable
 from copy import deepcopy
 from functools import partial
 from itertools import chain
 from typing import Any, TypeVar
 
-from .. import _debug
+from .._redaction import hook_payload_diagnostics, redact_payload
 from .._tool_identity import get_mapping_or_attr, get_tool_call_namespace
 from ..agent import Agent
 from ..exceptions import (
     ModelBehaviorError,
     UserError,
-    _mark_error_data_redacted,
-    _raise_data_redacted_error,
 )
 from ..items import TResponseOutputItem
 from ..run_config import RunConfig, ToolCallHookContext, ToolExecutionConfig
@@ -39,7 +36,8 @@ T = TypeVar("T")
 
 async def _await_hook(invoke: Callable[[], Awaitable[T]], phase: str, name: str) -> T:
     async def run_and_capture() -> T:
-        value = await invoke()
+        with hook_payload_diagnostics(f"{phase} failed for tool {name}.", redact_by_default=False):
+            value = await invoke()
         # Take ownership in the same task before another invocation can reuse the returned object.
         with hook_payload_diagnostics(f"{phase} must return a copyable value for tool {name}."):
             return deepcopy(value)
@@ -52,25 +50,6 @@ async def _await_hook(invoke: Callable[[], Awaitable[T]], phase: str, name: str)
         task.cancel()
         task.add_done_callback(_consume_future_exception)
         raise
-
-
-@contextmanager
-def hook_payload_diagnostics(
-    message: str,
-    *,
-    enabled: bool = True,
-    error_type: type[UserError | ModelBehaviorError] = UserError,
-) -> Iterator[None]:
-    """Keep rejected SDK payloads out of public diagnostics when tool data is redacted."""
-    try:
-        yield
-        return
-    except Exception:
-        if not enabled or not _debug.DONT_LOG_TOOL_DATA:
-            raise
-    safe_error = error_type(message)
-    _mark_error_data_redacted(safe_error)
-    _raise_data_redacted_error(safe_error)
 
 
 def _arguments(raw: Any, tool_name: str) -> dict[str, Any]:
@@ -159,6 +138,7 @@ async def prepare_tool_inputs(
         elif record.input_rewrite is not None and record.input_rewrite[0] == fingerprint:
             arguments = record.input_rewrite[1]
 
+        arguments = redact_payload(arguments)
         with hook_payload_diagnostics(
             "prepare_tool_input must return JSON-serializable arguments."
         ):
@@ -186,7 +166,7 @@ async def transform_tool_output(
 ) -> Any:
     settings = config.tool_execution
     if settings is None or settings.prepare_tool_output is None:
-        return output
+        return redact_payload(output)
     try:
         arguments = _arguments(raw, tool.name)
     except ModelBehaviorError:
@@ -206,6 +186,7 @@ async def transform_tool_output(
         "prepare_tool_output",
         tool.name,
     )
+    result = redact_payload(result)
     if isinstance(tool, FunctionTool) or isinstance(result, str):
         return result
     if isinstance(tool, ShellTool) and isinstance(result, ShellResult):

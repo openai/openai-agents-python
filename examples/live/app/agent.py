@@ -44,7 +44,10 @@ def create_order_agent(model: str = "gpt-5.6-luna") -> Agent:
 async def ask_order_agent(agent: Agent, request: OrderRequest) -> str:
     result = await Runner.run(agent, input=request.request, max_turns=5)
     if result.interruptions:
-        return "The specialist requires approval. This demo does not execute approved actions."
+        return (
+            "The requested action requires approval and hasn't run. "
+            "This demo cannot collect approval. Other tools may already have run."
+        )
     return str(result.final_output)
 
 

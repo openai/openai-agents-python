@@ -43,11 +43,17 @@ def native_approval_checkpoint(raw_item: Any) -> dict[str, Any] | None:
     if raw_type is not CodexPendingFunctionCall and raw_type is not CodexPendingCustomCall:
         return None
     checkpoint = raw_item.checkpoint
+    fields = {"version", "cwd", "call", "request", "model", "preconditions"}
+    if isinstance(checkpoint, dict) and checkpoint.get("version") == 2:
+        fields.add("hooks")
+        hooks = checkpoint.get("hooks")
+        if not isinstance(hooks, list) or not hooks or not all(isinstance(h, str) for h in hooks):
+            raise UserError("Invalid Codex native approval checkpoint.")
     if (
         not isinstance(checkpoint, dict)
-        or set(checkpoint) != {"version", "cwd", "call", "request", "model", "preconditions"}
+        or set(checkpoint) != fields
         or type(checkpoint["version"]) is not int
-        or checkpoint["version"] != 1
+        or checkpoint["version"] not in (1, 2)
         or not isinstance(checkpoint["cwd"], str)
         or not Path(checkpoint["cwd"]).is_absolute()
         or not isinstance(checkpoint["model"], str)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from .._redaction import redact_payload
 from ..exceptions import UserError
 from ..items import ToolCallOutputItem, ToolCallOutputTypes
 from ..memory.resumable_session import _ResumableSessionBinding
@@ -82,7 +83,9 @@ def validate_native_restore_hooks(processed: Any, bindings: ModelToolHooks) -> N
     _validate_native_plan(processed)
     if _native_decision(bindings.context, processed.native_approvals[0]):
         # Check hooks before claiming the session. Discover tools and recheck at dispatch.
-        _validate_native_restore([], bindings)
+        checkpoint = native_approval_checkpoint(processed.native_approvals[0].raw_item)
+        assert checkpoint is not None
+        _validate_native_restore([], bindings, checkpoint)
 
 
 def native_pending_step(
@@ -207,6 +210,7 @@ async def resolve_native_approval_step(
                 tool_lookup_key=pending.tool_lookup_key,
                 tool_namespace=pending.tool_namespace,
             )
+    output = redact_payload(output)
     result_item = ToolCallOutputItem(
         agent=bindings.public_agent,
         raw_item=cast(

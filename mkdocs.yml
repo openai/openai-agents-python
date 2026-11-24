@@ -189,6 +189,7 @@ plugins:
                 - Extensions:
                     - Handoff filters: ref/extensions/handoff_filters.md
                     - Handoff prompt: ref/extensions/handoff_prompt.md
+                    - OpenTelemetry tracing: ref/extensions/tracing/opentelemetry.md
                     - Third-party adapters:
                         - Any-LLM model: ref/extensions/models/any_llm_model.md
                         - Any-LLM provider: ref/extensions/models/any_llm_provider.md

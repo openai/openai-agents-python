@@ -101,7 +101,8 @@ async def test_interrupted_specialist_returns_a_refusal_after_ungated_work() -> 
     )
     agent = create_order_agent().clone(model=model, tools=[read_order, change_order])
     send = AsyncMock()
-    handler = DelegationHandler(agent, send, AsyncMock())
+    notify = AsyncMock()
+    handler = DelegationHandler(agent, send, notify)
     batch(handler, [function_call("outer")])
     await drain(handler)
 
@@ -111,7 +112,14 @@ async def test_interrupted_specialist_returns_a_refusal_after_ungated_work() -> 
     assert result["type"] == "response.item.create"
     assert result["item"]["type"] == "function_call_output"
     assert result["item"]["call_id"] == "outer"
-    assert "requires approval" in result["item"]["output"]
+    refusal = (
+        "The requested action requires approval and hasn't run. "
+        "This demo cannot collect approval. Other tools may already have run."
+    )
+    assert result["item"]["output"] == refusal
+    notify.assert_any_await(
+        {"type": "backend", "status": "result_submitted", "call_id": "outer", "result": refusal}
+    )
     assert continuation["type"] == "response.create"
 
 

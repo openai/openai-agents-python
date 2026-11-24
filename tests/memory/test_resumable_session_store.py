@@ -59,7 +59,7 @@ async def test_resume_does_not_create_a_missing_id() -> None:
     [
         ("not-json synthetic-private-state-detail", "malformed"),
         ("[]", "malformed"),
-        ('{"version":2}', "incompatible"),
+        ('{"version":3}', "incompatible"),
         ('{"version":1}', "malformed"),
         (
             json.dumps(

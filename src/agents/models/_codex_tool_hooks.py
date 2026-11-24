@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 from contextlib import AsyncExitStack
-from copy import deepcopy
+from copy import copy, deepcopy
 from functools import partial
 from typing import Any
 
@@ -65,8 +66,14 @@ def _same_json(left: Any, right: Any) -> bool:
 
 
 class CodexToolHooks:
-    def __init__(self, bindings: ModelToolHooks, sdk_names: set[str], events: list[str]):
+    def __init__(
+        self, bindings: ModelToolHooks, sdk_names: set[str], events: list[str], required: list[str]
+    ):
         self.bindings = bindings
+        self.settings = copy(bindings.settings)
+        self.observers = tuple(
+            hook for hook in (bindings.lifecycle, bindings.agent.hooks) if hook is not None
+        )
         self.sdk_names = sdk_names
         self.events = events
         self.server_name = f"agents_hooks_{secrets.token_hex(8)}"
@@ -75,6 +82,10 @@ class CodexToolHooks:
         self.error: BaseException | None = None
         self.prepared_inputs: dict[str, dict[str, Any] | None] = {}
         self.prepared_outputs: dict[str, str] = {}
+        self.required = required
+        self._proposal: tuple[str, str, str] | None = None
+        self._restoring: tuple[str, str] | None = None
+        self._output_seen = False
 
     @classmethod
     def for_run(
@@ -85,24 +96,26 @@ class CodexToolHooks:
         settings = bindings.settings
         agent_hooks = bindings.agent.hooks
         events = []
+        required = []
         for event, callback, observer in (
-            ("PreToolUse", settings and settings.prepare_tool_input, "on_tool_start"),
-            ("PostToolUse", settings and settings.prepare_tool_output, "on_tool_end"),
+            ("PreToolUse", "prepare_tool_input", "on_tool_start"),
+            ("PostToolUse", "prepare_tool_output", "on_tool_end"),
         ):
-            if (
-                callback is not None
-                or getattr(type(bindings.lifecycle), observer)
-                is not getattr(RunHooksBase, observer)
-                or (
-                    agent_hooks is not None
-                    and getattr(type(agent_hooks), observer)
-                    is not getattr(AgentHooksBase, observer)
-                )
+            hooks = []
+            if settings and getattr(settings, callback) is not None:
+                hooks.append(callback)
+            if getattr(type(bindings.lifecycle), observer) is not getattr(RunHooksBase, observer):
+                hooks.append("run." + observer)
+            if agent_hooks is not None and getattr(type(agent_hooks), observer) is not getattr(
+                AgentHooksBase, observer
             ):
+                hooks.append("agent." + observer)
+            if hooks:
                 events.append(event)
+                required.extend(hooks)
         if not events:
             return None
-        if settings and settings.prepare_tool_input and "PostToolUse" not in events:
+        if settings and settings.prepare_tool_input is not None and "PostToolUse" not in events:
             # Observe Core's effective arguments after it preserves environment selectors.
             events.append("PostToolUse")
         # Match Core's hook names, including the legacy name for multi_agent_v1.spawn_agent.
@@ -124,7 +137,43 @@ class CodexToolHooks:
                 f"Codex native hooks reserve {', '.join(reserved)}. Rename or namespace "
                 "the SDK tool, or enable sdk_only_tool_hooks."
             )
-        return cls(bindings, sdk_names, events)
+        return cls(bindings, sdk_names, events, required)
+
+    def prepare_pending(self, item: Any, input_hash: str | None) -> None:
+        """Bind the displayed call and receipt to the input Core actually accepted."""
+        name = "Bash" if item.name == "exec_command" else "apply_patch"
+        proposal = self._proposal
+        if "PreToolUse" not in self.events:
+            command = json.loads(item.arguments)["cmd"] if name == "Bash" else item.input
+            proposal = (item.call_id, name, command)
+        if (
+            self.error is not None
+            or proposal is None
+            or proposal[:2] != (item.call_id, name)
+            or not isinstance(proposal[2], str)
+            or hashlib.sha256(proposal[2].encode()).hexdigest() != input_hash
+        ):
+            raise UserError("Codex could not confirm the prepared input for this approval.")
+        if item.call_id in self.prepared_inputs:
+            self.prepared_inputs[item.call_id] = {"command": proposal[2]}
+            self.prepare_history_item(item)
+            del self.prepared_inputs[item.call_id]
+
+    def restore(self, call: dict[str, Any]) -> None:
+        # Keep the pre-tool decision and confirm the result on the replacement worker.
+        if "PostToolUse" not in self.events:
+            self.events.append("PostToolUse")
+        self._restoring = (
+            call["call_id"],
+            "Bash" if call["name"] == "exec_command" else "apply_patch",
+        )
+
+    def restored_output(self, output: str) -> str:
+        if self.error is not None or not self._output_seen or self._restoring is None:
+            raise UserError(
+                "Could not prepare the restored Codex result. Check the effect before retrying."
+            )
+        return self.prepared_outputs.get(self._restoring[0], output)
 
     async def configure(self, resources: AsyncExitStack) -> dict[str, Any]:
         """Give the embedded binding this attempt's private callback configuration."""
@@ -188,7 +237,7 @@ class CodexToolHooks:
             return decision
         except (Exception, asyncio.CancelledError) as exc:
             self.error = self.error or exc
-            # A transport-level hook error lets Codex run the original tool. Block explicitly.
+            # Keep the original exception in Python and send a payload-free denial.
             message = "The registered tool hook did not complete."
             if data.get("event") == "PreToolUse":
                 return {
@@ -203,6 +252,10 @@ class CodexToolHooks:
     async def _dispatch(self, data: dict[str, Any]) -> dict[str, Any]:
         bindings = self.bindings
         name, arguments = data["name"], data["arguments"]
+        if self._restoring is not None and (
+            self._restoring != (data["call_id"], name) or self._output_seen
+        ):
+            raise UserError("Unexpected hook for a restored Codex call.")
         if name in self.sdk_names:
             # SDK-owned calls reach the same callbacks when the runner dispatches them.
             return {}
@@ -212,13 +265,12 @@ class CodexToolHooks:
         call = ToolCallHookContext(
             bindings.context, bindings.agent, tool, data["call_id"], None, deepcopy(arguments)
         )
-        settings = bindings.settings
-        observers = tuple(
-            hook for hook in (bindings.lifecycle, bindings.agent.hooks) if hook is not None
-        )
+        settings = self.settings
         if data["event"] == "PreToolUse":
-            decision = {}
-            if settings and settings.prepare_tool_input:
+            decision: dict[str, Any] = {}
+            prepared = arguments
+            # The user approved the prepared input. Never transform it a second time.
+            if self._restoring is None and settings and settings.prepare_tool_input is not None:
                 prepared = await _await_hook(
                     partial(settings.prepare_tool_input, call), "prepare_tool_input", name
                 )
@@ -234,12 +286,17 @@ class CodexToolHooks:
                     }
                     self.prepared_inputs[data["call_id"]] = None
             await gather_with_cancel(
-                *(hook.on_tool_start(bindings.context, bindings.agent, tool) for hook in observers)
+                *(
+                    hook.on_tool_start(bindings.context, bindings.agent, tool)
+                    for hook in self.observers
+                )
             )
+            if bindings.resumable and name in ("Bash", "apply_patch"):
+                self._proposal = (data["call_id"], name, prepared["command"])
             return decision
         original = data["result"]
         prepared = original
-        if settings and settings.prepare_tool_output:
+        if settings and settings.prepare_tool_output is not None:
             prepared = await _await_hook(
                 partial(settings.prepare_tool_output, call, deepcopy(original)),
                 "prepare_tool_output",
@@ -257,9 +314,14 @@ class CodexToolHooks:
         await gather_with_cancel(
             *(
                 hook.on_tool_end(bindings.context, bindings.agent, tool, prepared)
-                for hook in observers
+                for hook in self.observers
             )
         )
+        if self._restoring is not None:
+            # This turn never samples the model. Keep Core's exit evidence intact.
+            # The provider returns only restored_output() to the Runner.
+            self._output_seen = True
+            return {}
         return decision
 
     def prepare_history_item(self, item: Any) -> None:
