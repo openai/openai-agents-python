@@ -12,7 +12,22 @@ Expected output — one delivery to an in-memory outbox, five successful applica
 
 Set `RunConfig(tracing={"operation_detail": "metadata"})` to omit model and tool payloads from one run's automatic spans. A nested `Runner` call or an agent used as a tool can request content with its own config.
 
-To enforce metadata detail across those calls, wrap `await Runner.run(agent, request)` in `with metadata_only_run_tracing():`. For streaming, start the run and drain its events inside the same scope.
+Passing a new, budget-only `RunConfig` to `worker.as_tool()` gives the child fresh tracing defaults. Even if the parent uses metadata detail, the child's automatic spans can include payloads. In an async function with a `worker` agent and a `request`, wrap the manager's run in the scope.
+
+```python
+from agents import Agent, RunBudget, RunConfig, Runner
+from agents.tracing import metadata_only_run_tracing
+
+child = RunConfig(budget=RunBudget(max_model_calls=2))
+consult = worker.as_tool("consult", "Ask the specialist", run_config=child)
+manager = Agent(name="manager", tools=[consult])
+with metadata_only_run_tracing():
+    result = await Runner.run(manager, request)
+```
+
+Use `dataclasses.replace(parent_config, budget=RunBudget(max_model_calls=2))` only if the child should inherit all other settings from that approved config.
+
+For streaming, start the run and drain its events inside the same scope.
 
 ```python
 from agents import Runner
@@ -31,7 +46,7 @@ Each run in the scope uses metadata detail and `trace_include_sensitive_data=Fal
 
 New asyncio tasks inherit the context at creation. Leaving the scope restores the previous setting in the current task. Enter a fresh scope on independent resume, in an existing worker task or in another service.
 
-The scope does not sanitize raw stream events, returned data, saved state, exceptions or logs. The example discards events without displaying them. Check what you can disclose before sharing `result.final_output`. Keep sensitive values out of names, IDs, custom spans and `trace_metadata`. Third-party instrumentation has its own capture rules.
+The scope does not sanitize raw stream events, returned data, saved state, exceptions or logs. The example discards events without displaying them. Check what you can disclose before sharing `result.final_output`. Keep sensitive values out of names, IDs, custom spans and `trace_metadata`. Hooks can still receive and record payloads. Third-party instrumentation has its own capture rules.
 
 ## Connect application stages
 

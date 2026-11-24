@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Iterator, Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import httpx2
@@ -12,7 +13,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunBudget, RunConfig, Runner
 from agents.decorators import tool
 from agents.extensions.tracing import OpenTelemetryTracingProcessor
 from agents.models.openai_responses import OpenAIResponsesModel
@@ -707,6 +708,40 @@ async def test_metadata_only_scope_bounds_agent_tool_and_nested_runner(exporter,
     exported = exporter.get_finished_spans()
     assert any(s.name == "execute_tool lookup" for s in exported)
     assert "CANARY" not in "".join(s.to_json() for s in exported)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
+async def test_budget_only_child_uses_fresh_trace_defaults(scoped, monkeypatch):
+    monkeypatch.delenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", raising=False)
+
+    @tool
+    def lookup() -> str:
+        return "CHILD_OUTPUT"
+
+    worker = Agent(
+        name="worker",
+        tools=[lookup],
+        model=ScriptedModel([[function_call("lookup", {}, call_id="lookup")]]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    child = RunConfig(budget=RunBudget(max_model_calls=1))
+    manager = Agent(
+        name="manager",
+        tools=[worker.as_tool("consult", "Consult", run_config=child)],
+        model=ScriptedModel([[function_call("consult", {"input": "question"}, call_id="consult")]]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    parent = RunConfig(tracing={"operation_detail": "metadata"})
+    with metadata_only_run_tracing() if scoped else nullcontext():
+        result = await Runner.run(manager, "question", run_config=parent)
+
+    assert result.final_output == "CHILD_OUTPUT"
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    outputs = {
+        s.span_data.name: s.span_data.output for s in spans if s.span_data.type == "function"
+    }
+    assert outputs == {"consult": None, "lookup": None if scoped else "CHILD_OUTPUT"}
 
 
 def test_metadata_only_scope_rejects_async_decorator():

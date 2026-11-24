@@ -60,6 +60,7 @@ from ._tool_identity import (
     deserialize_function_tool_lookup_key,
     get_function_tool_lookup_key,
     get_function_tool_lookup_key_for_tool,
+    get_function_tool_lookup_keys,
     get_function_tool_namespace,
     get_function_tool_qualified_name,
     serialize_function_tool_lookup_key,
@@ -121,6 +122,7 @@ from .models._codex_items import (
     native_approval_checkpoint,
     restore_native_approval_call,
 )
+from .run_budget import _BudgetCheckpointError, _BudgetState
 from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -258,7 +260,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.24"
+CURRENT_SCHEMA_VERSION = "1.25"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -326,6 +328,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "records required ResumableSession ownership, and preserves native approval receipts."
     ),
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
+    "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -2062,6 +2065,8 @@ class RunState(Generic[TContext, TAgent]):
             # Preserve metadata so deserialization can warn when context types were erased.
             "context_meta": context_meta,
         }
+        if self._context._budget is not None:
+            context_entry["budget"] = self._context._budget.checkpoint()
         tool_input = self._serialize_tool_input(self._context.tool_input)
         if tool_input is not None:
             context_entry["tool_input"] = tool_input
@@ -2617,8 +2622,8 @@ class RunState(Generic[TContext, TAgent]):
                 validation_error_factory=validation_error_factory,
             )
 
-            if _unsupported_native_approvals(state_json):
-                raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
+            required_children: set[int] = set()
+            _validate_pending_approvals(state_json, validation_error_factory, required_children)
 
             from .sandbox._mount_security import sanitize_run_state_sandbox_mount_authority
 
@@ -2638,15 +2643,23 @@ class RunState(Generic[TContext, TAgent]):
                 )
                 state_json["sandbox"] = sanitized_sandbox
 
-            return await _build_run_state_from_json(
+            restored = await _build_run_state_from_json(
                 initial_agent=initial_agent,
                 state_json=state_json,
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
+            if required_children:
+                raise validation_error_factory(_REQUIRED_CHILD_MISSING, UserError)
+            return restored
         except BaseException as error:
+            if isinstance(error, _BudgetCheckpointError):
+                error = validation_error_factory(
+                    "Invalid RunBudget checkpoint or schema version.", UserError
+                )
             trusted_error_message = _trusted_run_state_validation_message(
                 error,
                 trusted_validation_errors,
@@ -2674,29 +2687,48 @@ _UNSUPPORTED_NATIVE_APPROVALS = (
     "Run state contains unsupported native tool approvals. "
     "Check for prior effects before starting a new run with SDK tools."
 )
+_REQUIRED_CHILD_MISSING = "Cannot restore a required pending agent tool."
 
 
-def _unsupported_native_approvals(state: dict[str, Any], *, nested: bool = False) -> bool:
-    """Check nested agent runs before best-effort context restoration can skip a child."""
+def _validate_pending_approvals(
+    state: dict[str, Any],
+    validation_error_factory: RunStateValidationErrorFactory,
+    required_children: set[int],
+    *,
+    nested: bool = False,
+) -> bool:
+    """Validate before best-effort child restoration and report whether a budget is required."""
+    context = state.get("context")
+    requires_budget = isinstance(context, dict) and "budget" in context
     response = state.get("last_processed_response")
     if not isinstance(response, dict):
-        return False
+        response = {}
     approvals = response.get("native_approvals")
     if approvals:
         # Only the root session has a claimed checkpoint. A nested state cannot
         # authorize an action, even when it contains an otherwise valid receipt.
         if nested or not isinstance(approvals, list) or len(approvals) != 1:
-            return True
+            raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
         item = approvals[0]
         if not isinstance(item, dict) or not isinstance(item.get("codex_native_checkpoint"), dict):
-            return True
+            raise validation_error_factory(_UNSUPPORTED_NATIVE_APPROVALS, UserError)
     functions = response.get("functions")
     if isinstance(functions, list):
         for entry in functions:
             child = entry.get("agent_run_state") if isinstance(entry, dict) else None
-            if isinstance(child, dict) and _unsupported_native_approvals(child, nested=True):
-                return True
-    return False
+            if isinstance(child, dict) and _validate_pending_approvals(
+                child, validation_error_factory, required_children, nested=True
+            ):
+                # Track the exact child snapshot until its pending run is registered.
+                required_children.add(id(child))
+                requires_budget = True
+    if requires_budget:
+        version = _validate_run_state_schema_version(
+            state, validation_error_factory=validation_error_factory
+        )
+        if tuple(map(int, version.split("."))) < (1, 25):
+            raise _BudgetCheckpointError("Run budgets require schema 1.25 or later.")
+    return requires_budget
 
 
 def _validate_run_state_json_value(value: object) -> None:
@@ -3329,6 +3361,7 @@ async def _restore_pending_nested_agent_tool_runs(
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> None:
     """Rehydrate nested agent-as-tool run state into the ephemeral tool-call cache."""
     if not function_actions:
@@ -3357,8 +3390,11 @@ async def _restore_pending_nested_agent_tool_runs(
                 state_json=dict(nested_state_data),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
+        except _BudgetCheckpointError:
+            raise
         except Exception:
             if strict_context:
                 raise
@@ -3376,6 +3412,8 @@ async def _restore_pending_nested_agent_tool_runs(
         # older pending interruptions after consuming this restored entry.
         drop_agent_tool_run_result(tool_call, scope_id=scope_id)
         record_agent_tool_run_result(tool_call, cast(Any, pending_result), scope_id=scope_id)
+        if required_children:
+            required_children.discard(id(nested_state_data))
 
 
 async def _deserialize_processed_response(
@@ -3392,6 +3430,7 @@ async def _deserialize_processed_response(
     program_call_ids: Collection[str] = (),
     completed_program_call_ids: Collection[str] = (),
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> ProcessedResponse:
     """Deserialize a ProcessedResponse from JSON data.
 
@@ -3599,6 +3638,18 @@ async def _deserialize_processed_response(
                 )
 
                 nested_state_data = entry.get("agent_run_state")
+                if required_children and id(nested_state_data) in required_children:
+                    if (
+                        not function_tool._is_agent_tool
+                        or not isinstance(function_tool._agent_instance, Agent)
+                        or sum(
+                            tool_name in get_function_tool_lookup_keys(tool)
+                            for tool in all_tools
+                            if isinstance(tool, FunctionTool)
+                        )
+                        != 1
+                    ):
+                        raise validation_error_factory(_REQUIRED_CHILD_MISSING, UserError)
                 deserialized.append(
                     _DeserializedFunctionAction(
                         action=ToolRunFunction(
@@ -3719,6 +3770,7 @@ async def _deserialize_processed_response(
         scope_id=scope_id,
         context_deserializer=context_deserializer,
         strict_context=strict_context,
+        required_children=required_children,
         validation_error_factory=validation_error_factory,
     )
 
@@ -4358,6 +4410,7 @@ async def _build_run_state_from_json(
     context_deserializer: ContextDeserializer | None = None,
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
+    required_children: set[int] | None = None,
 ) -> RunState[Any, Agent[Any]]:
     """Shared helper to rebuild RunState from JSON payload.
 
@@ -4424,6 +4477,7 @@ async def _build_run_state_from_json(
         raise validation_error_factory("Run state agent not found in agent map", UserError)
 
     context_data = state_json["context"]
+    budget = _BudgetState.restore(context_data["budget"]) if "budget" in context_data else None
     usage = deserialize_usage(context_data.get("usage", {}))
 
     serialized_context: Any = context_data.get("context", _MISSING_CONTEXT_SENTINEL)
@@ -4486,6 +4540,7 @@ async def _build_run_state_from_json(
             "Serialized run state context must be a mapping. Please provide one.",
             UserError,
         )
+    context = context._for_new_root(budget)
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
@@ -4646,6 +4701,7 @@ async def _build_run_state_from_json(
             defer_mcp_discovery=state._requires_redaction,
             program_call_ids=program_call_ids,
             completed_program_call_ids=completed_program_call_ids,
+            required_children=required_children,
             validation_error_factory=validation_error_factory,
         )
     else:
@@ -5863,6 +5919,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state nested history ownership references a missing input item",
         "Run state nested history ownership session digest does not match",
         "Run state nested history ownership input digest does not match",
+        "Invalid RunBudget checkpoint or schema version.",
+        _REQUIRED_CHILD_MISSING,
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
         "RunState tool invocation must be a mapping.",
