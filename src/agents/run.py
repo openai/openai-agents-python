@@ -53,8 +53,8 @@ from .logger import log_model_and_tool_action_warning, log_tool_action_warning, 
 from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .models._run_context import ModelToolHooks
-from .request_capture import _capture_run, _claim_run
 from .result import RunResult, RunResultStreaming
+from .run_budget import _check_resume, _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
@@ -646,16 +646,13 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        session = prepare_run_session(kwargs.get("session"), input)
+        kwargs["session"] = session
+        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
+        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
-            trace_stack.enter_context(_capture_run(_claim_run()))
-            session = prepare_run_session(kwargs.get("session"), input)
-            kwargs["session"] = session
-            run_config, owns_model_provider = _normalize_run_config_for_runner(
-                kwargs.get("run_config")
-            )
-            cast(dict[str, Any], kwargs)["run_config"] = run_config
             trace_stack.enter_context(redaction_scope(run_config.redact_text))
             trace_stack.enter_context(
                 operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
@@ -727,6 +724,7 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
+        budget = _prepare_budget(run_config, starting_agent, run_state)
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -770,6 +768,7 @@ class AgentRunner:
             )
             context_wrapper._resolve_function_approval_owners(starting_agent)
             validate_resume_policy(run_state, context_wrapper, run_config)
+            await _check_resume(run_state, run_config.budget, context_wrapper)
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -796,7 +795,7 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
-            context_wrapper = ensure_context_wrapper(context)
+            context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
             if isinstance(session, ResumableRun):
                 await session.begin(
                     input,
@@ -2652,9 +2651,6 @@ class AgentRunner:
         try:
             return self._run_sync_impl(starting_agent, input, **kwargs)
         except BaseException as error:
-            # Setup can fail before the delegated async invocation claims the capture.
-            if (pending := _claim_run()) is not None:
-                pending.finish()
             if _is_error_data_redacted(error):
                 redacted_source = error
             else:
@@ -2772,19 +2768,6 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
-        run = _claim_run()
-        with _capture_run(run, streamed=True):
-            result = self._run_streamed_impl(starting_agent, input, **kwargs)
-            if run is not None and run.owner == "root" and result.run_loop_task is not None:
-                result.run_loop_task.add_done_callback(run.finish)
-            return result
-
-    def _run_streamed_impl(
-        self,
-        starting_agent: Agent[TContext],
-        input: str | list[TResponseInputItem] | RunState[TContext],
-        **kwargs: Unpack[RunOptions[TContext]],
-    ) -> RunResultStreaming:
         context = kwargs.get("context")
         max_turns = kwargs.get("max_turns", DEFAULT_MAX_TURNS)
         hooks = cast(RunHooks[TContext], validate_run_hooks(kwargs.get("hooks")))
@@ -2814,6 +2797,9 @@ class AgentRunner:
             else contextlib.nullcontext(),
         ):
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
+            budget = _prepare_budget(
+                run_config, starting_agent, input if isinstance(input, RunState) else None
+            )
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
             run_state: RunState[TContext] | None = None
@@ -2883,7 +2869,7 @@ class AgentRunner:
                     previous_response_id=previous_response_id,
                     auto_previous_response_id=auto_previous_response_id,
                 )
-                context_wrapper = ensure_context_wrapper(context)
+                context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
                 context_wrapper._resolve_function_approval_owners(starting_agent)
                 set_agent_tool_state_scope(context_wrapper, uuid4().hex)
                 # input_for_state is the same as input_for_result here
@@ -3054,8 +3040,10 @@ class AgentRunner:
                 if run_config.tracing_disabled
                 else contextlib.nullcontext(),
             ):
-                if isinstance(session, ResumableRun):
-                    try:
+                try:
+                    if is_resumed_state and run_state is not None:
+                        await _check_resume(run_state, run_config.budget, context_wrapper)
+                    if isinstance(session, ResumableRun):
                         await session.begin(
                             input,
                             ModelToolHooks(
@@ -3064,10 +3052,10 @@ class AgentRunner:
                             run_config.tool_not_found_behavior,
                         )
                         session.bind_state(run_state)
-                    except BaseException:
-                        streamed_result.is_complete = True
-                        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                        raise
+                except BaseException:
+                    streamed_result.is_complete = True
+                    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+                    raise
                 configuration_agent = (
                     run_state._current_agent
                     if run_state is not None and run_state._current_agent is not None

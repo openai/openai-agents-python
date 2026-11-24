@@ -78,8 +78,8 @@ from ..models._response_terminal import (
     response_terminal_failure_error,
 )
 from ..models._run_context import ModelToolHooks, model_run_context
-from ..request_capture import _model_capture_scope, _submit_model
 from ..result import RunResultStreaming
+from ..run_budget import _admit
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
@@ -2655,15 +2655,10 @@ async def run_single_turn_streamed(
         session, context_wrapper, filtered.input
     )
 
-    submitted = False
-
     def get_model_stream() -> AsyncIterator[TResponseStreamEvent]:
-        nonlocal submitted
         tripwire = streamed_result._triggered_input_guardrail_result
         if tripwire is not None:
             raise _StreamAttemptSkipped(InputGuardrailTripwireTriggered(tripwire))
-        _submit_model(model, first=not submitted)
-        submitted = True
         return model.stream_response(
             filtered.instructions,
             filtered.input,
@@ -2679,6 +2674,7 @@ async def run_single_turn_streamed(
             prompt=prompt_config,
         )
 
+    await _admit(context_wrapper._budget, model, session, streamed_result=streamed_result)
     retry_stream = stream_response_with_retry(
         get_stream=get_model_stream,
         preview=(
@@ -2717,7 +2713,6 @@ async def run_single_turn_streamed(
                 ),
             )
         )
-        stack.enter_context(_model_capture_scope())
         model_events = await stack.enter_async_context(aclosing(retry_stream))
         async for event in model_events:
             stream_event_count += 1
@@ -2769,16 +2764,16 @@ async def run_single_turn_streamed(
                 # provider usage (common for some Chat Completions / LiteLLM streams). Skipping
                 # apply_retry_attempt_usage here would drop failed-attempt accounting and diverge
                 # from the non-streaming get_response_with_retry path.
-                usage = apply_retry_attempt_usage(
-                    (
-                        _response_usage_to_usage(terminal_response.usage)
-                        if terminal_response.usage
-                        # Defaults to zero requests, so adapters that fold several provider
-                        # responses into one and report counts separately are not double-counted.
-                        else Usage(requests=_requests_for_response_without_usage(terminal_response))
-                    ),
-                    stream_failed_retry_attempts[0],
+                usage = (
+                    _response_usage_to_usage(terminal_response.usage)
+                    if terminal_response.usage
+                    # Defaults to zero requests, so adapters that fold several provider
+                    # responses into one and report counts separately are not double-counted.
+                    else Usage(requests=_requests_for_response_without_usage(terminal_response))
                 )
+                if context_wrapper._budget is not None:
+                    context_wrapper._budget.observe(usage)
+                usage = apply_retry_attempt_usage(usage, stream_failed_retry_attempts[0])
                 final_response = ModelResponse(
                     output=terminal_response.output,
                     usage=usage,
@@ -3179,7 +3174,9 @@ async def get_new_response(
         ),
         record_failed_attempt_usage_on_error(context_wrapper.usage) as reported_usage,
     ):
+        await _admit(context_wrapper._budget, model, session)
         new_response = await get_response_with_retry(
+            budget=context_wrapper._budget,
             get_response=lambda: model.get_response(
                 system_instructions=filtered.instructions,
                 input=filtered.input,
@@ -3197,7 +3194,6 @@ async def get_new_response(
             rewind=rewind_model_request,
             retry_settings=model_settings.retry,
             reported_usage=reported_usage,
-            model=model,
             get_retry_advice=model.get_retry_advice,
             previous_response_id=previous_response_id,
             conversation_id=conversation_id,

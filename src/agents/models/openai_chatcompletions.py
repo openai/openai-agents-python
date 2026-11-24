@@ -26,7 +26,6 @@ from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
-from ..request_capture import _http_exchange, _model_counts
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing._model import chat_model_span
@@ -321,6 +320,7 @@ class OpenAIChatCompletionsModel(Model):
                 # The request completed, so it counts even when the provider omits usage.
                 else Usage(requests=1)
             )
+            usage._total_missing = response.usage is None or response.usage.total_tokens is None
 
             # Record the request and token usage on the span before the terminal
             # branches below, so a ModelBehaviorError raised for a truncated empty
@@ -771,10 +771,7 @@ class OpenAIChatCompletionsModel(Model):
         create_kwargs.update(model_settings.extra_args or {})
 
         client = self._get_client()
-        with _http_exchange(_model_counts(self)):
-            ret = await create_with_retry_observation(
-                client, client.chat.completions, create_kwargs
-            )
+        ret = await create_with_retry_observation(client, client.chat.completions, create_kwargs)
 
         if isinstance(ret, ChatCompletion):
             return ret

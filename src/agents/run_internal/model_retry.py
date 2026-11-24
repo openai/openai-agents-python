@@ -23,7 +23,6 @@ from ..models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
 )
-from ..request_capture import _model_capture_scope, _submit_model
 from ..retry import (
     ModelRetryAdvice,
     ModelRetryAdviceRequest,
@@ -36,6 +35,7 @@ from ..retry import (
     _coerce_backoff_settings,
     retry_policy_retries_safe_transport_errors,
 )
+from ..run_budget import _BudgetState
 from ..tracing._model import ModelRetrySpans, model_retry_scope
 from ..usage import RequestUsage, Usage
 from ..util._error_tracing import mark_model_timeout_task
@@ -606,7 +606,6 @@ def _should_disable_websocket_pre_event_retry(
 async def get_response_with_retry(
     *,
     get_response: GetResponseCallable,
-    model: object = None,
     rewind: RewindCallable,
     retry_settings: ModelRetrySettings | None,
     get_retry_advice: GetRetryAdviceCallable,
@@ -615,6 +614,7 @@ async def get_response_with_retry(
     timeout: float | None = None,
     replay_unsafe_request: bool = False,
     reported_usage: dict[int, Usage] | None = None,
+    budget: _BudgetState | None = None,
 ) -> ModelResponse:
     request_attempt = 1
     policy_attempt = 1
@@ -646,10 +646,10 @@ async def get_response_with_retry(
                     ),
                     websocket_pre_event_retries_disabled(disable_websocket_pre_event_retry),
                     model_retry_scope(model_spans, request_attempt),
-                    _model_capture_scope(),
                 ):
-                    _submit_model(model, first=request_attempt == 1)
                     response = await _await_model_attempt(get_response(), timeout)
+                if budget is not None:
+                    budget.observe(response.usage)
                 response.usage = apply_retry_attempt_usage(
                     response.usage, request_attempt - 1, reported_usage
                 )

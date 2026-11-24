@@ -6,7 +6,6 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from ..request_capture import _ObservedOpenAI
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
 from ..tracing._model import current_model_span, record_retries
 from ._retry_runtime import (
@@ -24,7 +23,7 @@ def record_openai_error_retries(
 ) -> None:
     # A failed send has no raw response. The standard client marks its final
     # outgoing request unless the caller supplied or removed this header.
-    if type(client) not in (AsyncOpenAI, _ObservedOpenAI) or not isinstance(
+    if type(client) is not AsyncOpenAI or not isinstance(
         error, (APIStatusError, APIConnectionError)
     ):
         return

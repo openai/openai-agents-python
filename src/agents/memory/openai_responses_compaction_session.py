@@ -12,7 +12,6 @@ from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import clean_responses_input_item, get_default_openai_client
-from ..request_capture import _compact_submission, _http_exchange, _instrument_http, _ObservedOpenAI
 from ..run_internal.items import (
     ReasoningItemIdPolicy,
     apply_reasoning_item_id_policy,
@@ -195,9 +194,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
     def client(self) -> AsyncOpenAI:
         if self._client is None:
             default_client = get_default_openai_client()
-            self._client = default_client if default_client is not None else _ObservedOpenAI()
-            if default_client is None:
-                _instrument_http(getattr(self._client, "_client", None))
+            self._client = default_client if default_client is not None else AsyncOpenAI()
         return self._client
 
     def _resolve_compaction_mode_for_response(
@@ -485,13 +482,17 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         require_clean(compact_kwargs)
         with hook_payload_diagnostics("Session compaction failed.", redact_by_default=False):
-            client = self.client
-            with _http_exchange(_compact_submission(client) if is_automatic else None):
-                compacted = await client.responses.compact(**compact_kwargs)
+            compacted = await self.client.responses.compact(**compact_kwargs)
 
         compacted_usage = getattr(compacted, "usage", None)
-        if wrapper is not None and compacted_usage is not None:
-            wrapper.usage.add(_response_usage_to_usage(compacted_usage))
+        if wrapper is not None:
+            usage = (
+                _response_usage_to_usage(compacted_usage) if compacted_usage is not None else None
+            )
+            if wrapper._budget is not None:
+                wrapper._budget.observe(usage)
+            if usage is not None:
+                wrapper.usage.add(usage)
 
         output_items = redact_items(
             _strip_orphaned_assistant_ids(

@@ -6,11 +6,9 @@ import weakref
 from typing import Any
 
 import httpx2
-import openai
-from openai import DefaultAsyncHttpx2Client
+from openai import AsyncOpenAI, DefaultAsyncHttpx2Client
 
 from ..exceptions import UserError
-from ..request_capture import _instrument_http, _ObservedOpenAI as AsyncOpenAI
 from . import _openai_shared
 from .default_models import get_default_model
 from .interface import Model, ModelProvider
@@ -41,7 +39,6 @@ def shared_http_client() -> httpx2.AsyncClient:
     global _http_client
     if _http_client is None:
         _http_client = DefaultAsyncHttpx2Client()
-        _instrument_http(_http_client)
     return _http_client
 
 
@@ -52,7 +49,7 @@ class OpenAIProvider(ModelProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         websocket_base_url: str | None = None,
-        openai_client: openai.AsyncOpenAI | None = None,
+        openai_client: AsyncOpenAI | None = None,
         organization: str | None = None,
         project: str | None = None,
         use_responses: bool | None = None,
@@ -99,7 +96,7 @@ class OpenAIProvider(ModelProvider):
                     "Don't provide api_key, base_url, websocket_base_url, organization, or project "
                     "if you provide openai_client"
                 )
-            self._client: openai.AsyncOpenAI | None = openai_client
+            self._client: AsyncOpenAI | None = openai_client
         else:
             self._client = None
             self._stored_api_key = api_key
@@ -138,7 +135,7 @@ class OpenAIProvider(ModelProvider):
 
     # We lazy load the client in case you never actually use OpenAIProvider(). Otherwise
     # AsyncOpenAI() raises an error if you don't have an API key set.
-    def _get_client(self) -> openai.AsyncOpenAI:
+    def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             has_explicit_client_options = any(
                 value is not None
