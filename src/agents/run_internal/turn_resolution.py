@@ -16,6 +16,8 @@ from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputMessage,
+    ResponseOutputRefusal,
+    ResponseOutputText,
 )
 from openai.types.responses.response_code_interpreter_tool_call import (
     ResponseCodeInterpreterToolCall,
@@ -60,7 +62,7 @@ from .._tool_invocation import (
     tool_invocation_identity_and_scope,
     tool_output_identity,
 )
-from ..agent import Agent, ToolsToFinalOutputResult
+from ..agent import Agent, ProposedFinalOutput, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
     agent_tool_resume_checkpoint_owns_approval,
@@ -79,6 +81,7 @@ from ..exceptions import (
     _is_error_data_redacted,
     _is_tool_local_cancellation,
     _mark_error_data_redacted,
+    _mark_tool_local_cancellation,
 )
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
 from ..handoffs.history import (
@@ -254,16 +257,20 @@ def is_handoff_tool_call(output: Any, handoff_tool_names: Container[str]) -> boo
 
 async def _maybe_finalize_from_tool_results(
     *,
+    run_config: RunConfig,
+    current_turn: int,
     public_agent: Agent[TContext],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
     pre_step_items: list[RunItem],
     new_step_items: list[RunItem],
+    model_items: list[RunItem],
     function_results: list[FunctionToolResult],
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult | None:
     check_tool_use = await check_for_final_output_from_tools(
         public_agent, function_results, context_wrapper
@@ -287,6 +294,15 @@ async def _maybe_finalize_from_tool_results(
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
         final_output=redact_payload(check_tool_use.final_output),
+        on_tool_error_selected=on_tool_error_selected,
+        current_turn=current_turn,
+        kind="tool",
+        guarded_tool=_should_defer_interrupted_session_items(public_agent, run_config),
+        items=(
+            (*model_items, *(r.run_item for r in function_results if r.run_item is not None))
+            if public_agent.hooks is not None and public_agent.hooks.final_output_policy is not None
+            else None
+        ),
         hooks=hooks,
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,
@@ -433,6 +449,10 @@ async def execute_final_output_step(
 
 async def execute_final_output(
     *,
+    current_turn: int,
+    kind: Literal["text", "structured", "tool"] | None = None,
+    items: tuple[RunItem, ...] | None = None,
+    guarded_tool: bool = False,
     public_agent: Agent[Any],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
@@ -447,8 +467,60 @@ async def execute_final_output(
         [Agent[Any], RunHooks[Any], RunContextWrapper[Any], Any], Awaitable[None]
     ]
     | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
-    """Convenience wrapper to finalize a turn and run end hooks."""
+    """Resolve model candidates before running terminal hooks. Handler outputs bypass policy."""
+    policy = public_agent.hooks.final_output_policy if public_agent.hooks is not None else None
+    if policy is not None and kind is not None:
+        proposal = ProposedFinalOutput(
+            agent=public_agent,
+            turn=current_turn,
+            kind=kind,
+            output=final_output,
+            items=tuple(new_step_items) if items is None else items,
+            response_id=new_response.response_id,
+            request_id=new_response.request_id,
+        )
+
+        # Isolate even synchronous cancellation from cancellation of the owning run.
+        async def decide() -> Literal["continue", "finish"]:
+            value = policy(context_wrapper, proposal)
+            return await value if inspect.isawaitable(value) else value
+
+        def on_policy_failure(error: BaseException) -> None:
+            if isinstance(error, asyncio.CancelledError):
+                _mark_tool_local_cancellation(error)
+                if on_tool_error_selected is not None:
+                    on_tool_error_selected()
+
+        policy_error: BaseException | None = None
+        try:
+            require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
+            (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+            if decision == "continue":
+                require_clean_final_output(
+                    final_output, original_input, pre_step_items, new_step_items
+                )
+            if decision not in ("continue", "finish"):
+                raise UserError('Agent final_output_policy must return "continue" or "finish"')
+        except (Exception, asyncio.CancelledError) as exc:
+            if not guarded_tool:
+                raise
+            # Let the blocked-output path record the effect without its unchecked result.
+            policy_error = exc
+            decision = "continue"
+        if decision == "continue":
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
+                policy_error=policy_error,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
+
     return await execute_final_output_step(
         public_agent=public_agent,
         original_input=original_input,
@@ -993,6 +1065,7 @@ def _completed_tool_step_items(
 
 async def execute_tools_and_side_effects(
     *,
+    current_turn: int = 1,
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
     pre_step_items: list[RunItem],
@@ -1225,6 +1298,10 @@ async def execute_tools_and_side_effects(
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
         tool_final_output = await _maybe_finalize_from_tool_results(
+            run_config=run_config,
+            current_turn=current_turn,
+            on_tool_error_selected=on_tool_error_selected,
+            model_items=processed_response.new_items,
             public_agent=public_agent,
             original_input=original_input,
             new_response=new_response,
@@ -1249,8 +1326,14 @@ async def execute_tools_and_side_effects(
                 processed_response.tools_used or skipped_raw_item_ids
             )
             if not has_tool_activity_without_message:
-                if refusal:
-                    refusal_error = ModelRefusalError(refusal)
+                has_policy = (
+                    public_agent.hooks is not None
+                    and public_agent.hooks.final_output_policy is not None
+                )
+                # The extraction helpers collapse both empty and missing content to None.
+                parts = message_items[-1].raw_item.content if has_policy and message_items else ()
+                if refusal or any(isinstance(part, ResponseOutputRefusal) for part in parts):
+                    refusal_error = ModelRefusalError(refusal or "")
                     run_error_data = build_run_error_data(
                         input=original_input,
                         new_items=pre_step_items + new_step_items,
@@ -1275,6 +1358,7 @@ async def execute_tools_and_side_effects(
                         new_step_items.append(create_message_output_item(public_agent, output_text))
                         set_final_output_item(new_step_items[-1])
                     return await execute_final_output_call(
+                        current_turn=current_turn,
                         public_agent=public_agent,
                         original_input=original_input,
                         new_response=new_response,
@@ -1287,11 +1371,13 @@ async def execute_tools_and_side_effects(
                         tool_output_guardrail_results=tool_output_guardrail_results,
                     )
                 if output_schema is not None and not output_schema.is_plain_text():
+                    parsed = False
                     if potential_final_output_text:
                         validation_error: ModelBehaviorError | None = None
                         try:
                             final_output = output_schema.validate_json(potential_final_output_text)
                             set_final_output_item(message_items[-1])
+                            parsed = True
                         except ModelBehaviorError as error:
                             if _is_error_data_redacted(error):
                                 validation_error = error
@@ -1358,13 +1444,22 @@ async def execute_tools_and_side_effects(
                         new_response=new_response,
                         pre_step_items=pre_step_items,
                         new_step_items=new_step_items,
+                        on_tool_error_selected=on_tool_error_selected,
+                        current_turn=current_turn,
+                        kind="structured" if parsed else None,
                         final_output=final_output,
                         hooks=hooks,
                         context_wrapper=context_wrapper,
                         tool_input_guardrail_results=tool_input_guardrail_results,
                         tool_output_guardrail_results=tool_output_guardrail_results,
                     )
-                if output_schema is None or output_schema.is_plain_text():
+                if (output_schema is None or output_schema.is_plain_text()) and (
+                    not has_policy
+                    or any(
+                        isinstance(part, ResponseOutputText) and isinstance(part.text, str)
+                        for part in parts
+                    )
+                ):
                     set_final_output_item(message_items[-1] if message_items else None)
                     return await execute_final_output_call(
                         public_agent=public_agent,
@@ -1372,6 +1467,9 @@ async def execute_tools_and_side_effects(
                         new_response=new_response,
                         pre_step_items=pre_step_items,
                         new_step_items=new_step_items,
+                        on_tool_error_selected=on_tool_error_selected,
+                        current_turn=current_turn,
+                        kind="text",
                         final_output=potential_final_output_text or "",
                         hooks=hooks,
                         context_wrapper=context_wrapper,
@@ -1379,8 +1477,9 @@ async def execute_tools_and_side_effects(
                         tool_output_guardrail_results=tool_output_guardrail_results,
                     )
 
-    except Exception:
-        _publish_completed_tools()
+    except (Exception, asyncio.CancelledError) as error:
+        if not isinstance(error, asyncio.CancelledError) or _is_tool_local_cancellation(error):
+            _publish_completed_tools()
         raise
 
     return SingleStepResult(
@@ -1442,6 +1541,7 @@ async def resolve_interrupted_turn(
     error_handlers: RunErrorHandlers[TContext] | None = None,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
     agent_span: Span[AgentSpanData] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
@@ -1518,6 +1618,8 @@ async def resolve_interrupted_turn(
         and not processed_response.has_tools_or_approvals_to_run()
     ):
         return await execute_tools_and_side_effects(
+            on_tool_error_selected=on_tool_error_selected,
+            current_turn=run_state._current_turn if run_state is not None else 1,
             bindings=bindings,
             original_input=original_input,
             pre_step_items=original_pre_step_items,
@@ -3191,6 +3293,10 @@ async def resolve_interrupted_turn(
             )
 
     tool_final_output = await _maybe_finalize_from_tool_results(
+        run_config=run_config,
+        current_turn=run_state._current_turn if run_state is not None else 1,
+        on_tool_error_selected=on_tool_error_selected,
+        model_items=processed_response.new_items,
         public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
@@ -4174,6 +4280,7 @@ def _snapshot_function_calls(items: list[TResponseOutputItem]) -> list[TResponse
 
 async def get_single_step_result_from_response(
     *,
+    current_turn: int,
     bindings: AgentBindings[TContext],
     all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
@@ -4286,6 +4393,7 @@ async def get_single_step_result_from_response(
     tool_use_tracker.record_processed_response(item_agent, processed_response)
 
     return await execute_tools_and_side_effects(
+        current_turn=current_turn,
         bindings=bindings,
         original_input=original_input,
         pre_step_items=pre_step_items,
