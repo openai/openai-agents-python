@@ -19,6 +19,23 @@ To cancel without approving the call, close the window. To test without a displa
 uv run pytest -q tests/mcp/test_account_picker_example.py
 ```
 
+To script a choice without Tk, run this from the repository root in a Python environment with the repository dependencies.
+
+```python
+import asyncio
+
+from examples.mcp.account_picker.main import demo_server, run_selection
+
+
+async def main():
+    async with demo_server() as server:
+        result = await run_selection(server, "Demo", lambda picker: (picker, "Savings"))
+        assert result is not None and result.final_output == "Savings"
+
+
+asyncio.run(main())
+```
+
 ## Resource discovery and reads
 
 - **[Source](server.py)** — One fixed demo user on a private stdio connection. One plain-text resource with a permitted alias on each line.
@@ -29,11 +46,11 @@ uv run pytest -q tests/mcp/test_account_picker_example.py
 
 1. **Pause.** Use a scripted agent to call `choose_account` with no arguments. Require SDK approval before execution.
 2. **Render.** Create a fresh `Picker` for the conversation and interrupted call ID. Show only preapproved labels in the application's read-only Tk dropdown. Never accept free text or account numbers.
-3. **Submit.** Handle **Use account** in the app. Accept the exact request object once. Expire the callback on leaving the dialog, even after cancellation.
+3. **Choose.** Return the original picker and one listed alias, or `None` to cancel. A picker from another run is invalid even if both IDs match.
 4. **Resume.** Approve only that interruption and resume its in-memory run state. In the tool, check the call ID. Ask the source to confirm the alias against current grants, even after a successful read. Return only the confirmed alias.
 
 ## Limits
 
 - **Trust** — Bundled source and local application only. For multiple users, authenticate each user at the source. Check access on every read and selection. Keep real account numbers out of tool output and logs.
-- **Lifetime** — One process and a blocking desktop dialog. No cross-process callbacks or durable approvals.
+- **Lifetime** — One process and a blocking desktop dialog. No durable approvals.
 - **MCP Apps** — Raw resource reads only. No HTML or JavaScript rendering, iframe sandbox, host messaging, or automatic widget discovery. Example-specific metadata key and label format.

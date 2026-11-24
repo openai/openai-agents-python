@@ -1,41 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from mcp.types import ListResourcesResult, ReadResourceResult, Resource
 
 from agents import UserError
-from examples.mcp.account_picker.main import Picker, Submit, demo_server, run_selection
+from examples.mcp.account_picker.main import Picker, demo_server, run_selection
 
 
 @pytest.mark.asyncio
 async def test_resume_only_the_current_request() -> None:
-    cancelled: list[tuple[Picker, Submit]] = []
+    cancelled: list[Picker] = []
 
-    def close(picker: Picker, submit: Submit) -> None:
-        cancelled.append((picker, submit))
-
-    def choose(picker: Picker, submit: Submit) -> None:
+    def choose(picker: Picker) -> tuple[Picker, str]:
         assert str(picker.resource.uri) == "accounts://demo/picker"
         assert picker.resource.meta == {"example.com/widget": "account-picker"}
         assert picker.choices == ("Everyday", "Savings")
-        old, expired_submit = cancelled[0]
+        old = cancelled[0]
         assert old.call_id == picker.call_id and old.conversation == picker.conversation
-        with pytest.raises(ValueError):
-            expired_submit(old, "Savings")
-        for wrong in (old, replace(picker, conversation="Other"), replace(picker, call_id="other")):
-            with pytest.raises(ValueError):
-                submit(wrong, "Everyday")
-        with pytest.raises(PermissionError):
-            submit(picker, "Shared")
-        submit(picker, "Savings")
-        with pytest.raises(ValueError):
-            submit(picker, "Everyday")
+        return picker, "Savings"
 
     async with demo_server() as server:
-        assert await run_selection(server, "Demo", close) is None
+        assert await run_selection(server, "Demo", cancelled.append) is None
+        with pytest.raises(ValueError, match="No matching pending request"):
+            await run_selection(server, "Demo", lambda picker: (cancelled[0], "Savings"))
         result = await run_selection(server, "Demo", choose)
 
     assert result is not None and result.final_output == "Savings"
@@ -53,6 +43,26 @@ async def test_resume_only_the_current_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_choices_never_reach_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with demo_server() as server:
+        confirm = AsyncMock(wraps=server.call_tool)
+        monkeypatch.setattr(server, "call_tool", confirm)
+        for show in (
+            lambda p: (replace(p, conversation="Other"), "Savings"),
+            lambda p: (replace(p, call_id="other"), "Savings"),
+            lambda p: ((p, "Savings"), (p, "Everyday")),
+            lambda p: [p, "Savings"],
+            lambda p: (p,),
+        ):
+            with pytest.raises(ValueError):
+                await run_selection(server, "Demo", Mock(side_effect=show))
+        for alias in (None, "", "Shared"):
+            with pytest.raises(PermissionError, match="Account unavailable"):
+                await run_selection(server, "Demo", Mock(side_effect=lambda p, a=alias: (p, a)))
+        confirm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reads_only_the_picker_on_a_mixed_page(monkeypatch: pytest.MonkeyPatch) -> None:
     async with demo_server() as server:
         listing = await server.list_resources()
@@ -62,16 +72,14 @@ async def test_reads_only_the_picker_on_a_mixed_page(monkeypatch: pytest.MonkeyP
         monkeypatch.setattr(server, "list_resources", AsyncMock(return_value=listing))
         monkeypatch.setattr(server, "read_resource", read)
 
-        result = await run_selection(
-            server, "Demo", lambda picker, submit: submit(picker, "Savings")
-        )
+        result = await run_selection(server, "Demo", lambda picker: (picker, "Savings"))
         assert result is not None and result.final_output == "Savings"
         read.assert_awaited_once_with("accounts://demo/picker")
 
 
 @pytest.mark.asyncio
 async def test_resource_is_neither_code_nor_authority(monkeypatch: pytest.MonkeyPatch) -> None:
-    def never_show(picker: Picker, submit: Submit) -> None:
+    def never_show(picker: Picker) -> None:
         pytest.fail("Unexpected resource reached the UI")
 
     async with demo_server() as server:
@@ -115,4 +123,4 @@ async def test_resource_is_neither_code_nor_authority(monkeypatch: pytest.Monkey
 
         read.return_value = contents("Shared")
         with pytest.raises(UserError, match="Account unavailable"):
-            await run_selection(server, "Demo", lambda picker, submit: submit(picker, "Shared"))
+            await run_selection(server, "Demo", lambda picker: (picker, "Shared"))

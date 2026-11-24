@@ -29,9 +29,6 @@ class Picker:
     choices: tuple[str, ...]
 
 
-Submit = Callable[[Picker, str], None]
-
-
 async def load_picker(server: MCPServer, conversation: str, call_id: str) -> Picker:
     # Use wire names for fields whose Python names differ between MCP versions.
     listing = await server.list_resources()
@@ -58,10 +55,11 @@ async def load_picker(server: MCPServer, conversation: str, call_id: str) -> Pic
     return Picker(conversation, call_id, resource, choices)
 
 
-def show_picker(picker: Picker, submit: Submit) -> None:
+def show_picker(picker: Picker) -> tuple[Picker, str] | None:
     import tkinter as tk
     from tkinter import ttk
 
+    choice = None
     window = tk.Tk()
     try:
         window.title("Choose a demo account")
@@ -74,7 +72,8 @@ def show_picker(picker: Picker, submit: Submit) -> None:
         accounts.focus_set()
 
         def confirm() -> None:
-            submit(picker, accounts.get())
+            nonlocal choice
+            choice = (picker, accounts.get())
             window.quit()
 
         button = ttk.Button(frame, text="Use account", command=confirm, state="disabled")
@@ -82,6 +81,7 @@ def show_picker(picker: Picker, submit: Submit) -> None:
         accounts.bind("<<ComboboxSelected>>", lambda _: button.state(["!disabled"]))
         window.protocol("WM_DELETE_WINDOW", window.quit)
         window.mainloop()
+        return choice
     finally:
         window.destroy()
 
@@ -89,7 +89,7 @@ def show_picker(picker: Picker, submit: Submit) -> None:
 async def run_selection(
     server: MCPServer,
     conversation: str,
-    show: Callable[[Picker, Submit], None] = show_picker,
+    show: Callable[[Picker], tuple[Picker, str] | None] = show_picker,
 ) -> RunResult | None:
     selected: str | None = None
 
@@ -120,23 +120,18 @@ async def run_selection(
     if call.name != choose_account.name or not call.call_id:
         raise ValueError("Unexpected tool call")
     picker = await load_picker(server, conversation, call.call_id)
-    active = True
-
-    def submit(request: Picker, alias: str) -> None:
-        nonlocal selected
-        # Object identity binds the event even if a later run reuses both IDs.
-        if not active or request is not picker or selected is not None:
-            raise ValueError("No matching pending request")
-        if alias not in picker.choices:
-            raise PermissionError("Account unavailable")
-        selected = alias
-
-    try:
-        show(picker, submit)
-    finally:
-        active = False
-    if selected is None:
+    choice = show(picker)
+    if choice is None:
         return None
+    if type(choice) is not tuple or len(choice) != 2:
+        raise ValueError("Expected one picker and account alias")
+    request, alias = choice
+    # A later run may reuse both the conversation and call ID.
+    if request is not picker:
+        raise ValueError("No matching pending request")
+    if type(alias) is not str or not alias or alias not in picker.choices:
+        raise PermissionError("Account unavailable")
+    selected = alias
 
     state = paused.to_state()
     state.approve(call)

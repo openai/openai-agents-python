@@ -12,5 +12,6 @@ These examples connect agents to Model Context Protocol servers. Follow the [exa
 | Use Streamable HTTP | [Local server](streamablehttp_example/README.md), [remote server](streamable_http_remote_example/README.md), and [custom client](streamablehttp_custom_client_example/README.md) | See each README for dependencies and endpoints. |
 | Load MCP prompts | [Prompt server](prompt_server/README.md) | Local development environment. |
 | Manage connections in FastAPI | [MCP manager](manager_example/README.md) | FastAPI dependency; offline smoke test available. |
+| Choose an account before approving a tool call | [Account picker](account_picker/README.md) | Offline demo. Tk for the desktop picker. |
 
 The tool-filtering example automatically approves interruptions. The tool-prefetch example asks for approval interactively and defaults to approval in suite auto mode. The Git server exposes its tools to the model; use a disposable repository when testing possible changes.
