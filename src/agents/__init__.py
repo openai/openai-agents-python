@@ -116,6 +116,7 @@ from .retry import (
 )
 from .run import (
     NativeMCPResult,
+    NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -505,6 +506,7 @@ __all__ = [
     "ToolCallHookContext",
     "ToolDeclaration",
     "NativeMCPResult",
+    "NativeMCPResultTransform",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",

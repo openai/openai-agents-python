@@ -171,6 +171,23 @@ class NativeMCPResult(_NativeMCPContent, total=False):
     _meta: dict[str, Any] | None
 
 
+@dataclass(frozen=True, kw_only=True)
+class NativeMCPResultTransform:
+    """Edit the whole result of one tool on a configured native Codex MCP server."""
+
+    server_name: str
+    tool_name: str
+    edit: Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]]
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(name, str) and name.strip() for name in (self.server_name, self.tool_name)
+        ):
+            raise ValueError("Native MCP server_name and tool_name must be nonblank strings.")
+        if not callable(self.edit):
+            raise ValueError("Native MCP edit must be callable.")
+
+
 @dataclass(frozen=True)
 class ToolDeclaration:
     """Resolved function name, original description and optional namespace and raw MCP names."""
@@ -191,12 +208,12 @@ class ToolExecutionConfig:
     return the original result or replacement text for the model. API-hosted tools
     execute outside the client hook lifecycle.
 
-    For native Codex MCP tools, use `native_mcp_result_transforms` with
-    `(("catalog", "lookup"), edit_result)`. Select the server by name and use the
-    raw tool name. The async editor replaces the whole result, including structured
-    content and media.
-
     Supply the same callbacks when resuming a run in another process.
+
+    For configured native Codex MCP servers, use `native_mcp_result_transforms` with
+    `NativeMCPResultTransform(server_name="catalog", tool_name="lookup", edit=edit_result)`.
+    Both names are raw. The async editor replaces the whole result, including structured
+    content and media.
     """
 
     max_function_tool_concurrency: int | None = None
@@ -291,19 +308,18 @@ class ToolExecutionConfig:
     With input or output preparation, the Codex provider disables native workspace tools.
     """
 
-    native_mcp_result_transforms: Sequence[
-        tuple[
-            tuple[str, str],
-            Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]],
-        ]
-    ] = field(default=(), kw_only=True)
+    native_mcp_result_transforms: Sequence[NativeMCPResultTransform] = field(
+        default=(), kw_only=True
+    )
     """Experimental. Edit whole results from selected native MCP tools.
 
-    Register one async editor per exact (Codex server name, raw tool name) pair.
-    Both names are strings. Runner MCP text-only edits use the server object.
+    Register one async editor per configured native Codex MCP server and tool.
+    Use the exact raw names of both. This option does not select tools on `agent.mcp_servers`.
 
     ```python
-    from agents import NativeMCPResult, ToolCallHookContext, ToolExecutionConfig
+    from agents import (
+        NativeMCPResult, NativeMCPResultTransform, ToolCallHookContext, ToolExecutionConfig,
+    )
 
     async def edit_result(
         call: ToolCallHookContext[object], result: NativeMCPResult
@@ -311,8 +327,9 @@ class ToolExecutionConfig:
         text = "Lookup failed." if result.get("isError") else "Lookup completed."
         return {"content": [{"type": "text", "text": text}]}
 
-    target = ("catalog", "lookup")
-    settings = ToolExecutionConfig(native_mcp_result_transforms=[(target, edit_result)])
+    settings = ToolExecutionConfig(native_mcp_result_transforms=[
+        NativeMCPResultTransform(server_name="catalog", tool_name="lookup", edit=edit_result),
+    ])
     ```
 
     This example discards all media and structured data. Before the first model request
@@ -346,30 +363,24 @@ class ToolExecutionConfig:
     ]:
         entries = self.native_mcp_result_transforms
         if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
-            raise ValueError("native_mcp_result_transforms requires a sequence of pairs.")
+            raise ValueError(
+                "native_mcp_result_transforms requires a sequence of NativeMCPResultTransform."
+            )
         editors = {}
         for entry in entries:
-            if not isinstance(entry, tuple) or len(entry) != 2:
+            if not isinstance(entry, NativeMCPResultTransform):
                 raise ValueError(
-                    "Each native_mcp_result_transforms entry requires a target and editor."
+                    "Each native_mcp_result_transforms entry must be a NativeMCPResultTransform."
                 )
-            target, editor = entry
-            if (
-                not isinstance(target, tuple)
-                or len(target) != 2
-                or not all(isinstance(name, str) and name.strip() for name in target)
-            ):
-                raise ValueError(
-                    "Use the exact native MCP (server name, raw tool name), "
-                    "both nonblank strings. Use the server object for Runner MCP text edits."
-                )
-            if target in editors or not callable(editor):
-                raise ValueError("Each native MCP target requires exactly one callable editor.")
-            editors[target] = editor
+            target = (entry.server_name, entry.tool_name)
+            if target in editors:
+                raise ValueError("Duplicate native MCP result transform target.")
+            editors[target] = entry.edit
         return editors
 
     def __post_init__(self) -> None:
-        self.native_mcp_result_transforms = tuple(self._native_mcp_editors().items())
+        self._native_mcp_editors()
+        self.native_mcp_result_transforms = tuple(self.native_mcp_result_transforms)
         if self.max_function_tool_concurrency is not None and (
             self.max_function_tool_concurrency < 1
         ):

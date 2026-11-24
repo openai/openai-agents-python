@@ -15,7 +15,15 @@ from threading import Thread
 import pytest
 from openai import AsyncOpenAI
 
-from agents import Agent, NativeTool, RunConfig, RunHooks, Runner, ToolExecutionConfig
+from agents import (
+    Agent,
+    NativeMCPResultTransform,
+    NativeTool,
+    RunConfig,
+    RunHooks,
+    Runner,
+    ToolExecutionConfig,
+)
 from agents.mcp import MCPServerStdio
 from agents.mcp._compat import result_is_error
 from agents.models._codex_hook_relay import serve_hook
@@ -493,6 +501,10 @@ async def test_native_hook_endpoint_rejects_untrusted_calls(hook_executable):
 
 
 def test_native_mcp_result_registrations():
+    from dataclasses import FrozenInstanceError
+
+    from pydantic import TypeAdapter
+
     from agents import NativeMCPResult, ToolCallHookContext
 
     assert NativeMCPResult.__required_keys__ == {"content"}
@@ -501,29 +513,36 @@ def test_native_mcp_result_registrations():
     async def edit(call: ToolCallHookContext[object], result: NativeMCPResult) -> NativeMCPResult:
         return result
 
-    pair = (("raw-peer", "lookup"), edit)
-    pairs = [pair]
-    config = ToolExecutionConfig(native_mcp_result_transforms=pairs)
-    pairs.clear()
-    assert config.native_mcp_result_transforms == (pair,)
+    entry = NativeMCPResultTransform(server_name="raw-peer", tool_name="lookup", edit=edit)
+    entries = [entry]
+    config = ToolExecutionConfig(native_mcp_result_transforms=entries)
+    entries.clear()
+    assert config.native_mcp_result_transforms == (entry,)
     assert ToolExecutionConfig().native_mcp_result_transforms == ()
-    server = MCPServerStdio(name="private-peer", params={"command": sys.executable})
-    wrong_route = ((server, "private-tool"), edit)
-    with pytest.raises(ValueError) as exc:
-        ToolExecutionConfig(native_mcp_result_transforms=[wrong_route])  # type: ignore[list-item]
-    assert str(exc.value) == (
-        "Use the exact native MCP (server name, raw tool name), both nonblank strings. "
-        "Use the server object for Runner MCP text edits."
+    with pytest.raises(FrozenInstanceError):
+        entry.tool_name = "other"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        NativeMCPResultTransform("raw-peer", "lookup", edit)  # type: ignore[misc]
+    adapted = TypeAdapter(ToolExecutionConfig).validate_python(
+        {
+            "native_mcp_result_transforms": [
+                {"server_name": "raw-peer", "tool_name": "lookup", "edit": edit}
+            ]
+        }
     )
-    for invalid in (
-        {},
-        [pair, pair],
-        [(("peer", ""), edit)],
-        [("lookup", edit)],
-        [(pair[0], None)],
-    ):
+    assert adapted.native_mcp_result_transforms == (entry,)
+    for invalid in ({}, [entry, entry], [(("raw-peer", "lookup"), edit)]):
         with pytest.raises(ValueError, match="native"):
             ToolExecutionConfig(native_mcp_result_transforms=invalid)  # type: ignore[arg-type]
+    server = MCPServerStdio(name="private-peer", params={"command": sys.executable})
+    for values in (
+        {"server_name": server, "tool_name": "private-tool", "edit": edit},
+        {"server_name": "private-peer", "tool_name": " ", "edit": edit},
+        {"server_name": "private-peer", "tool_name": "private-tool", "edit": None},
+    ):
+        with pytest.raises(ValueError, match="Native MCP") as exc:
+            NativeMCPResultTransform(**values)  # type: ignore[arg-type]
+        assert "private-" not in str(exc.value)
 
 
 @pytest.mark.asyncio
@@ -601,7 +620,9 @@ async def test_native_mcp_parallel_editors(tmp_path, model_endpoint, monkeypatch
         model_provider=provider,
         tracing_disabled=True,
         tool_execution=ToolExecutionConfig(
-            native_mcp_result_transforms=[(("peer", "lookup"), selected)],
+            native_mcp_result_transforms=[
+                NativeMCPResultTransform(server_name="peer", tool_name="lookup", edit=selected)
+            ],
             prepare_tool_output=ordinary,
         ),
     )
@@ -826,7 +847,7 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
     async def legacy(call, result):
         pytest.fail("Neither a selected call nor a rejected duplicate should reach this hook")
 
-    target = {
+    server_name, tool_name = {
         "unselected": ("raw-peer", "other"),
         "missing_server": ("raw_peer", "lookup"),
         "missing_tool": ("raw-peer", "old_name"),
@@ -838,7 +859,11 @@ async def test_native_mcp_result_before_publication(tmp_path, model_endpoint, mo
         tracing={"operation_detail": "content"},
         trace_include_sensitive_data=True,
         tool_execution=ToolExecutionConfig(
-            native_mcp_result_transforms=[(target, transform)],
+            native_mcp_result_transforms=[
+                NativeMCPResultTransform(
+                    server_name=server_name, tool_name=tool_name, edit=transform
+                )
+            ],
             prepare_tool_input=before if changed_input else None,
             prepare_tool_output=legacy if mode in ("replace", "reused_id") else None,
         ),
