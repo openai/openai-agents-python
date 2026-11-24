@@ -74,6 +74,7 @@ from .util import (
     ToolFilter,
     ToolFilterContext,
     ToolFilterStatic,
+    _FilteredTools,
 )
 
 
@@ -678,19 +679,18 @@ class MCPServer(abc.ABC):
         pass
 
     async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
-        """List the resources available on the server.
+        """List one page of resources.
 
-        Args:
-            cursor: An opaque pagination cursor returned in a previous
-                :class:`~mcp.types.ListResourcesResult` as ``next_cursor`` under
-                MCP v2 or ``nextCursor`` under MCP v1.  Pass it here to fetch the
-                next page of results.  ``None`` fetches the first page.
+        Pass ``cursor=None`` for the first page. On the returned
+        :class:`~mcp.types.ListResourcesResult`, check ``next_cursor`` (MCP v2)
+        or ``nextCursor`` (MCP v1). If it is not ``None``, pass it as ``cursor``
+        to fetch the next page, even if this page is empty.
 
-        Returns a :class:`~mcp.types.ListResourcesResult`.  When the result contains
-        a ``next_cursor`` field under MCP v2 or ``nextCursor`` under MCP v1, call
-        this method again with that cursor to retrieve the next page.  Subclasses
-        that do not support resources may leave this unimplemented; it will raise
-        :exc:`NotImplementedError` at call time.
+        An empty page alone does not establish whether the server supports resources.
+        Connected built-in clients return an empty page with no next cursor if the
+        negotiated capabilities omit ``resources``. If capabilities are unknown or
+        the server advertises ``resources``, the client requests the page normally.
+        Subclasses that inherit the base implementation raise :exc:`NotImplementedError`.
         """
         raise NotImplementedError(
             f"MCP server '{self._error_name}' does not support list_resources. "
@@ -700,19 +700,18 @@ class MCPServer(abc.ABC):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        """List the resource templates available on the server.
+        """List one page of resource templates.
 
-        Args:
-            cursor: An opaque pagination cursor returned in a previous
-                :class:`~mcp.types.ListResourceTemplatesResult` as ``next_cursor``
-                under MCP v2 or ``nextCursor`` under MCP v1.  Pass it here to fetch
-                the next page of results.  ``None`` fetches the first page.
+        Pass ``cursor=None`` for the first page. On the returned
+        :class:`~mcp.types.ListResourceTemplatesResult`, check ``next_cursor`` (MCP v2)
+        or ``nextCursor`` (MCP v1). If it is not ``None``, pass it as ``cursor``
+        to fetch the next page, even if this page is empty.
 
-        Returns a :class:`~mcp.types.ListResourceTemplatesResult`.  When the result
-        contains a ``next_cursor`` field under MCP v2 or ``nextCursor`` under MCP
-        v1, call this method again with that cursor to retrieve the next page.
-        Subclasses that do not support resource templates may leave this
-        unimplemented; it will raise :exc:`NotImplementedError` at call time.
+        An empty page alone does not establish whether the server supports resources.
+        Connected built-in clients return an empty page with no next cursor if the
+        negotiated capabilities omit ``resources``. If capabilities are unknown or
+        the server advertises ``resources``, the client requests the page normally.
+        Subclasses that inherit the base implementation raise :exc:`NotImplementedError`.
         """
         raise NotImplementedError(
             f"MCP server '{self._error_name}' does not support list_resource_templates. "
@@ -1561,14 +1560,12 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
                     self._cache_dirty = False
                     self._tools_last_published_refresh_sequence = refresh_sequence
 
-            # Filter tools based on tool_filter
-            filtered_tools = tools
+            # Snapshot even filtered schemas to isolate callers from the cache.
             if self.tool_filter is not None:
-                filtered_tools = await self._apply_tool_filter(filtered_tools, run_context, agent)
-            # Always deep-copy tools. Even when filters build a new list, the Tool
-            # objects (and nested input schemas) would otherwise remain shared with
-            # the cache and let callers corrupt required-parameter validation.
-            return _snapshot_tools(filtered_tools)
+                names = frozenset(tool.name for tool in tools)
+                filtered_tools = await self._apply_tool_filter(tools, run_context, agent)
+                return _FilteredTools(_snapshot_tools(filtered_tools), names)
+            return _snapshot_tools(tools)
         except mcp_compat.HTTP_STATUS_ERROR_TYPES as e:
             status_code = http_status_code(e)
             transport_error = UserError(
@@ -1767,11 +1764,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         )
 
     async def list_resources(self, cursor: str | None = None) -> ListResourcesResult:
-        """List the resources available on the server."""
+        """List resources, returning an empty page if the peer omitted the capability."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
+        if mcp_compat.resources_not_advertised(session):
+            return ListResourcesResult(resources=[])
         return await self._run_request_with_transport_error_redaction(
             "list resources",
             lambda: self._maybe_serialize_request(
@@ -1790,11 +1789,13 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
     async def list_resource_templates(
         self, cursor: str | None = None
     ) -> ListResourceTemplatesResult:
-        """List the resource templates available on the server."""
+        """List templates, returning an empty page if the peer omitted resource support."""
         if not self.session:
             raise UserError("Server not initialized. Make sure you call `connect()` first.")
         session = self.session
         assert session is not None
+        if mcp_compat.resources_not_advertised(session):
+            return ListResourceTemplatesResult.model_validate({"resourceTemplates": []})
         return await self._run_request_with_transport_error_redaction(
             "list resource templates",
             lambda: self._maybe_serialize_request(

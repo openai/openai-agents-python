@@ -7,7 +7,7 @@ uv run python examples/tools/web_search.py
 ```
 
 Hosted examples make live API calls and may incur charges.
-Check [hosted tool compatibility](hosted_tool_compatibility.md) before running these examples.
+Check [provider support for file search, Code Interpreter, image generation and hosted shell](hosted_tool_compatibility.md).
 
 | Task | Examples | Setup or effects |
 | --- | --- | --- |

@@ -130,6 +130,12 @@ def resource_uri(uri: str) -> str | AnyUrl:
     return uri if MCP_V2 else AnyUrl(uri)
 
 
+def resources_not_advertised(session: Any) -> bool:
+    """Check the live handshake, including MCP v2 discovery without initialization."""
+    capabilities = session.server_capabilities if MCP_V2 else session.get_server_capabilities()
+    return capabilities is not None and capabilities.resources is None
+
+
 def mcp_error_code(error: BaseException) -> int | None:
     if not isinstance(error, MCPError):
         return None

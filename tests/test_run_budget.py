@@ -24,6 +24,7 @@ from agents import (
     RunConfig,
     Runner,
     RunState,
+    ToolExecutionConfig,
     Usage,
     UserError,
     input_guardrail,
@@ -415,7 +416,8 @@ async def test_child_budget_requires_supported_schema_on_child_and_parent():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [False, True])
-async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(approved):
+@pytest.mark.parametrize("policy", ["budget", "editor", "both"])
+async def test_required_grandchild_checks_grant_before_restore_and_resume(approved, policy):
     effects = []
 
     @tool(needs_approval=True)
@@ -428,11 +430,25 @@ async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(ap
 
     leaf_model = model(get_function_tool_call("record", call_id="leaf"))
     leaf = Agent(name="leaf", tools=[record], model=leaf_model)
-    config = RunConfig(budget=RunBudget(max_model_calls=2), tracing_disabled=True)
+
+    async def edit(call, texts):
+        effects.append("edit")
+        return ("edited",)
+
+    config = RunConfig(
+        budget=RunBudget(max_model_calls=2) if policy != "editor" else None,
+        tool_execution=ToolExecutionConfig(tool_text_transforms=[(record, edit)])
+        if policy != "budget"
+        else None,
+        tracing_disabled=True,
+    )
     allowed = True
+    grants = []
 
     async def grant(ctx, agent):
         assert agent.name == "middle"
+        if store.checkpoint(session.session_id)["status"] == "paused":
+            grants.append(ctx.context["allowed"])
         return allowed and ctx.context["allowed"]
 
     inner = leaf.as_tool("inner", "Delegate", run_config=config, is_enabled=grant)
@@ -482,13 +498,20 @@ async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(ap
         pending.approve(item)
     for enabled, context in [(True, None), (False, {"allowed": True}), (True, {"allowed": False})]:
         allowed = enabled
-        with pytest.raises(UserError, match="RunBudget"):
+        grants.clear()
+        saved_checkpoint = store.records[session.session_id]
+        with pytest.raises(UserError, match="text editor" if policy == "editor" else "RunBudget"):
             await run(root, None, approved, pending, context=context)
-        assert store.checkpoint(session.session_id)["status"] == "paused"
+        assert grants == [bool(context and context["allowed"])]
+        assert store.records[session.session_id] == saved_checkpoint
         assert not effects
         assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 1
+    grants.clear()
     result = await run(root, None, approved, pending, context={"allowed": True})
-    assert result.final_output == "done" and effects == ["record", "record"]
+    assert grants == [True]
+    assert result.final_output == "done"
+    expected = ["record", "record"] if policy == "budget" else ["edit", "record", "record"]
+    assert sorted(effects) == expected
     assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 2
 
 

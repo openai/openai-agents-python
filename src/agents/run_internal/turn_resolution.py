@@ -62,7 +62,7 @@ from .._tool_invocation import (
     tool_invocation_identity_and_scope,
     tool_output_identity,
 )
-from ..agent import Agent, ProposedFinalOutput, ToolsToFinalOutputResult
+from ..agent import Agent, ContinueWithFeedback, ProposedFinalOutput, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
     agent_tool_resume_checkpoint_owns_approval,
@@ -227,6 +227,7 @@ from .tool_planning import (
     _select_function_tool_runs_for_resume,
     _validate_unresolved_function_calls,
 )
+from .tool_text import bind_text_transform
 from .turn_preparation import get_handoffs, get_output_schema
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
@@ -483,9 +484,12 @@ async def execute_final_output(
         )
 
         # Isolate even synchronous cancellation from cancellation of the owning run.
-        async def decide() -> Literal["continue", "finish"]:
-            value = policy(context_wrapper, proposal)
-            return await value if inspect.isawaitable(value) else value
+        async def decide() -> Literal["continue", "finish"] | ContinueWithFeedback:
+            from ..decisions import _bind_decisions
+
+            async with _bind_decisions(proposal, public_agent):
+                value = policy(context_wrapper, proposal)
+                return await value if inspect.isawaitable(value) else value
 
         def on_policy_failure(error: BaseException) -> None:
             if isinstance(error, asyncio.CancelledError):
@@ -493,16 +497,24 @@ async def execute_final_output(
                 if on_tool_error_selected is not None:
                     on_tool_error_selected()
 
+        feedback: str | None = None
         policy_error: BaseException | None = None
         try:
             require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
             (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+            if isinstance(decision, ContinueWithFeedback):
+                if not isinstance(decision.message, str) or not decision.message.strip():
+                    raise UserError("ContinueWithFeedback requires a nonblank message")
+                feedback = decision.message
+                decision = "continue"
             if decision == "continue":
                 require_clean_final_output(
                     final_output, original_input, pre_step_items, new_step_items
                 )
             if decision not in ("continue", "finish"):
-                raise UserError('Agent final_output_policy must return "continue" or "finish"')
+                raise UserError(
+                    'final_output_policy must return "continue", "finish" or ContinueWithFeedback'
+                )
         except (Exception, asyncio.CancelledError) as exc:
             if not guarded_tool:
                 raise
@@ -517,6 +529,7 @@ async def execute_final_output(
                 new_step_items=new_step_items,
                 next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
                 policy_error=policy_error,
+                feedback=feedback,
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
@@ -708,6 +721,7 @@ async def execute_handoffs(
                 raise
             # A failed invocation is not a transfer. Do not run transfer hooks or filters.
             span_handoff.set_error(SpanError(message="Handoff invocation failed", data={}))
+            _detach_data_redacted_error_traceback(error)
             error_output = handoff.failure_error_function(context_wrapper, error)
             if inspect.isawaitable(error_output):
                 error_output = await error_output
@@ -750,6 +764,9 @@ async def execute_handoffs(
             source_agent=public_agent,
             target_agent=new_agent,
         )
+        from ..decisions import _record_transfer
+
+        _record_transfer(context_wrapper, public_agent, new_agent, handoff)
         new_step_items.append(handoff_output)
         if handoff_output_committer is not None:
             _register_tool_call_items(context_wrapper, [handoff_output])
@@ -2650,6 +2667,13 @@ async def resolve_interrupted_turn(
             if approval_record is not None
             else True
         )
+        if approval_status is not False:
+            queued = current_functions.get(call_id)
+            bind_text_transform(
+                run_config.tool_execution,
+                queued.function_tool if queued else None,
+                context_wrapper._tool_invocations.get(call_id),
+            )
         stale_function = stale_functions.get(call_id)
         original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
@@ -4383,6 +4407,14 @@ async def get_single_step_result_from_response(
         bind_declarations(prepared_tools, processed_response, context_wrapper, run_config)
     for call_id, rewrite in new_bindings.items():
         context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
+
+    if settings is not None and settings.tool_text_transforms:
+        for action in processed_response.functions:
+            bind_text_transform(
+                settings,
+                action.function_tool,
+                context_wrapper._tool_invocations.get(action.tool_call.call_id),
+            )
 
     if after_invocation_validation is not None:
         await after_invocation_validation(processed_response)

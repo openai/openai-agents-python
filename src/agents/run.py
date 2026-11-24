@@ -19,6 +19,7 @@ from ._redaction import (
 )
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
+from .decisions import _DecisionRun
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -54,12 +55,17 @@ from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .models._run_context import ModelToolHooks
 from .result import RunResult, RunResultStreaming
-from .run_budget import _check_resume, _prepare_budget
+from .run_budget import _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
     CallModelInputFilter,
+    MCPTextTransform,
     ModelInputData,
+    ModelSelectionData,
+    ModelSelector,
+    NativeMCPResult,
+    NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -97,6 +103,7 @@ from .run_internal.agent_runner_helpers import (
     update_run_state_for_interruption,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
+    validate_resumed_agent_tools,
     validate_session_conversation_settings,
 )
 from .run_internal.agent_tool_configuration import agent_tool_configuration_run
@@ -212,6 +219,8 @@ DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 __all__ = [
     "AgentRunner",
     "Runner",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunConfig",
     "RunOptions",
     "RunState",
@@ -223,9 +232,12 @@ __all__ = [
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
+    "NativeMCPResult",
+    "NativeMCPResultTransform",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
@@ -594,6 +606,10 @@ def _prepare_private_input(
     config: RunConfig,
     options: RunOptions[TContext],
 ) -> str | list[TResponseInputItem] | RunState[TContext]:
+    from ._run_state_agent_identity import _decision_bindings
+
+    if not isinstance(input, RunState):
+        _decision_bindings(agent)
     if current_redactor() is None:
         if isinstance(input, RunState) and input._requires_redaction:
             error = UserError("Continuing this run requires RunConfig.redact_text.")
@@ -682,8 +698,12 @@ class AgentRunner:
                         if isinstance(input, RunState) and input._current_agent is not None
                         else starting_agent
                     )
+                    decisions = _DecisionRun(
+                        starting_agent, run_config.tracing_disabled, kwargs.get("context")
+                    )
                     with agent_tool_configuration_run(configuration_agent):
-                        result = await self._run_impl(starting_agent, input, **kwargs)
+                        async with decisions.bind():
+                            result = await self._run_impl(starting_agent, input, **kwargs)
                         require_clean_final_output(
                             result.final_output, result.input, result.new_items
                         )
@@ -766,9 +786,16 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            await run_state._check_pending_specialists(starting_agent, context_wrapper)
             context_wrapper._resolve_function_approval_owners(starting_agent)
             validate_resume_policy(run_state, context_wrapper, run_config)
-            await _check_resume(run_state, run_config.budget, context_wrapper)
+            await validate_resumed_agent_tools(
+                run_state,
+                run_config.budget,
+                context_wrapper,
+                run_config.tool_execution,
+                manual_root=not isinstance(session, ResumableRun),
+            )
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -780,6 +807,7 @@ class AgentRunner:
                         context_wrapper,
                         hooks,
                         run_config.tool_execution,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -800,7 +828,11 @@ class AgentRunner:
                 await session.begin(
                     input,
                     ModelToolHooks(
-                        starting_agent, context_wrapper, hooks, run_config.tool_execution
+                        starting_agent,
+                        context_wrapper,
+                        hooks,
+                        run_config.tool_execution,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -1139,6 +1171,7 @@ class AgentRunner:
                 raise
 
             try:
+                pending_feedback: str | None = None
                 while True:
                     validate_output_guardrails_with_server_managed_conversation(
                         current_agent,
@@ -1615,6 +1648,7 @@ class AgentRunner:
                                 if run_state is not None:
                                     run_state._terminal_unrecoverable = False
                                 if turn_result.next_step.continue_after_guardrails:
+                                    pending_feedback = turn_result.feedback
                                     run_state._current_step = NextStepRunAgain()
                                     continue
                                 if session is None:
@@ -1703,6 +1737,7 @@ class AgentRunner:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
                     current_turn += 1
+                    feedback, pending_feedback = pending_feedback, None
                     if max_turns is not None and current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
@@ -1911,6 +1946,7 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 preserve_tool_task_cancellation(
                                     run_single_turn(
+                                        feedback=feedback,
                                         current_turn=current_turn,
                                         bindings=current_bindings,
                                         original_input=original_input,
@@ -2020,6 +2056,7 @@ class AgentRunner:
                                 turn_result = await model_task
                         else:
                             turn_result = await run_single_turn(
+                                feedback=feedback,
                                 current_turn=current_turn,
                                 bindings=current_bindings,
                                 original_input=original_input,
@@ -2356,6 +2393,7 @@ class AgentRunner:
                                 run_state._terminal_unrecoverable = False
 
                             if turn_result.next_step.continue_after_guardrails:
+                                pending_feedback = turn_result.feedback
                                 if run_state is not None:
                                     run_state._current_step = NextStepRunAgain()
                                 continue
@@ -2796,6 +2834,9 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            decisions = _DecisionRun(
+                starting_agent, run_config.tracing_disabled, kwargs.get("context")
+            )
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
             budget = _prepare_budget(
                 run_config, starting_agent, input if isinstance(input, RunState) else None
@@ -3030,6 +3071,10 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
+            async with decisions.bind():
+                await stream()
+
+        async def stream() -> None:
             with (
                 redaction_scope(run_config.redact_text),
                 operation_tracing_scope(
@@ -3041,13 +3086,25 @@ class AgentRunner:
                 else contextlib.nullcontext(),
             ):
                 try:
+                    if run_state is not None and is_resumed_state:
+                        await run_state._check_pending_specialists(starting_agent, context_wrapper)
                     if is_resumed_state and run_state is not None:
-                        await _check_resume(run_state, run_config.budget, context_wrapper)
+                        await validate_resumed_agent_tools(
+                            run_state,
+                            run_config.budget,
+                            context_wrapper,
+                            run_config.tool_execution,
+                            manual_root=not isinstance(session, ResumableRun),
+                        )
                     if isinstance(session, ResumableRun):
                         await session.begin(
                             input,
                             ModelToolHooks(
-                                schema_agent, context_wrapper, hooks, run_config.tool_execution
+                                schema_agent,
+                                context_wrapper,
+                                hooks,
+                                run_config.tool_execution,
+                                run_config=run_config,
                             ),
                             run_config.tool_not_found_behavior,
                         )

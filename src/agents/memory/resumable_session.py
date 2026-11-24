@@ -330,12 +330,17 @@ class ResumableSession:
         self._validate_run(input)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
-        if self.is_paused:
+        if not self.is_paused:
+            from ..models.codex import _validate_static_children
+
+            _validate_static_children(tool_hooks)
+        else:
             from ..run_internal.native_approvals import validate_native_restore_hooks
             from ..run_internal.tool_planning import (
                 _check_approved_functions,
                 _check_workspace_approvals,
             )
+            from ..run_internal.tool_text import validate_pending_text_transforms
 
             processed = input._last_processed_response
             if processed is not None and processed.native_approvals:
@@ -346,6 +351,7 @@ class ResumableSession:
                     _check_workspace_approvals(pending, tool_hooks.agent, processed)
                 if tool_not_found_behavior == "raise_error":
                     _check_approved_functions(pending, tool_hooks.agent, tool_hooks.context)
+            await validate_pending_text_transforms(input, tool_hooks.settings, tool_hooks.context)
         active = self._checkpoint.model_copy(
             update={
                 "version": 2 if current_redactor() is not None else self._checkpoint.version,

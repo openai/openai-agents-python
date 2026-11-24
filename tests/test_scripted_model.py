@@ -121,6 +121,15 @@ async def test_scripted_model_generates_stream_events() -> None:
     model.assert_complete()
 
 
+def test_sync_result_usage_shares_context_and_checkpoint_shape() -> None:
+    model = ScriptedModel([[assistant_message("hello")]])
+    result = Runner.run_sync(Agent(name="agent", model=model), "hi")
+    assert result.usage is result.context_wrapper.usage
+    state = result.to_state().to_json()
+    assert "usage" not in state
+    assert state["context"]["usage"]["requests"] == result.usage.requests == 1
+
+
 @pytest.mark.asyncio
 async def test_scripted_model_stream_preserves_request_usage_details() -> None:
     request_entries = [
@@ -160,13 +169,16 @@ async def test_scripted_model_stream_preserves_request_usage_details() -> None:
     )
 
     streamed_result = Runner.run_streamed(Agent(name="streamed", model=streamed_model), "hi")
+    propagated = streamed_result.usage
+    assert propagated.requests == 0
     async for _event in streamed_result.stream_events():
         pass
     non_streamed_result = await Runner.run(
         Agent(name="non-streamed", model=non_streamed_model), "hi"
     )
 
-    propagated = streamed_result.context_wrapper.usage
+    assert propagated is streamed_result.usage is streamed_result.context_wrapper.usage
+    assert non_streamed_result.usage is non_streamed_result.context_wrapper.usage
     assert propagated.requests == 5
     assert propagated.input_tokens == 10
     assert propagated.output_tokens == 6
