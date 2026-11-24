@@ -49,11 +49,15 @@ from ._run_state_agent_identity import (
     _build_agent_identity_map,
     _build_agent_map,
     _decision_bindings,
+    _DecisionPath,
+    _decode_decision_path,
+    _encode_decision_path,
     _get_ambiguous_agent_ids,
     _has_ambiguous_hook_identities,
     _has_legacy_hook_identity_ambiguity,
     _is_decision_identity,
     _iter_agent_graph,
+    _ordinary_target,
 )
 from ._tool_identity import (
     FunctionToolLookupKey,
@@ -1008,18 +1012,61 @@ class RunState(Generic[TContext, TAgent]):
     reproduce, and it is cleared only once that turn is fully persisted.
     """
 
-    def _check_specialist(self, root: Agent[Any], context: RunContextWrapper[Any] | None) -> bool:
-        saved = self._context._decision_binding if self._context is not None else None
-        current = _decision_bindings(root).get(id(self._current_agent))
-        if saved is None or saved[0]._roster[saved[1]][0] is not self._current_agent:
-            if current is None:
-                return False
-        elif current is not None and current[0] is saved[0] and current[1] == saved[1]:
-            if context is None or current[0]._can_restore(context, current[1]):
-                return True
-        raise UserError(
-            "Decision specialist unavailable. Check the original route and current access."
-        )
+    def _check_specialist(
+        self,
+        root: Agent[Any],
+        context: RunContextWrapper[Any] | None,
+        *,
+        restore_error: RunStateValidationErrorFactory | None = None,
+    ) -> bool:
+        path = self._context._decision_path if self._context else ()
+        bindings = _decision_bindings(root)
+        if not path and not bindings:
+            return False
+
+        def unavailable() -> Exception:
+            return (restore_error or _default_run_state_validation_error)(
+                "Decision specialist unavailable. Check the roster and context_override.", UserError
+            )
+
+        # An ordinary checkpoint may restart at a later source. It cannot establish
+        # a protected selection. Only a committed path carries those identities.
+        start = path[0][0] if path else self._current_agent
+        if start is not root and not any(
+            agent is start
+            for agent in _iter_agent_graph(root, include_tools=False, include_decisions=False)
+        ):
+            raise unavailable()
+        if not path:
+            return False
+        if path[-1][0] is not self._current_agent:
+            raise unavailable()
+        previous = None
+        protected = False
+        for agent, selection in path:
+            binding = bindings.get(id(agent))
+            if selection is None:
+                if binding is not None or (
+                    previous is not None
+                    and not any(_ordinary_target(route) is agent for route in previous.handoffs)
+                ):
+                    raise unavailable()
+            else:
+                route, label = selection
+                if (
+                    binding is None
+                    or route is not binding[0]
+                    or label != binding[1]
+                    or route._source is not previous
+                    or (
+                        (restore_error is not None or context is not None)
+                        and not route._can_restore(context, label)
+                    )
+                ):
+                    raise unavailable()
+                protected = True
+            previous = agent
+        return protected
 
     async def _check_pending_specialists(
         self, root: Agent[Any], context: RunContextWrapper[Any]
@@ -2105,9 +2152,6 @@ class RunState(Generic[TContext, TAgent]):
         if self._context is None:
             raise UserError("Cannot serialize RunState: No context")
 
-        if self._starting_agent is not None and self._context._decision_binding is not None:
-            self._check_specialist(self._starting_agent, None)
-
         if self._starting_agent is not None and _has_ambiguous_hook_identities(
             self._starting_agent
         ):
@@ -2154,6 +2198,15 @@ class RunState(Generic[TContext, TAgent]):
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
         )
+        if (
+            self._starting_agent is not None
+            and self._context._decision_path
+            and self._check_specialist(self._starting_agent, None)
+        ):
+            assert agent_identity_keys_by_id is not None
+            current_agent_entry["identity"] = _encode_decision_path(
+                self._context._decision_path, agent_identity_keys_by_id
+            )
         generated_items = self._merge_generated_items_with_processed()
 
         result = {
@@ -4087,6 +4140,18 @@ def _resolve_agent_from_data(
             if resolved is not None:
                 return resolved
         resolved = agent_map.get(agent_name)
+        if (
+            resolved is not None
+            and agent_identity_map
+            and any(
+                agent is resolved and _is_decision_identity(key)
+                for key, agent in agent_identity_map.items()
+            )
+        ):
+            # A specialist name alone cannot establish the original route and label.
+            raise validation_error_factory(
+                "Decision specialist unavailable. Check the roster and context_override.", UserError
+            )
         return resolved if resolved is not None else fallback_agent
     return fallback_agent
 
@@ -4578,12 +4643,26 @@ async def _build_run_state_from_json(
     agent_map = _build_agent_map(initial_agent)
 
     current_agent_data = state_json["current_agent"]
-    current_agent = _resolve_agent_from_data(
-        current_agent_data,
-        agent_map,
-        agent_identity_map=agent_identity_map,
-        validation_error_factory=validation_error_factory,
+    identity = (
+        current_agent_data.get("identity") if isinstance(current_agent_data, Mapping) else None
     )
+    path: _DecisionPath = ()
+    current_agent: Agent[Any] | None
+    if isinstance(identity, str) and _is_decision_identity(identity):
+        path = _decode_decision_path(identity, agent_identity_map, initial_agent)
+        if not path or current_agent_data.get("name") != path[-1][0].name:
+            raise validation_error_factory(
+                "Run state references an agent identity that is not present in the restored graph",
+                UserError,
+            )
+        current_agent = path[-1][0]
+    else:
+        current_agent = _resolve_agent_from_data(
+            current_agent_data,
+            agent_map,
+            agent_identity_map=agent_identity_map,
+            validation_error_factory=validation_error_factory,
+        )
     if current_agent is None:
         raise validation_error_factory("Run state agent not found in agent map", UserError)
 
@@ -4656,15 +4735,7 @@ async def _build_run_state_from_json(
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
     context._rebuild_approvals(context_data.get("approvals", {}))
-    # Saved context alone cannot authorize a callback-gated specialist.
-    binding = _decision_bindings(initial_agent).get(id(current_agent))
-    if binding is not None:
-        route, label = binding
-        if not route._can_restore(context if context_override is not None else None, label):
-            raise validation_error_factory(
-                "Decision specialist unavailable. Check the roster and context_override.", UserError
-            )
-    context._decision_binding = binding
+    context._decision_path = path
     saved_invocations = context_data.get("tool_invocations", {})
     if (
         (schema_major, schema_minor) < (1, 23)
@@ -4788,6 +4859,11 @@ async def _build_run_state_from_json(
         [dict(item) if isinstance(item, Mapping) else item for item in pending_input_raw],
     )
     state._model_responses = _deserialize_model_responses(state_json.get("model_responses", []))
+    state._check_specialist(
+        initial_agent,
+        context if context_override is not None else None,
+        restore_error=validation_error_factory,
+    )
     serialized_generated_items = state_json.get("generated_items", [])
     state._generated_items, generated_source_indexes = _deserialize_items_with_source_indexes(
         serialized_generated_items,

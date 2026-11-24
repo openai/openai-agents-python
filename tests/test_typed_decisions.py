@@ -470,3 +470,51 @@ async def test_request_filter_uses_inherited_provider_on_fresh_owner(stream):
     with pytest.raises(RuntimeError, match="live"):
         await saved.pop()
     assert [call.input for call in provider.calls] == ["new user"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_provider_preserves_released_fields_and_survives_preparation():
+    from dataclasses import dataclass, fields, replace
+
+    from agents.sandbox import SandboxAgent, SandboxRunConfig
+    from agents.testing import scripted_sandbox_session
+
+    @dataclass
+    class Worker(SandboxAgent):
+        def __post_init__(self):
+            super().__post_init__()
+
+    provider = Provider(True)
+
+    async def finish(run, proposal):
+        assert await proposal.decide("Ready?", input=proposal.output)
+        return "finish"
+
+    worker = Worker(
+        name="Worker",
+        decisions=provider,
+        capabilities=[],
+        model=ScriptedModel([[assistant_message("done")]]),
+        hooks=AgentHooks(final_output_policy=finish),
+    )
+    assert [f.name for f in fields(SandboxAgent) if f.init][-5:] == [
+        "default_manifest",
+        "base_instructions",
+        "capabilities",
+        "run_as",
+        "decisions",
+    ]
+    for agent in (Agent(name="Helper", decisions=provider), worker):
+        assert fields(agent)[-1].kw_only
+        assert "decisions=" not in repr(agent)
+        assert agent.clone().decisions is replace(agent).decisions is provider
+    assert await worker.decide("Ready?", input="start")
+    result = await Runner.run(
+        worker,
+        "start",
+        run_config=RunConfig(
+            tracing_disabled=True, sandbox=SandboxRunConfig(session=scripted_sandbox_session())
+        ),
+    )
+    assert result.final_output == "done"
+    assert len(provider.calls) == 2

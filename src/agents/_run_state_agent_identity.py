@@ -33,10 +33,13 @@ from .tool import (
 _DECISION_PREFIX = "decision:"
 
 
+_PATH_PREFIX = "decision:path:"
+
+
 def _is_decision_identity(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and re.fullmatch(_DECISION_PREFIX + r"[0-9a-f]{64}", value) is not None
+    return isinstance(value, str) and (
+        value.startswith(_PATH_PREFIX)
+        or re.fullmatch(_DECISION_PREFIX + r"[0-9a-f]{64}", value) is not None
     )
 
 
@@ -48,8 +51,44 @@ class _DecisionHandoff(Handoff[TContext, Agent[TContext]]):
     _can_restore: Callable[[RunContextWrapper[TContext] | None, str], bool]
 
 
+# Only accepted transfers belong here. Filters can erase every model-facing receipt.
+_DecisionPath = tuple[tuple[Agent[Any], tuple[_DecisionHandoff[Any], str] | None], ...]
+
+
+def _path_key(key: str, selected: bool) -> str:
+    # Ordinary names and protected identities belong to different domains.
+    return hashlib.sha256(
+        ("selected:" if selected else "ordinary:").encode() + key.encode()
+    ).hexdigest()
+
+
+def _encode_decision_path(path: _DecisionPath, keys: Mapping[int, str]) -> str:
+    return _PATH_PREFIX + ".".join(
+        _path_key(keys[id(agent)], selection is not None) for agent, selection in path
+    )
+
+
+def _decode_decision_path(
+    identity: str, agents: Mapping[str, Agent[Any]], root: Agent[Any]
+) -> _DecisionPath:
+    if not identity.startswith(_PATH_PREFIX):
+        return ()
+    keys = identity[len(_PATH_PREFIX) :].split(".")
+    bindings = _decision_bindings(root)
+    lookup = {_path_key(key, id(agent) in bindings): agent for key, agent in agents.items()}
+    if len(keys) != len(set(keys)) or any(key not in lookup for key in keys):
+        return ()
+    path = tuple((lookup[key], bindings.get(id(lookup[key]))) for key in keys)
+    return path if any(binding for _, binding in path) else ()
+
+
+def _ordinary_target(route: Any) -> Any:
+    ref = getattr(route, "_agent_ref", None)
+    return ref() if callable(ref) else getattr(route, "agent", route)
+
+
 def _iter_agent_graph(
-    initial_agent: Agent[Any], *, include_tools: bool = True
+    initial_agent: Agent[Any], *, include_tools: bool = True, include_decisions: bool = True
 ) -> Iterator[Agent[Any]]:
     """Yield agents reachable from the starting agent in breadth-first order."""
     queue: deque[Agent[Any]] = deque([initial_agent])
@@ -65,7 +104,7 @@ def _iter_agent_graph(
 
         for handoff_item in current.handoffs:
             if isinstance(handoff_item, _DecisionHandoff):
-                if handoff_item._source is current:
+                if include_decisions and handoff_item._source is current:
                     queue.extend(agent for agent, _ in handoff_item._roster.values())
                 continue
             handoff_agent: Any | None = None
@@ -538,8 +577,7 @@ def _decision_bindings(root: Agent[Any]) -> dict[int, tuple[_DecisionHandoff[Any
                         raise UserError("Create a separate specialist for each decision label.")
                     bindings[id(target)] = (route, label)
             else:
-                ref = getattr(route, "_agent_ref", None)
-                ordinary.add(id(ref() if callable(ref) else getattr(route, "agent", route)))
+                ordinary.add(id(_ordinary_target(route)))
         for tool in source.tools:
             if getattr(tool, "_is_agent_tool", False):
                 ordinary.add(id(getattr(tool, "_agent_instance", None)))

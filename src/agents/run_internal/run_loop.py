@@ -116,6 +116,7 @@ from .agent_runner_helpers import (
     reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
+    validate_output_guardrails_for_server_model,
     validate_output_guardrails_with_server_managed_conversation,
 )
 from .agent_tool_configuration import guard_agent_tool_configuration
@@ -242,6 +243,7 @@ from .turn_preparation import (
     get_model_settings,
     get_output_schema,
     maybe_filter_model_input,
+    select_model_name,
     validate_run_hooks,
 )
 from .turn_resolution import (
@@ -2558,18 +2560,23 @@ async def run_single_turn_streamed(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
+    selected_model_name = await select_model_name(
+        public_agent, run_config, context_wrapper, streamed_result.current_turn
+    )
     model = (
         bindings.resolved_model
         if bindings.resolved_model is not None
-        else get_model(execution_agent, run_config)
+        else get_model(execution_agent, run_config, selected_model_name=selected_model_name)
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
         run_config,
         model,
+        selected_model_name=selected_model_name,
         prepared_overrides=bindings.model_settings_overrides,
         prompt=prompt_config,
         has_tools=bool(all_tools or handoffs),
@@ -3001,6 +3008,9 @@ async def run_single_turn(
             if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
         ]
 
+    selected_model_name = await select_model_name(
+        public_agent, run_config, context_wrapper, current_turn
+    )
     output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:
         input = server_conversation_tracker.prepare_input(original_input, generated_items)
@@ -3024,6 +3034,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        selected_model_name=selected_model_name,
         omitted=omitted,
         reasoning_item_id_policy=reasoning_item_id_policy,
     )
@@ -3094,6 +3105,7 @@ async def get_new_response(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     *,
     omitted: set[str] | None = None,
+    selected_model_name: str | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -3112,15 +3124,17 @@ async def get_new_response(
     model = (
         bindings.resolved_model
         if bindings.resolved_model is not None
-        else get_model(execution_agent, run_config)
+        else get_model(execution_agent, run_config, selected_model_name=selected_model_name)
     )
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
+        validate_output_guardrails_for_server_model(public_agent, run_config, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
         run_config,
         model,
+        selected_model_name=selected_model_name,
         prepared_overrides=bindings.model_settings_overrides,
         prompt=prompt_config,
         has_tools=bool(all_tools or handoffs),

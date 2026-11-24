@@ -341,18 +341,8 @@ class AgentBase(Generic[TContext]):
 
 
 @dataclass
-class Agent(AgentBase, _Decider, Generic[TContext]):
-    """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
-
-    We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
-    addition, you can pass `handoff_description`, which is a human-readable description of the
-    agent, used when the agent is used inside tools/handoffs.
-
-    Agents are generic on the context type. The context is a (mutable) object you create. It is
-    passed to tool functions, handoffs, guardrails, etc.
-
-    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
-    """
+class _AgentFields(AgentBase, Generic[TContext]):
+    """Fields shared by the released Agent and SandboxAgent constructors."""
 
     instructions: (
         str
@@ -444,6 +434,21 @@ class Agent(AgentBase, _Decider, Generic[TContext]):
     reset_tool_choice: bool = True
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+
+
+@dataclass
+class Agent(_AgentFields[TContext], _Decider):
+    """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
+
+    We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
+    addition, you can pass `handoff_description`, which is a human-readable description of the
+    agent, used when the agent is used inside tools/handoffs.
+
+    Agents are generic on the context type. The context is a (mutable) object you create. It is
+    passed to tool functions, handoffs, guardrails, etc.
+
+    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
+    """
 
     decisions: Annotated[DecisionProvider | None, Field(exclude=True)] = field(
         default=None, kw_only=True, repr=False, compare=False

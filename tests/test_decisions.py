@@ -23,6 +23,7 @@ from agents import (
 from agents.decisions import DecisionError, OpenAIDecisions, decision_handoff
 from agents.decorators import tool
 from agents.exceptions import UserError
+from agents.extensions.handoff_filters import remove_all_tools
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 
 CONFIG = RunConfig(tracing_disabled=True)
@@ -889,3 +890,246 @@ async def test_inconsistent_distribution_cannot_transfer(stream):
         await run(source, stream)
     assert caught.value.reason == "invalid_response"
     assert len(peer.requests) == 1 and not model.calls
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("filtered", [False, True])
+async def test_descendant_pause_rechecks_each_selected_grant(stream, loaded, nested, filtered):
+    history_filter = remove_all_tools if filtered else None
+    effects = []
+
+    @tool(needs_approval=True)
+    def record() -> str:
+        effects.append("record")
+        return "done"
+
+    peer = Peer()
+    requests = []
+
+    def scripted(name, args, call_id):
+        model = ScriptedModel([[function_call(name, args, call_id=call_id)]])
+        requests.append(model)
+        return model
+
+    leaf = Agent(
+        name="leaf",
+        tools=[record],
+        model=scripted("record", {}, "effect"),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    specialist = Agent(
+        name="specialist",
+        handoffs=[handoff(leaf, input_filter=history_filter)],
+        model=scripted("transfer_to_leaf", {}, "ordinary"),
+    )
+    first = Agent(
+        name="first",
+        decisions=OpenAIDecisions(client=peer.client),
+        model=scripted("select_specialist", {"input": "evidence"}, "first"),
+    )
+    second = Agent(
+        name="second", model=scripted("select_specialist", {"input": "evidence"}, "second")
+    )
+    for source, selected in [(first, second), (second, specialist)]:
+
+        def grant(ctx, label, key=source.name):
+            return (
+                ctx.context.get(key, False) if label == "blue" else ctx.context.get("other", False)
+            )
+
+        other = Agent(name="other_" + source.name, handoffs=[leaf])
+        source.handoffs.append(
+            decision_handoff(
+                source,
+                question="Which?",
+                targets={"blue": selected, "red": other},
+                is_available=grant,
+                input_filter=history_filter,
+            )
+        )
+    first.handoffs.append(leaf)
+    root = first
+    if nested:
+        root = Agent(
+            name="manager",
+            tools=[first.as_tool("ask", "Ask")],
+            model=ScriptedModel(
+                [
+                    [function_call("ask", {"input": "work"}, call_id="child")],
+                    [assistant_message("done")],
+                ]
+            ),
+        )
+    current = {"first": True, "second": True, "other": True}
+    state = (await run(root, stream, context=current)).to_state()
+    if loaded:
+        saved = state.to_string()
+        route = first.handoffs.pop(0)
+        with pytest.raises(UserError):
+            await RunState.from_string(root, saved, context_override=current)
+        first.handoffs.insert(0, route)
+        with pytest.raises(UserError, match="unavailable"):
+            await RunState.from_string(root, saved)
+        with pytest.raises(UserError, match="unavailable"):
+            await RunState.from_string(root, saved, context_override={"second": True})
+        current = current.copy()
+        state = await RunState.from_string(root, saved, context_override=current)
+    state.approve(state.get_interruptions()[0])
+    current["other"] = False
+    route = first.handoffs.pop(0)
+    with pytest.raises(UserError, match="unavailable"):
+        await run(root, stream, state)
+    first.handoffs.insert(0, route)
+    for key in ("first", "second"):
+        current[key] = False
+        with pytest.raises(UserError, match="unavailable"):
+            await run(root, stream, state)
+        assert not effects and all(len(model.calls) == 1 for model in requests)
+        assert len(peer.requests) == 2
+        current[key] = True
+    assert (await run(root, stream, state)).final_output == "done"
+    assert effects == ["record"] and len(peer.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_return_to_source_ends_the_specialist_grant():
+    @tool(needs_approval=True)
+    def record() -> str:
+        return "done"
+
+    peer = Peer()
+    source = Agent(
+        name="source",
+        decisions=OpenAIDecisions(client=peer.client),
+        model=ScriptedModel(
+            [
+                [function_call("select_specialist", {"input": "work"}, call_id="choose")],
+                [function_call("record", {}, call_id="record")],
+            ]
+        ),
+        tools=[record],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    specialist = Agent(
+        name="specialist",
+        handoffs=[source],
+        model=ScriptedModel([[function_call("transfer_to_source", {}, call_id="back")]]),
+    )
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            question="Which?",
+            targets={"blue": specialist, "red": Agent(name="other")},
+            is_available=lambda ctx, label: ctx.context["grant"],
+        )
+    )
+    state = (await run(source, False, context={"grant": True})).to_state()
+    saved = state.to_json()
+    restored = await RunState.from_json(source, saved, context_override={"grant": False})
+    restored.approve(restored.get_interruptions()[0])
+    assert (await run(source, False, restored)).final_output == "done"
+    assert len(peer.requests) == 1
+    selected = next(i for i in saved["session_items"] if i["type"] == "handoff_output_item")
+    del selected["target_agent"]["identity"]
+    with pytest.raises(UserError, match="unavailable"):
+        await RunState.from_json(source, saved, context_override={"grant": True})
+
+
+@pytest.mark.asyncio
+async def test_shared_descendant_ordinary_path_does_not_require_a_specialist_grant():
+    @tool(needs_approval=True)
+    def record() -> str:
+        return "done"
+
+    peer = Peer()
+    leaf = Agent(
+        name="leaf",
+        tools=[record],
+        tool_use_behavior="stop_on_first_tool",
+        model=ScriptedModel([[function_call("record", {}, call_id="effect")]]),
+    )
+    source = Agent(
+        name="source",
+        decisions=OpenAIDecisions(client=peer.client),
+        handoffs=[handoff(leaf, input_filter=remove_all_tools)],
+        model=ScriptedModel([[function_call("transfer_to_leaf", {}, call_id="ordinary")]]),
+    )
+    source.handoffs.append(
+        decision_handoff(
+            source,
+            question="Which?",
+            targets={"blue": Agent(name="specialist", handoffs=[leaf]), "red": Agent(name="other")},
+            is_available=lambda ctx, label: False,
+        )
+    )
+    saved = (await run(source, False)).to_state().to_json()
+    assert saved["current_agent"] == {"name": "leaf"}
+    state = await RunState.from_json(source, saved)
+    state.approve(state.get_interruptions()[0])
+    assert (await run(source, False, state)).final_output == "done"
+    assert not peer.requests
+    saved["current_agent"]["identity"] = "decision:path:invalid"
+    with pytest.raises(UserError, match="agent identity"):
+        await RunState.from_json(source, saved)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_return_to_root_after_reloading_an_ordinary_checkpoint(stream):
+    effects = []
+
+    @tool(needs_approval=True)
+    def record(step: str) -> str:
+        effects.append(step)
+        return step
+
+    peer = Peer()
+    chooser = Agent(
+        name="chooser",
+        tools=[record],
+        model=ScriptedModel(
+            [
+                [function_call("record", {"step": "first"}, call_id="first")],
+                [function_call("select_specialist", {"input": "work"}, call_id="choose")],
+            ]
+        ),
+    )
+    root = Agent(
+        name="root",
+        decisions=OpenAIDecisions(client=peer.client),
+        handoffs=[handoff(chooser, input_filter=remove_all_tools)],
+        tools=[record],
+        tool_use_behavior="stop_on_first_tool",
+        model=ScriptedModel(
+            [
+                [function_call("transfer_to_chooser", {}, call_id="start")],
+                [function_call("record", {"step": "last"}, call_id="last")],
+            ]
+        ),
+    )
+    specialist = Agent(
+        name="specialist",
+        handoffs=[root],
+        model=ScriptedModel([[function_call("transfer_to_root", {}, call_id="back")]]),
+    )
+    chooser.handoffs.append(
+        decision_handoff(
+            chooser,
+            question="Which?",
+            targets={"blue": specialist, "red": Agent(name="other")},
+            is_available=lambda ctx, label: ctx.context["grant"],
+        )
+    )
+    context = {"grant": True}
+    first = (await run(root, stream, context=context)).to_state()
+    reopened = await RunState.from_string(root, first.to_string(), context_override=context)
+    reopened.approve(reopened.get_interruptions()[0])
+    last = (await run(root, stream, reopened)).to_state()
+    assert effects == ["first"]
+    assert last.to_json()["current_agent"] == {"name": "root"}
+    last.approve(last.get_interruptions()[0])
+    context["grant"] = False
+    assert (await run(root, stream, last)).final_output == "last"
+    assert effects == ["first", "last"] and len(peer.requests) == 1

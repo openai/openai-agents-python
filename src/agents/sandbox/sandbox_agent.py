@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .._config_coercion import coerce_pydantic_config
 from .._public_agent import get_public_agent
-from ..agent import Agent
+from ..agent import Agent, _AgentFields
 from ..run_context import RunContextWrapper, TContext
 from .capabilities import Capability
 from .capabilities.capabilities import Capabilities
@@ -14,6 +14,7 @@ from .manifest import Manifest, _coerce_manifest
 from .types import User
 
 if TYPE_CHECKING:
+    from .._decision_types import DecisionProvider
     from ..agent import MCPConfig, StopAtTools, ToolsToFinalOutputFunction
     from ..agent_output import AgentOutputSchemaBase
     from ..guardrail import InputGuardrail, OutputGuardrail
@@ -28,12 +29,8 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class SandboxAgent(Agent[TContext]):
-    """An `Agent` with sandbox-specific configuration.
-
-    Runtime transport details such as the sandbox client, client options, and live session are
-    provided at run time through `RunConfig(sandbox=...)`, not stored on the agent itself.
-    """
+class _SandboxFields(_AgentFields[TContext]):
+    """Sandbox fields in released dataclass order."""
 
     default_manifest: Manifest | None = None
     """Default sandbox manifest for new sessions created by `Runner` sandbox execution.
@@ -64,6 +61,17 @@ class SandboxAgent(Agent[TContext]):
     _sandbox_capability_sources: tuple[Capability, ...] = field(
         default=(), init=False, repr=False, compare=False
     )
+
+
+# Dataclasses collect bases in reverse MRO. Keep the sandbox fields before
+# newer keyword-only Agent options while retaining Agent behavior.
+@dataclass
+class SandboxAgent(Agent[TContext], _SandboxFields[TContext]):
+    """An `Agent` with sandbox-specific configuration.
+
+    Runtime transport details such as the sandbox client, client options, and live session are
+    provided at run time through `RunConfig(sandbox=...)`, not stored on the agent itself.
+    """
 
     if TYPE_CHECKING:
 
@@ -107,6 +115,8 @@ class SandboxAgent(Agent[TContext]):
             ) = None,
             capabilities: Sequence[Capability] = ...,
             run_as: User | dict[str, Any] | str | None = None,
+            *,
+            decisions: DecisionProvider | None = None,
         ) -> None: ...
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:

@@ -764,6 +764,9 @@ async def execute_handoffs(
             source_agent=public_agent,
             target_agent=new_agent,
         )
+        from ..decisions import _record_transfer
+
+        _record_transfer(context_wrapper, public_agent, new_agent, handoff)
         new_step_items.append(handoff_output)
         if handoff_output_committer is not None:
             _register_tool_call_items(context_wrapper, [handoff_output])

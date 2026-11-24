@@ -9,7 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agents import Agent, AgentHooks, OpenAIDecisions, Runner, function_tool
+from agents import Agent, AgentHooks, OpenAIDecisions, Runner
+from agents.decorators import tool
 from agents.tool_context import ToolContext
 
 
@@ -18,7 +19,7 @@ class Ticket(BaseModel):
     team: Literal["billing", "support"]
 
 
-@function_tool
+@tool
 async def classify(ctx: ToolContext[None], report: str) -> str:
     return await ctx.decide("Which team?", input=report, choices=["billing", "support"])
 
@@ -108,7 +109,7 @@ from agents import RunState
 state = await RunState.from_string(source, saved, context_override=current_context)
 ```
 
-Use a separate specialist instance for each label and ordinary handoff. A saved specialist identifies one route. Both loading and resuming check the active specialist, including pending agent tools. Missing bindings or denied access stop the resume before dispatch. Decisions does not run again. Review each pending call in `state.get_interruptions()`, then approve or reject it and resume with `await Runner.run(source, state)`.
+Use a separate specialist instance for each label and ordinary handoff. A saved specialist identifies one route. Loading and resuming recheck each selected label on the active handoff path, including ordinary descendants and pending agent tools. Returning to an earlier agent ends the branch below it. Missing bindings or denied access stop the resume before dispatch. Decisions does not run again. Review each pending call in `state.get_interruptions()`, then approve or reject it and resume with `await Runner.run(source, state)`.
 
 Keep the graph and grants current. If selection fails after a tool has run, keep the updated `RunState` and inspect completed results before retrying.
 

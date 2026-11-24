@@ -153,6 +153,17 @@ class SandboxRuntime(Generic[TContext]):
     def assert_agent_supported(self, agent: Agent[TContext]) -> None:
         if isinstance(agent, SandboxAgent) and self._sandbox_config is None:
             raise UserError("SandboxAgent execution requires `RunConfig(sandbox=...)`")
+        if (
+            isinstance(agent, SandboxAgent)
+            and self._run_config is not None
+            and self._run_config.model_selector is not None
+            and self._run_config.model is None
+            and not isinstance(agent.model, Model)
+        ):
+            raise UserError(
+                "SandboxAgent requires a fixed model for tool preparation. "
+                "Set RunConfig.model or omit model_selector."
+            )
 
     async def enqueue_memory_result(
         self,

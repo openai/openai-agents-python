@@ -43,7 +43,7 @@ from .run_budget import _BudgetState
 from .usage import Usage
 
 if TYPE_CHECKING:
-    from ._run_state_agent_identity import _DecisionHandoff
+    from ._run_state_agent_identity import _DecisionPath
     from .items import ToolApprovalItem, TResponseInputItem
     from .run_internal.tool_declarations import PreparedTool
 else:
@@ -222,14 +222,14 @@ class RunContextWrapper(Generic[TContext]):
     )
 
     # Runtime-only state. RunState owns its portable representation.
-    _decision_binding = cast("tuple[_DecisionHandoff[Any], str] | None", None)
+    _decision_path = cast("_DecisionPath", ())
     _budget = cast("_BudgetState | None", None)
 
     def _for_new_root(self, budget: _BudgetState | None) -> RunContextWrapper[TContext]:
-        if budget is None and self._budget is None and self._decision_binding is None:
+        if budget is None and self._budget is None and not self._decision_path:
             return self
         root = copy.copy(self)
-        root._decision_binding = None
+        root._decision_path = ()
         root._budget = budget
         return root
 

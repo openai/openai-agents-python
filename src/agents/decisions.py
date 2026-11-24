@@ -19,9 +19,9 @@ from ._decision_schema import _Plan
 from ._decision_types import DecisionInput, DecisionProvider, DecisionRequest, DecisionResponse
 from ._public_agent import get_public_agent
 from ._redaction import current_redactor
-from ._run_state_agent_identity import _DecisionHandoff, _iter_agent_graph
+from ._run_state_agent_identity import _decision_bindings, _DecisionHandoff, _iter_agent_graph
 from .agent import Agent
-from .exceptions import _data_redacted_error_boundary, _mark_error_data_redacted
+from .exceptions import UserError, _data_redacted_error_boundary, _mark_error_data_redacted
 from .handoffs import Handoff, HandoffInputFilter
 from .run_context import RunContextWrapper
 from .usage import Usage
@@ -203,6 +203,7 @@ class _DecisionRun:
             if agent is root and owner is context:
                 scope.delegate = None
                 self.parents = (parent, *parent.parents)
+        self.root: Agent[Any] | None = root
         self.tracing_disabled = tracing_disabled
         self.providers: dict[int, tuple[Agent[Any], DecisionProvider | None]] = {}
         self.scopes: set[_Scope] = set()
@@ -225,6 +226,7 @@ class _DecisionRun:
             self.live = False
             _scope.reset(callback)
             _run.reset(token)
+            self.root = None
             self.providers.clear()
             scopes = tuple(self.scopes)
             for scope in scopes:
@@ -241,6 +243,35 @@ class _DecisionRun:
 
 
 _run: ContextVar[_DecisionRun | None] = ContextVar("decision_run", default=None)
+
+
+def _record_transfer(
+    context: RunContextWrapper[Any],
+    source: Agent[Any],
+    target: Agent[Any],
+    handoff: Handoff[Any, Any],
+) -> None:
+    path = context._decision_path
+    if not path:
+        if not isinstance(handoff, _DecisionHandoff) and not _decision_bindings(source):
+            return
+        path = ((source, None),)
+    if path[-1][0] is not source:
+        raise UserError("Decision specialist unavailable. Check the original route.")
+    # An ordinary checkpoint omits earlier hops. The invocation still owns its root.
+    run = _run.get()
+    if run is not None and target is run.root:
+        context._decision_path = ()
+        return
+    for index, (agent, _) in enumerate(path):
+        if agent is target:
+            context._decision_path = path[: index + 1]
+            return
+    selection = None
+    if isinstance(handoff, _DecisionHandoff):
+        label = next(k for k, (agent, _) in handoff._roster.items() if agent is target)
+        selection = (handoff, label)
+    context._decision_path = (*path, (target, selection))
 
 
 def _selected(agent: Any) -> DecisionProvider | None:
@@ -534,7 +565,6 @@ def decision_handoff(
             answer = await _decide(route, question, evidence, None, choices, None, timeout=timeout)
         if not authorized(ctx, answer):
             raise ValueError("Selected specialist is unavailable")
-        ctx._decision_binding = (route, answer)
         return roster[answer][0]
 
     route: _DecisionHandoff[_T] = _DecisionHandoff(

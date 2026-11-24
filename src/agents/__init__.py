@@ -21,7 +21,6 @@ from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
 from .decisions import (
     DecisionError,
-    DecisionInput,
     DecisionProvider,
     DecisionRequest,
     DecisionResponse,
@@ -124,6 +123,8 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    ModelSelectionData,
+    ModelSelector,
     NativeMCPResult,
     NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
@@ -387,7 +388,6 @@ def enable_verbose_stdout_logging() -> None:
 
 __all__ = [
     "DecisionError",
-    "DecisionInput",
     "DecisionProvider",
     "DecisionRequest",
     "DecisionResponse",
@@ -515,6 +515,8 @@ __all__ = [
     "RunResult",
     "RunResultStreaming",
     "ResponsesWebSocketSession",
+    "ModelSelectionData",
+    "ModelSelector",
     "RunBudget",
     "RunBudgetError",
     "RunConfig",
