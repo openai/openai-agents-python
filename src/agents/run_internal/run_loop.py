@@ -768,6 +768,8 @@ async def _finalize_streamed_final_output(
     # A fallback or a recovered tool turn can still be missing from new_items.
     require_clean_final_output(output, streamed_result.input, *final_history)
     streamed_result.final_output = output
+    if streamed_result._approved_output is not None:
+        streamed_result._approved_output.accepted = True
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
     streamed_result.is_complete = True
@@ -957,6 +959,9 @@ async def start_streaming(
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
+    streamed_result._stream_started = True
+    if streamed_result._approved_output is not None and session is not None:
+        streamed_result._approved_output.session_id = session.session_id or None
     if streamed_result.trace is not None:
         streamed_result.trace.start(mark_as_current=True)
     if run_state is not None:
@@ -2670,6 +2675,11 @@ async def run_single_turn_streamed(
 
     retry_stream = stream_response_with_retry(
         get_stream=get_model_stream,
+        preview=(
+            streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
+            if streamed_result._approved_output is not None and current_redactor() is None
+            else None
+        ),
         rewind=rewind_model_request,
         retry_settings=model_settings.retry,
         get_retry_advice=model.get_retry_advice,
