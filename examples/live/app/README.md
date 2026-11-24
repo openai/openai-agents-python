@@ -72,7 +72,7 @@ Keep the specialist read-only. The managed Responses backend has one function, `
 
 If the specialist pauses for approval, the tool awaiting approval does not run. Other tools in the same turn may already have run. The server returns a text refusal and sends one `response.create` after submitting all results in the batch. This continues the managed backend without resuming the specialist. The server makes no approval decision, saves no run state and cannot undo earlier work.
 
-Before adding tools that change data, replace the "No order was changed" failure message and implement an [approval and resume flow](../../../docs/human_in_the_loop.md). Keep the run state and pending function call ID on the server. Authenticate the decision, resume the interrupted run and return one result to the pending call. Specialist guardrails cover only the specialist's execution. They do not cover every backend reply or spoken response.
+Before adding tools that change data, implement an [approval and resume flow](../../../docs/human_in_the_loop.md). Keep the run state and pending function call ID on the server. Authenticate the decision, resume the interrupted run and return one result to the pending call. Specialist guardrails cover only the specialist's execution. They do not cover every backend reply or spoken response.
 
 ## Boundaries and failures
 

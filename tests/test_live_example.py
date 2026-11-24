@@ -178,9 +178,7 @@ async def test_agent_failure_returns_a_safe_result(monkeypatch: pytest.MonkeyPat
     batch(handler, [function_call()])
     await drain(handler)
     assert "PRIVATE_PROVIDER_PAYLOAD" not in repr(send.call_args_list + notify.call_args_list)
-    assert (
-        send.call_args_list[0].args[0]["item"]["output"].startswith("The order specialist failed.")
-    )
+    assert send.call_args_list[0].args[0]["item"]["output"] == "The order specialist failed."
 
 
 @pytest.mark.asyncio

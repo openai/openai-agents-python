@@ -79,7 +79,7 @@ class DelegationHandler:
                             output = await ask_order_agent(self.agent, request)
                         except Exception:
                             # Do not expose exception payloads to the browser or the models.
-                            output = "The order specialist failed. No order was changed."
+                            output = "The order specialist failed."
                     await self.send(
                         {
                             "type": "response.item.create",
