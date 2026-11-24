@@ -64,7 +64,7 @@ StreamEvent: TypeAlias = RawResponsesStreamEvent | RunItemStreamEvent | AgentUpd
 
 @dataclass(frozen=True)
 class ApprovedText:
-    """An application-approved prefix. Later run failures cannot retract it."""
+    """Text the application approved for preview only. Later failures cannot retract it."""
 
     submission_id: str
     session_id: str | None
@@ -76,8 +76,11 @@ class ApprovedText:
 
 
 @dataclass(frozen=True)
-class FinalOutputAccepted:
-    """Runner has finished successfully. Read the value from the result's final_output."""
+class RunCompleted:
+    """The run completed successfully after guardrails, persistence and cleanup.
+
+    This event carries no output and grants no permission to display final_output.
+    """
 
     submission_id: str
     session_id: str | None

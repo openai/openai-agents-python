@@ -23,7 +23,7 @@ from agents import (
     output_guardrail,
 )
 from agents.models.multi_provider import MultiProvider
-from agents.stream_events import ApprovedText, FinalOutputAccepted
+from agents.stream_events import ApprovedText, RunCompleted
 from agents.testing import ModelStep, ScriptedModel, assistant_message
 
 from .models.test_codex_provider import FakeThread, config, threads as threads
@@ -85,7 +85,7 @@ async def test_native_prefixes_and_raw_consumer_are_independent(tmp_path, thread
     assert approved == [
         ApprovedText(root, "session", 1, "turn_1", "item_1", 0, "a"),
         ApprovedText(root, "session", 1, "turn_1", "item_1", 0, "🙂"),
-        FinalOutputAccepted(root, "session"),
+        RunCompleted(root, "session"),
     ]
     assert thread.closed and run.final_output == "a🙂bc"
 
@@ -110,7 +110,7 @@ async def test_redacted_run_skips_preview_callback(passive, inherited):
             async with run.stream_approved_output(approve) as reader:
                 events = await collect(reader)
         assert run.final_output == "X"
-        assert [type(event) for event in events] == [FinalOutputAccepted]
+        assert [type(event) for event in events] == [RunCompleted]
 
     if inherited:
 
@@ -131,11 +131,25 @@ async def test_redacted_run_skips_preview_callback(passive, inherited):
 
 
 @pytest.mark.parametrize("approval", [None, ""])
-async def test_no_forced_flush(approval):
+@pytest.mark.parametrize("display", [False, True])
+async def test_withheld_preview_yields_only_completion(approval, display):
     run = scripted()
-    events = await collect(run.subscribe_approved_output(lambda text: approval))
-    assert len(events) == 1 and isinstance(events[0], FinalOutputAccepted)
-    await collect(run.stream_events())
+    seen = []
+
+    def approve(text):
+        seen.append(text)
+        return approval
+
+    if display:
+        async with run.stream_approved_output(approve) as events:
+            (completion,) = await collect(events)
+    else:
+        (completion,) = await collect(run.subscribe_approved_output(approve))
+        await collect(run.stream_events())
+    assert seen
+    assert isinstance(completion, RunCompleted)
+    assert vars(completion) == {"submission_id": completion.submission_id, "session_id": None}
+    assert run.final_output == "answer"
 
 
 @pytest.mark.parametrize("approval", ["other", "\ud83d", False])
@@ -224,7 +238,7 @@ async def test_item_switch_revokes_awaited_approval(tmp_path, threads):
         release.set()
         finish.set()
         await collect(run.stream_events())
-    assert [type(e) async for e in reader] == [FinalOutputAccepted]
+    assert [type(e) async for e in reader] == [RunCompleted]
 
 
 @pytest.mark.parametrize("cancel", ["reader", "immediate", "after_turn"])
@@ -348,7 +362,7 @@ async def test_final_only_waits_for_provider_cleanup_even_with_empty_output(monk
     if cancel:
         assert events == []
     else:
-        assert len(events) == 1 and isinstance(events[0], FinalOutputAccepted)
+        assert len(events) == 1 and isinstance(events[0], RunCompleted)
 
 
 async def test_nested_agent_and_tool_correction_stay_out_of_root_reader():
@@ -376,7 +390,7 @@ async def test_nested_agent_and_tool_correction_stay_out_of_root_reader():
     assert [(e.turn, e.text) for e in events if isinstance(e, ApprovedText)] == [
         (2, "public answer")
     ]
-    assert isinstance(events[-1], FinalOutputAccepted)
+    assert isinstance(events[-1], RunCompleted)
     assert child_model.calls
 
 
@@ -453,7 +467,7 @@ async def test_approval_cannot_outlive_its_candidate(boundary):
             await collect(run.stream_events())
     else:
         await collect(run.stream_events())
-        assert isinstance(events[-1], FinalOutputAccepted)
+        assert isinstance(events[-1], RunCompleted)
         if boundary == "part":
             assert [(e.content_index, e.text) for e in events[:-1]] == [(1, "new")]
         else:
@@ -482,7 +496,7 @@ async def test_retry_before_text_starts_a_fresh_response():
     await collect(run.stream_events())
     chunk, final = events
     assert (chunk.turn, chunk.turn_id, chunk.text) == (1, "second", "answer")
-    assert isinstance(final, FinalOutputAccepted)
+    assert isinstance(final, RunCompleted)
 
 
 @pytest.mark.parametrize("previews", [False, True])
@@ -529,7 +543,7 @@ async def test_hosted_child_raw_text_never_reaches_approval(previews):
         with pytest.raises(ValueError, match="isolate root"):
             await collect(reader)
     else:
-        assert [type(event) async for event in reader] == [FinalOutputAccepted]
+        assert [type(event) async for event in reader] == [RunCompleted]
     raw = await collect(run.stream_events())
     assert any(
         e.type == "raw_response_event" and getattr(e.data, "delta", None) == "hidden" for e in raw
@@ -666,7 +680,7 @@ async def test_display_owns_the_raw_reader_and_accepts_empty_output():
         with pytest.raises(RuntimeError):
             run.subscribe_approved_output()
         (receipt,) = await collect(events)
-        assert isinstance(receipt, FinalOutputAccepted)
+        assert isinstance(receipt, RunCompleted)
         assert run.final_output == ""
     with pytest.raises(RuntimeError, match="before"):
         async with run.stream_approved_output():
@@ -831,7 +845,7 @@ async def test_display_retires_blocked_preview(ending):
             else:
                 receipts = await asyncio.wait_for(reading, 5)
                 assert [type(item) for item in receipts] == (
-                    [FinalOutputAccepted] if ending == "finish" else []
+                    [RunCompleted] if ending == "finish" else []
                 )
             assert stopped.is_set()
         finally:

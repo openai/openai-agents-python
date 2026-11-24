@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..memory.session import Session
     from ..models._run_context import ModelToolHooks
     from ..result import RunResult, RunResultStreaming
+    from ..run_config import ToolNotFoundBehavior
     from .run_steps import ProcessedResponse
 
 
@@ -32,10 +33,12 @@ class ResumableRun:
         self._source = source
         self._items: list[TResponseInputItem] = []
 
-    async def begin(self, input: Any, tool_hooks: ModelToolHooks) -> None:
+    async def begin(
+        self, input: Any, tool_hooks: ModelToolHooks, tool_not_found_behavior: ToolNotFoundBehavior
+    ) -> None:
         if self._source is None:
             raise ResumableSessionError("invalid_state")
-        await self._source._begin_run(input, tool_hooks)
+        await self._source._begin_run(input, tool_hooks, tool_not_found_behavior)
         self._items = self._source._get_history()
 
     async def release_rejected_input(self) -> None:

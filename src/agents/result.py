@@ -53,7 +53,7 @@ from .run_internal.run_steps import (
     QueueCompleteSentinel,
 )
 from .run_state import RunState, _PendingSessionWrite
-from .stream_events import ApprovedText, FinalOutputAccepted, StreamEvent
+from .stream_events import ApprovedText, RunCompleted, StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .tracing.traces import TraceState
@@ -851,7 +851,11 @@ class RunResultStreaming(RunResultBase):
                 task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
 
-        await task
+        if self.agent_tool_invocation is not None:
+            # The stream iterator joins this same save if the manager cancels the wrapper.
+            await asyncio.shield(task)
+        else:
+            await task
 
     def ensure_sandbox_cleanup_on_completion(self) -> None:
         if (
@@ -1031,24 +1035,25 @@ class RunResultStreaming(RunResultBase):
 
     def subscribe_approved_output(
         self, approve_preview: Approve | None = None
-    ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
+    ) -> AsyncGenerator[ApprovedText | RunCompleted, None]:
         """Subscribe once, immediately after Runner.run_streamed and before yielding control.
 
-        By default, yield only FinalOutputAccepted after guardrails, persistence and cleanup.
-        Read final_output separately. Interrupted, failed and cancelled runs never notify.
+        By default, yield only RunCompleted on success after guardrails, persistence and cleanup.
+        It grants no permission to display final_output. Interrupted, failed and cancelled
+        runs never yield RunCompleted.
 
         The optional approve_preview callback receives pending text from one assistant message part.
         Return an exact prefix to publish, or None or an empty string to wait.
         Previews are live only. A new item, part or turn discards pending text.
         Item or response completion discards queued text and pending previews.
         The reader cancels and joins preview coroutines. Return an existing Task
-        or Future to retain ownership of it. Check final_output separately before display.
-        Published ApprovedText cannot be retracted, even if guardrails or the run later fail.
+        or Future to retain ownership of it. ApprovedText carries only an approved preview.
+        Published previews cannot be retracted, even if guardrails or the run later fail.
 
         Prefixes require an isolated, numbered Responses stream with response and item IDs.
         With active or inherited RunConfig.redact_text, the reader skips approve_preview
-        and yields only FinalOutputAccepted on success. Private text can span deltas.
-        Hosted multi-agent streams support final notifications only.
+        and yields only RunCompleted on success. Private text can span deltas.
+        Hosted multi-agent streams support completion notifications only.
         Gaps, invalid prefixes and buffers over 65536 UTF-8 bytes raise ValueError in this reader.
         The submission_id identifies this result. The turn_id is the provider response ID.
 
@@ -1061,11 +1066,10 @@ class RunResultStreaming(RunResultBase):
 
             run = Runner.run_streamed(agent, prompt)
             receipts = run.subscribe_approved_output()
-            progress = 0
-            async for event in run.stream_events():
-                progress += 1
+            async for _ in run.stream_events():
+                pass
             async for receipt in receipts:
-                await show_if_permitted(run.final_output)
+                await mark_complete(receipt.submission_id)
         """
         if (
             self.run_loop_task is None
@@ -1088,27 +1092,28 @@ class RunResultStreaming(RunResultBase):
     @asynccontextmanager
     async def stream_approved_output(
         self, approve_preview: Approve | None = None
-    ) -> AsyncIterator[AsyncIterator[ApprovedText | FinalOutputAccepted]]:
+    ) -> AsyncIterator[AsyncIterator[ApprovedText | RunCompleted]]:
         """Own the streaming run and privately drain its raw events.
 
         Enter immediately after Runner.run_streamed(), before yielding control.
         The iterator uses the same approval rules as subscribe_approved_output().
         Active or inherited RunConfig.redact_text suppresses previews and skips the callback.
-        Omit approve_preview for final notifications only. Check final_output separately
-        for disclosure before displaying it. Published previews cannot be
+        ApprovedText carries only an approved preview. Published previews cannot be
         retracted, even if the run later fails or returns a different answer.
+        Omit approve_preview to receive only RunCompleted. It signals success after
+        guardrails, persistence and cleanup. It grants no permission to display final_output.
 
         .. code-block:: python
 
-            from agents.stream_events import ApprovedText, FinalOutputAccepted
+            from agents.stream_events import ApprovedText, RunCompleted
 
             run = Runner.run_streamed(agent, prompt)
             async with run.stream_approved_output(approve_preview) as events:
                 async for event in events:
                     if isinstance(event, ApprovedText):
                         await show_preview(event.text)
-                    elif isinstance(event, FinalOutputAccepted):
-                        await show_if_permitted(run.final_output)
+                    elif isinstance(event, RunCompleted):
+                        await mark_complete(event.submission_id)
 
         Do not consume stream_events() separately. Run errors propagate during
         iteration or on early context exit. Consume the iterator inside this
@@ -1130,7 +1135,7 @@ class RunResultStreaming(RunResultBase):
 
         async def display(
             result: RunResultStreaming,
-        ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
+        ) -> AsyncGenerator[ApprovedText | RunCompleted, None]:
             nonlocal joined
             receipt = None
             async for event in reader:
@@ -1233,7 +1238,7 @@ class RunResultStreaming(RunResultBase):
             current_task.add_done_callback(consumer_task_done)
 
         register_current_consumer()
-        cancelled = False
+        skip_cleanup_wait = False
         try:
             while True:
                 register_current_consumer()
@@ -1258,8 +1263,10 @@ class RunResultStreaming(RunResultBase):
                     self._waiting_on_event_queue = True
                     item = await self._event_queue.get()
                 except asyncio.CancelledError:
-                    cancelled = True
-                    self.cancel()
+                    # An agent tool must settle its nested run before returning to the manager.
+                    skip_cleanup_wait = self.agent_tool_invocation is None
+                    if skip_cleanup_wait or self._cancel_mode != "immediate":
+                        self.cancel()
                     raise
                 finally:
                     self._waiting_on_event_queue = False
@@ -1287,9 +1294,8 @@ class RunResultStreaming(RunResultBase):
             unregister_consumer()
             try:
                 try:
-                    if cancelled:
-                        # Queue-wait cancellation should return without awaiting long-running tasks.
-                        # Tasks have already been cancelled above.
+                    if skip_cleanup_wait:
+                        # Top-level consumers can stop without waiting for long-running tasks.
                         self._cleanup_tasks()
                     else:
                         # Ensure main execution completes before cleanup to avoid race conditions
@@ -1302,7 +1308,7 @@ class RunResultStreaming(RunResultBase):
                         # Safely terminate background tasks after main execution has finished.
                         self._cleanup_tasks()
                 finally:
-                    if not cancelled:
+                    if not skip_cleanup_wait:
                         await self._await_model_provider_cleanup()
                         await self._run_sandbox_cleanup()
             finally:

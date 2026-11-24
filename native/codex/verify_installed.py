@@ -13,6 +13,8 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -187,6 +189,47 @@ def approval_hooks(folder):
         return "hook-output-substituted"
 
     return ToolExecutionConfig(prepare_tool_input=prepare_input, prepare_tool_output=prepare_output)
+
+
+async def check_failed_relay(agent, config, session_id, saved, *, timeout):
+    from unittest.mock import patch
+
+    from agents import Runner
+    from agents.memory.resumable_session import ResumableSession
+    from agents.models._codex_tool_hooks import CodexToolHooks
+
+    # Start each fault from a separate copy of the exited worker's pending approval.
+    store = ApprovalStore()
+    store.value = saved
+    session = await ResumableSession.resume(store, session_id)
+    state = await session.load_state(agent)
+    state.approve(state.get_interruptions()[0])
+    events = []
+    configure = CodexToolHooks.configure
+
+    async def short_deadline(self, resources):
+        settings = await configure(self, resources)
+        settings["handlers"]["PreToolUse"]["hooks"][0]["timeout"] = 1
+        return settings
+
+    async def unavailable(self, data):
+        events.append(data["event"])
+        if timeout:
+            await asyncio.Event().wait()
+        raise RuntimeError("Synthetic relay failure")
+
+    # Keep the real MCP transport and Codex's own deadline and approval checks.
+    with (
+        patch.object(CodexToolHooks, "configure", short_deadline),
+        patch.object(CodexToolHooks, "decision", unavailable),
+    ):
+        try:
+            await asyncio.wait_for(Runner.run(agent, state, run_config=config), timeout=20)
+        except RuntimeError as error:
+            assert "approval" in str(error), str(error)
+        else:
+            raise AssertionError("A failed hook allowed the approved call.")
+    assert events == ["PreToolUse"], events
 
 
 def supports_file_sandbox():
@@ -582,6 +625,15 @@ request_max_retries = 0
                 tracing_disabled=True,
                 tool_execution=approval_hooks(folder),
             )
+            if approved and hooked:
+                await check_failed_relay(
+                    plain,
+                    options,
+                    session_id,
+                    store.value,
+                    timeout=approval_item["name"] == "apply_patch",
+                )
+                assert (target.read_bytes() if target.exists() else None) == before
             result = await Runner.run(plain, state, run_config=options)
             if hooked:
                 assert events.read_text() == ("output" if approved else "input")
@@ -708,13 +760,182 @@ extends = ":workspace"
             assert not thread.is_alive(), "The synthetic server did not stop."
 
 
-async def verify(pure, folder):
+async def example_route(folder, examples_dir):
+    """Exercise exact example entry points through the installed native wheel."""
+    assert sys.platform in {"linux", "darwin"}, "The example fixture requires a Unix host."
+    scripts = {
+        "approve": examples_dir / "native_approval.py",
+        "reject": examples_dir / "native_approval.py",
+        "workspace": examples_dir / "native_workspace.py",
+    }
+    assert all(path.is_file() for path in scripts.values()), "Native example files are missing."
+    case = {}
+    errors = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            try:
+                assert self.path == "/v1/responses"
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                case["requests"].append(body)
+                number = len(case["requests"])
+                assert number <= 2, "The example made an extra inference request."
+                if number == 1:
+                    tool, namespace = next(
+                        (member, spec.get("name") if spec.get("type") == "namespace" else None)
+                        for spec in body["tools"]
+                        for member in spec.get("tools", [spec])
+                        if member.get("name") == "exec_command"
+                    )
+                    if case["name"] == "workspace":
+                        arguments = {"cmd": "cat facts.txt", "login": False}
+                    else:
+                        text = next(
+                            content["text"]
+                            for item in body["input"]
+                            if item.get("role") == "user"
+                            for content in item.get("content", [])
+                            if content.get("type") == "input_text"
+                            and content["text"].startswith("Call exec_command exactly once")
+                        )
+                        arguments = json.loads(text.split("\n", 1)[1])
+                        assert arguments["sandbox_permissions"] == "require_escalated"
+                        script = Path(shlex.split(arguments["cmd"])[-1])
+                        assert script.name == "write_fixture.py" and script.is_file()
+                        case["target"] = script.parent / "approved.txt"
+                        assert not case["target"].exists(), "The command ran before approval."
+                    item = {
+                        "type": "function_call",
+                        "call_id": "example-command",
+                        "name": tool["name"],
+                        "arguments": json.dumps(arguments),
+                    }
+                    if namespace:
+                        item["namespace"] = namespace
+                else:
+                    outputs = [
+                        item
+                        for item in body["input"]
+                        if item.get("type") == "function_call_output"
+                        and item.get("call_id") == "example-command"
+                    ]
+                    assert len(outputs) == 1, "The native command result was not replayed once."
+                    if case["name"] == "workspace":
+                        match = re.search(r"fixture-[0-9a-f]{16}", str(outputs[0]["output"]))
+                        assert match, "The native read did not return the workspace fixture."
+                        text = match.group()
+                    else:
+                        target = case["target"]
+                        assert target.exists() == (case["name"] == "approve")
+                        if target.exists():
+                            assert target.read_text(encoding="utf-8") == "approved\n"
+                        else:
+                            assert "not approved" in str(outputs[0]["output"])
+                        text = "approval resolved"
+                    item = {
+                        "id": "example-result",
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": text}],
+                    }
+                response = {
+                    "id": f"example-{number}",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                }
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for event in (
+                    {"type": "response.created", "response": response},
+                    {"type": "response.output_item.done", "item": item},
+                    {"type": "response.completed", "response": response},
+                ):
+                    self.wfile.write(
+                        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+                    )
+                    self.wfile.flush()
+            except Exception as error:
+                errors.append(f"{type(error).__name__}: {error}")
+                self.send_error(500)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = folder / "codex" / "config.toml"
+    config.write_text(
+        f"""model = "installed"
+model_catalog_json = {json.dumps(str(folder / "catalog.json"))}
+model_provider = "example"
+check_for_update_on_startup = false
+[features]
+plugins = false
+code_mode = false
+hooks = false
+[model_providers.example]
+name = "Example loopback fixture"
+base_url = "http://127.0.0.1:{server.server_port}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+request_max_retries = 0
+stream_max_retries = 0
+""",
+        encoding="utf-8",
+    )
+    receipts = {}
+    try:
+        for name, script in scripts.items():
+            case.clear()
+            case.update(name=name, requests=[])
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                str(script),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(b"" if name == "workspace" else f"{name}\n".encode()),
+                    timeout=25,
+                )
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+            assert not errors, errors
+            assert process.returncode == 0, stderr.decode(errors="replace")
+            assert len(case["requests"]) == 2
+            expected = {
+                "workspace": "Native workspace read passed",
+                "approve": "Approved command wrote the fixture after recovery.",
+                "reject": "Rejected command left the fixture absent.",
+            }[name]
+            assert expected in stdout.decode(), stdout.decode(errors="replace")
+            if name != "workspace":
+                assert not case["target"].parent.exists(), "The temporary workspace survived."
+            receipts[name] = "passed"
+        return receipts
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "The example peer did not stop."
+
+
+async def verify(pure, folder, examples_dir=None):
     assert sys.prefix != sys.base_prefix, "Verification requires a virtual environment."
     assert sys.flags.isolated and not sys.flags.optimize, "Run Python with -I and without -O."
     await default_route()
     report = {"passed": True, "version": installed_package(pure)}
     if not pure:
         report["native"] = await native_route(folder)
+        if examples_dir is not None:
+            report["examples"] = await example_route(folder, examples_dir)
     return report
 
 
@@ -722,15 +943,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pure", action="store_true", help="verify the ordinary pure Python wheel")
     parser.add_argument("--output", type=Path, help="write the JSON receipt here")
+    parser.add_argument(
+        "--examples-dir", type=Path, help="verify the native workspace and approval examples"
+    )
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--pause", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.pure and args.examples_dir is not None:
+        parser.error("--examples-dir requires a native wheel")
     if args.pause is not None:
         asyncio.run(pause_approval(args.pause))
         return 0
     if args.worker is not None:
         try:
-            report = asyncio.run(asyncio.wait_for(verify(args.pure, args.worker), timeout=90))
+            report = asyncio.run(
+                asyncio.wait_for(verify(args.pure, args.worker, args.examples_dir), timeout=90)
+            )
         except Exception as error:
             report = {
                 "passed": False,
@@ -768,6 +996,8 @@ def main():
             command.append("--pure")
         if args.output is not None:
             command.extend(("--output", str(args.output.resolve())))
+        if args.examples_dir is not None:
+            command.extend(("--examples-dir", str(args.examples_dir.resolve())))
         return subprocess.run(command, cwd=folder / "workspace", env=env, timeout=110).returncode
 
 

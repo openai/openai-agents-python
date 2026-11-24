@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ..items import TResponseStreamEvent
 from ..memory.session import await_session_mutation
-from ..stream_events import ApprovedText, FinalOutputAccepted
+from ..stream_events import ApprovedText, RunCompleted
 
 if TYPE_CHECKING:
     from ..models.interface import Model
@@ -140,7 +140,7 @@ class ApprovedOutput:
 
     async def read(
         self, result: RunResultStreaming
-    ) -> AsyncGenerator[ApprovedText | FinalOutputAccepted, None]:
+    ) -> AsyncGenerator[ApprovedText | RunCompleted, None]:
         task = result.run_loop_task
         assert task is not None
 
@@ -230,7 +230,7 @@ class ApprovedOutput:
                 await result._await_model_provider_cleanup()
                 result._check_errors()
                 if not revoked():
-                    yield FinalOutputAccepted(self.submission_id, self.session_id)
+                    yield RunCompleted(self.submission_id, self.session_id)
         finally:
             self.approve = None
             self.retire()

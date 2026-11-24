@@ -58,8 +58,11 @@ class SandboxAgent(Agent[TContext]):
     """User identity used for model-facing sandbox tools such as shell, file reads, and patches."""
 
     _sandbox_concurrency_guard: object | None = field(default=None, init=False, repr=False)
-    _sandbox_capability_tools: list[Tool] | None = field(
+    _sandbox_capability_tools: list[tuple[int, Tool]] | None = field(
         default=None, init=False, repr=False, compare=False
+    )
+    _sandbox_capability_sources: tuple[Capability, ...] = field(
+        default=(), init=False, repr=False, compare=False
     )
 
     if TYPE_CHECKING:
@@ -110,7 +113,10 @@ class SandboxAgent(Agent[TContext]):
         if self._sandbox_capability_tools is not None:
             # Refresh application tools without recreating the session-bound capability tools.
             public_agent = get_public_agent(self)
-            self.tools = [*public_agent.tools, *self._sandbox_capability_tools]
+            self.tools = [
+                *public_agent.tools,
+                *(tool for _, tool in self._sandbox_capability_tools),
+            ]
         return await super().get_all_tools(run_context)
 
     def __post_init__(self) -> None:
