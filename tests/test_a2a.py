@@ -226,6 +226,8 @@ async def test_manager_filters_500_names_and_calls_two_hosts(tmp_path: Path):
             assert "weather-west" in str(outputs["list"]) and "weather-east" in str(outputs["list"])
             assert "other-" not in str(outputs["list"])
             assert outputs["one"] == "no" and outputs["two"] == "yes"
+            east_only = replace(registry, specialists={"weather-east": names["weather-east"]})
+            assert east_only.reserved_calls() == [("two", "weather-east")]
             assert east.methods == ["SendMessage"]
             assert west.methods == ["card", "SendMessage"]
             assert await run_manager(registry, [[ask("weather-east", "two")]]) == {"two": "yes"}
@@ -261,20 +263,21 @@ async def test_lost_ack_restart_verifies_receipt_and_projects_original_result(tm
         peer = Receiver(remote, "no")
         async with TestServer(peer.app, port=port):
             restored = registry(db, peer, url)
-            (call_id,) = db.execute(
-                "SELECT call_id FROM calls WHERE owner=? AND run_id=?",
-                (restored.owner, restored.run_id),
-            ).fetchone()
+            [(call_id, name)] = restored.reserved_calls()
+            assert name == "east"
             with pytest.raises(PermissionError):
                 await restored.ask(call_id, "east", "Different?")
-            with pytest.raises(PermissionError):
-                await replace(restored, specialists={}).recover(call_id)
-            with pytest.raises(PermissionError):
-                await replace(restored, specialists={"east": stored(url + "/other")}).recover(
-                    call_id
-                )
-            with pytest.raises(UnresolvedCall):
-                await replace(restored, owner="foreign").recover(call_id)
+            for denied in (
+                replace(restored, specialists={}),
+                replace(restored, specialists={"east": stored(url + "/other")}),
+            ):
+                assert denied.reserved_calls() == []
+                with pytest.raises(PermissionError):
+                    await denied.recover(call_id)
+            for other in (replace(restored, owner="foreign"), replace(restored, run_id="other")):
+                assert other.reserved_calls() == []
+                with pytest.raises(UnresolvedCall):
+                    await other.recover(call_id)
             with pytest.raises(UnresolvedCall):
                 await restored.recover("missing")
             receipt = Receipt(*remote.execute("SELECT * FROM effects").fetchone())

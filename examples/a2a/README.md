@@ -55,14 +55,13 @@ The example requires a cooperating receiver. Its business effect is one immutabl
 
 The manager reserves the owner, run and tool call ID in SQLite before sending. It binds the reservation to the name, approved endpoint, question digest and a new message ID. The reservation survives failure even if the request never reached the service. A new run or call ID permits a new send.
 
-A failed run may leave the application without the question the model generated. The journal stores only its digest. On restart, reopen the same database and restore the registry for the authenticated owner and original run. To find the saved call IDs and specialist names, query the journal.
+A failed run may leave the application without the question the model generated. The journal stores only its digest. On restart, reopen the same database and restore the registry for the authenticated owner and original run. List the call IDs and specialist names your current grants allow.
 
 ```python
-calls = registry.db.execute(
-    "SELECT call_id, name FROM calls WHERE owner=? AND run_id=?",
-    (registry.owner, registry.run_id),
-).fetchall()
+calls = registry.reserved_calls()  # (call_id, name) pairs
 ```
+
+Completed calls also have reservations. Listing them makes no network requests and does not verify their outcomes.
 
 For the call you need to reconcile, use `verdict = await registry.recover(call_id)`. This application method never creates a reservation, sends a question or resumes the manager. If the manager repeats an existing call with identical arguments, `ask` uses the same read path.
 

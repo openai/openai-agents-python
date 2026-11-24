@@ -67,6 +67,19 @@ class Registry:
         task = await specialist.send_message(question, message_id=message_id) if created else None
         return await self._result(call_id, expected=binding, task=task)
 
+    def reserved_calls(self) -> list[tuple[str, str]]:
+        """List authorized (call ID, name) pairs for this run, including completed calls."""
+        rows = self.db.execute(
+            "SELECT call_id, name, endpoint FROM calls WHERE owner=? AND run_id=?",
+            (self.owner, self.run_id),
+        )
+        return [
+            (call_id, name)
+            for call_id, name, endpoint in rows
+            if (specialist := self.specialists.get(name)) is not None
+            and specialist.rpc_url == endpoint
+        ]
+
     async def recover(self, call_id: str) -> str:
         """Read a reserved call for this owner and run without sending a new message."""
         return await self._result(call_id)
