@@ -874,17 +874,19 @@ async def stream_response_with_retry(
             except _StreamAttemptSkipped as skipped:
                 raise skipped.reason from None
             except BaseException as error:
-                if isinstance(error, ModelTimeoutError):
-                    # The timed owner has already been cancelled and drained. Do not retain its
-                    # task, result queues, or previous event in the public timeout traceback frame.
-                    stream = None
-                    stream_owner = None
-                    stream_requests = None
-                    stream_results = None
-                    event = None
-                    result_value = None
-                if stream_owner is None:
-                    await _close_async_iterator_quietly(stream)
+                try:
+                    if stream_owner is None:
+                        await _close_async_iterator_quietly(stream)
+                finally:
+                    if isinstance(error, ModelTimeoutError):
+                        # Cancellation can interrupt close and chain the original timeout.
+                        # Drop the retry frame's references even on that path.
+                        stream = None
+                        stream_owner = None
+                        stream_requests = None
+                        stream_results = None
+                        event = None
+                        result_value = None
                 if isinstance(error, asyncio.CancelledError | GeneratorExit):
                     raise
                 if not isinstance(error, Exception):

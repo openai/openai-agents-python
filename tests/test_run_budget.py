@@ -22,8 +22,10 @@ from agents import (
     RunBudget,
     RunBudgetError,
     RunConfig,
+    RunInbox,
     Runner,
     RunState,
+    ToolExecutionConfig,
     Usage,
     UserError,
     input_guardrail,
@@ -137,6 +139,94 @@ async def test_correction_uses_observed_totals(streamed, usage, policy, code):
         assert len(model.calls) == 1
     else:
         assert (await run(agent, budget, streamed)).final_output == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "budget,total,operation,reason",
+    [
+        (RunBudget(max_model_calls=1), 1, "queue", "run_budget_exceeded"),
+        (RunBudget(max_tokens=5), 5, "steer", "run_budget_exceeded"),
+        (RunBudget(max_tokens=5), None, "queue", "run_budget_usage_unavailable"),
+    ],
+)
+async def test_exhausted_budget_keeps_answer_without_admitting_inbox_input(
+    streamed, budget, total, operation, reason
+):
+    inbox, session = RunInbox(), SimpleListSession()
+    receipts, guarded = [], []
+
+    @input_guardrail
+    def check(ctx, agent, value):
+        guarded.append(value)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    def first(call):
+        send = inbox.steer if operation == "steer" else inbox.queue
+        receipts.append(send("over budget"))
+        return step(get_text_message("completed"), total)
+
+    model = ScriptedModel([ModelStep.respond(first)])
+    agent = Agent(name="root", model=model, input_guardrails=[check])
+    result = await run(agent, budget, streamed, inbox=inbox, session=session)
+
+    assert result.final_output == "completed"
+    assert result.previous_outputs == ()
+    assert len(model.calls) == len(guarded) == 1
+    outcome = await asyncio.wait_for(receipts[0].wait(), 3)
+    assert outcome.status == "not_submitted" and outcome.reason == reason
+    assert outcome.turn_number is None and not outcome.retained
+    for history in (await session.get_items(), result.to_input_list()):
+        initial, answer = history
+        assert initial["role"] == "user" and initial["content"] == "begin"
+        assert answer["role"] == "assistant" and answer["content"][0]["text"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_required_tool_turn_keeps_budget_error_without_admitting_a_steer(streamed):
+    inbox, session = RunInbox(), SimpleListSession()
+    receipts, guarded = [], []
+
+    @tool
+    async def work() -> str:
+        receipts.append(inbox.steer("optional steer"))
+        return "completed tool work"
+
+    @input_guardrail
+    def check(ctx, agent, value):
+        guarded.append(value)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_function_tool_call("work", "{}")]])
+    agent = Agent(name="root", model=model, tools=[work], input_guardrails=[check])
+    with pytest.raises(RunBudgetError) as exc:
+        await run(agent, RunBudget(max_model_calls=1), streamed, inbox=inbox, session=session)
+    assert exc.value.limit == "model_calls"
+    assert len(model.calls) == len(guarded) == 1
+    outcome = await asyncio.wait_for(receipts[0].wait(), 3)
+    assert outcome.status == "not_submitted" and not outcome.retained
+    history = await session.get_items()
+    assert [item["content"] for item in history if item.get("role") == "user"] == ["begin"]
+    assert history[-1]["output"] == "completed tool work"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_inbox_budget_check_leaves_the_last_call_available(streamed):
+    inbox = RunInbox()
+
+    def first(call):
+        inbox.queue("within budget")
+        return step(get_text_message("first"))
+
+    model = ScriptedModel([ModelStep.respond(first), step(get_text_message("last"), 5)])
+    budget = RunBudget(max_model_calls=2, max_tokens=5, missing_usage="continue")
+    result = await run(Agent(name="root", model=model), budget, streamed, inbox=inbox)
+    assert len(model.calls) == 2
+    assert result.previous_outputs == ("first",)
+    assert result.final_output == "last"
 
 
 @pytest.mark.asyncio
@@ -415,7 +505,8 @@ async def test_child_budget_requires_supported_schema_on_child_and_parent():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [False, True])
-async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(approved):
+@pytest.mark.parametrize("policy", ["budget", "editor", "both"])
+async def test_required_grandchild_checks_grant_before_restore_and_resume(approved, policy):
     effects = []
 
     @tool(needs_approval=True)
@@ -428,11 +519,25 @@ async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(ap
 
     leaf_model = model(get_function_tool_call("record", call_id="leaf"))
     leaf = Agent(name="leaf", tools=[record], model=leaf_model)
-    config = RunConfig(budget=RunBudget(max_model_calls=2), tracing_disabled=True)
+
+    async def edit(call, texts):
+        effects.append("edit")
+        return ("edited",)
+
+    config = RunConfig(
+        budget=RunBudget(max_model_calls=2) if policy != "editor" else None,
+        tool_execution=ToolExecutionConfig(tool_text_transforms=[(record, edit)])
+        if policy != "budget"
+        else None,
+        tracing_disabled=True,
+    )
     allowed = True
+    grants = []
 
     async def grant(ctx, agent):
         assert agent.name == "middle"
+        if store.checkpoint(session.session_id)["status"] == "paused":
+            grants.append(ctx.context["allowed"])
         return allowed and ctx.context["allowed"]
 
     inner = leaf.as_tool("inner", "Delegate", run_config=config, is_enabled=grant)
@@ -482,13 +587,20 @@ async def test_unavailable_budgeted_grandchild_refuses_restore_before_sibling(ap
         pending.approve(item)
     for enabled, context in [(True, None), (False, {"allowed": True}), (True, {"allowed": False})]:
         allowed = enabled
-        with pytest.raises(UserError, match="RunBudget"):
+        grants.clear()
+        saved_checkpoint = store.records[session.session_id]
+        with pytest.raises(UserError, match="text editor" if policy == "editor" else "RunBudget"):
             await run(root, None, approved, pending, context=context)
-        assert store.checkpoint(session.session_id)["status"] == "paused"
+        assert grants == [bool(context and context["allowed"])]
+        assert store.records[session.session_id] == saved_checkpoint
         assert not effects
         assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 1
+    grants.clear()
     result = await run(root, None, approved, pending, context={"allowed": True})
-    assert result.final_output == "done" and effects == ["record", "record"]
+    assert grants == [True]
+    assert result.final_output == "done"
+    expected = ["record", "record"] if policy == "budget" else ["edit", "record", "record"]
+    assert sorted(effects) == expected
     assert len(root_model.calls) == len(middle_model.calls) == len(leaf_model.calls) == 2
 
 

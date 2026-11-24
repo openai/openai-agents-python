@@ -6,13 +6,26 @@ from typing import Any, cast
 import httpx2
 import pytest
 from openai import AsyncOpenAI, BadRequestError
-from openai.types.responses import ResponseReasoningItem
+from openai.types.responses import ResponseOutputItem, ResponseReasoningItem
 from openai.types.responses.response_computer_tool_call import (
     ActionScreenshot,
     ResponseComputerToolCall,
 )
 
-from agents import Agent, ComputerTool, InputItem, RunConfig, Runner, function_tool, tool_namespace
+from agents import (
+    Agent,
+    ComputerTool,
+    InputItem,
+    RunConfig,
+    Runner,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    ToolOutputGuardrailData,
+    function_tool,
+    tool_input_guardrail,
+    tool_namespace,
+    tool_output_guardrail,
+)
 from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorError, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
@@ -835,6 +848,7 @@ async def test_server_response_acceptance_commits_before_hook_failure(
     model, agent, state, _calls = await _make_after_turn_state(auto_previous_response_id=True)
     agent_hooks = CountAgentResponseHook()
     agent.hooks = agent_hooks
+    prior_response_count = len(state.to_json()["model_responses"])
     state.add_input("Late input")
     model.enqueue([get_text_message("Accepted")])
 
@@ -843,6 +857,12 @@ async def test_server_response_acceptance_commits_before_hook_failure(
         with pytest.raises(RuntimeError, match="after response"):
             async for _event in failed.stream_events():
                 pass
+        # A failed stream still checkpoints the response accepted before the hook ran.
+        checkpoint = failed.to_state()
+        saved = checkpoint.to_json()["model_responses"]
+        assert len(saved) == prior_response_count + 1
+        assert saved == state.to_json()["model_responses"]
+        state = checkpoint
     else:
         with pytest.raises(RuntimeError, match="after response"):
             await Runner.run(agent, state, hooks=FailAfterResponse())
@@ -857,10 +877,137 @@ async def test_server_response_acceptance_commits_before_hook_failure(
     state = await RunState.from_json(agent, state.to_json())
     queued_outputs = model.remaining_steps
 
+    calls_before_recovery = len(model.calls)
     recovered = await Runner.run(agent, state)
+    assert len(model.calls) == calls_before_recovery
     assert recovered.final_output == "Accepted"
     assert agent_hooks.call_count == 1
     assert model.remaining_steps == queued_outputs
+
+
+@pytest.mark.asyncio
+async def test_queued_answer_survives_stream_hook_failure() -> None:
+    class Hooks(RunHooks[Any]):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def on_llm_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse
+        ) -> None:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("after queued answer")
+
+    model = ScriptedModel([[get_text_message("First")], [get_text_message("Second")]])
+    agent = Agent(name="assistant", model=model)
+    hooks = Hooks()
+    stream = Runner.run_streamed(agent, "First task", auto_previous_response_id=True, hooks=hooks)
+    receipt = stream.queue("Second task")
+    with pytest.raises(RuntimeError, match="after queued answer"):
+        async for _event in stream.stream_events():
+            pass
+
+    recovered = await Runner.run(agent, stream.to_state(), hooks=hooks)
+    assert recovered.final_output == "Second"
+    assert len(model.calls) == len(recovered.raw_responses) == hooks.calls == 2
+    assert (await receipt.wait()).status == "submitted"
+    assert [item.get("role") for item in recovered.to_input_list()] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("serialize", [False, True])
+@pytest.mark.parametrize("streamed_resume", [False, True])
+async def test_queued_tool_recovery_uses_failed_stream_checkpoint(
+    serialize: bool, streamed_resume: bool
+) -> None:
+    effects: list[str] = []
+    ended: list[str] = []
+
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @function_tool(tool_input_guardrails=[check_input], tool_output_guardrails=[check_output])
+    def record(destination: str) -> str:
+        effects.append(destination)
+        return f"recorded:{destination}"
+
+    class Hooks(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            ended.append(result)
+            if result == "recorded:Rome":
+                raise RuntimeError("after recording Rome")
+
+    def record_call(destination: str) -> ResponseOutputItem:
+        return get_function_tool_call(
+            "record", json.dumps({"destination": destination}), call_id=f"call-{destination}"
+        )
+
+    model = ScriptedModel(
+        [
+            [record_call("Paris")],
+            [get_text_message("First task done")],
+            [record_call("Rome")],
+            [get_text_message("Second task done")],
+        ]
+    )
+    agent = Agent(name="assistant", model=model, tools=[record])
+    hooks = Hooks()
+    failed = Runner.run_streamed(agent, "Record Paris", auto_previous_response_id=True, hooks=hooks)
+    receipt = failed.queue("Record Rome")
+    with pytest.raises(UserError, match="after recording Rome"):
+        async for _event in failed.stream_events():
+            pass
+
+    outcome = await receipt.wait()
+    assert outcome.status == "submitted"
+    assert len(model.calls) == 3
+    assert effects == ["Paris", "Rome"]
+    state = failed.to_state()
+    if serialize:
+        state = await RunState.from_json(agent, state.to_json())
+    if streamed_resume:
+        recovered = Runner.run_streamed(agent, state, hooks=hooks)
+        async for _event in recovered.stream_events():
+            pass
+    else:
+        recovered = await Runner.run(agent, state, hooks=hooks)
+    assert recovered.final_output == "Second task done"
+    assert len(model.calls) == len(recovered.raw_responses) == 4
+    assert effects == ["Paris", "Rome"]
+    assert ended == ["recorded:Paris", "recorded:Rome"]
+    for history in (recovered.to_input_list(), recovered.to_input_list(mode="normalized")):
+        assert [
+            (item.get("type"), item.get("call_id")) for item in history if item.get("call_id")
+        ] == [
+            ("function_call", "call-Paris"),
+            ("function_call_output", "call-Paris"),
+            ("function_call", "call-Rome"),
+            ("function_call_output", "call-Rome"),
+        ]
+    assert [r.output.output_info for r in recovered.tool_input_guardrail_results] == [
+        "call-Paris",
+        "call-Rome",
+    ]
+    assert [r.output.output_info for r in recovered.tool_output_guardrail_results] == [
+        "call-Paris",
+        "call-Rome",
+    ]
+    retry_input = cast(list[TResponseInputItem], model.calls[-1].input)
+    assert [_item_type(item) for item in retry_input] == ["function_call_output"]
+    assert cast(dict[str, Any], retry_input[0])["call_id"] == "call-Rome"
+    assert await receipt.wait() == outcome
 
 
 @pytest.mark.asyncio
@@ -885,6 +1032,7 @@ async def test_server_acceptance_commits_before_invocation_validation_failure(
         with pytest.raises(ModelBehaviorError, match="completed tool call ID"):
             async for _event in failed.stream_events():
                 pass
+        state = failed.to_state()
     else:
         with pytest.raises(ModelBehaviorError, match="completed tool call ID"):
             await Runner.run(agent, state)
@@ -952,6 +1100,7 @@ async def test_server_accepted_computer_start_hook_failure_is_not_replayed(
         with pytest.raises(RuntimeError, match="computer hook failed"):
             async for _event in failed.stream_events():
                 pass
+        state = failed.to_state()
     else:
         with pytest.raises(RuntimeError, match="computer hook failed"):
             await Runner.run(agent, state, hooks=hooks)
@@ -1015,6 +1164,7 @@ async def test_server_accepted_tool_side_effect_failure_is_safe(
         with pytest.raises(UserError, match="tool hook failed"):
             async for _event in failed.stream_events():
                 pass
+        state = failed.to_state()
     else:
         with pytest.raises(UserError, match="tool hook failed"):
             await Runner.run(agent, state, hooks=FailToolHook())

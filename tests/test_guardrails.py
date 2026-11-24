@@ -16,6 +16,7 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunConfig,
     RunContextWrapper,
+    RunInbox,
     Runner,
     TResponseInputItem,
     UserError,
@@ -28,6 +29,7 @@ from agents.testing import ScriptedModel
 
 from .test_responses import get_function_tool_call, get_text_message
 from .testing_processor import fetch_events
+from .utils.simple_session import SimpleListSession
 
 SHORT_DELAY = 0.01
 MEDIUM_DELAY = 0.03
@@ -740,6 +742,7 @@ async def test_parallel_guardrail_error_cancels_streaming_model():
     model_started = asyncio.Event()
     model_cancelled = asyncio.Event()
     model_finished = asyncio.Event()
+    release_cleanup = asyncio.Event()
 
     @input_guardrail(run_in_parallel=True)
     async def raising_parallel_check(
@@ -757,6 +760,7 @@ async def test_parallel_guardrail_error_cancels_streaming_model():
             yield
         except asyncio.CancelledError:
             model_cancelled.set()
+            await release_cleanup.wait()
             raise
         finally:
             model_finished.set()
@@ -773,12 +777,150 @@ async def test_parallel_guardrail_error_cancels_streaming_model():
 
     with patch.object(model, "stream_response", side_effect=blocking_stream_response):
         result = Runner.run_streamed(agent, "trigger guardrail")
-        with pytest.raises(ValueError, match="guardrail boom"):
-            await asyncio.wait_for(consume_stream(), timeout=1)
+        consumer = asyncio.create_task(consume_stream())
+        try:
+            await asyncio.wait_for(model_cancelled.wait(), timeout=1)
+            with pytest.raises(UserError, match="not accepting input"):
+                result.steer("too late")
+        finally:
+            release_cleanup.set()
+            with pytest.raises(ValueError, match="guardrail boom"):
+                await asyncio.wait_for(consumer, timeout=1)
 
     await asyncio.wait_for(model_finished.wait(), timeout=1)
     assert model_started.is_set() is True
     assert model_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_stream_waits_for_initial_guardrails_before_checking_a_steer(fails: bool) -> None:
+    in_tool, finish_tool, tool_output = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    sibling_started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    checked_steer = asyncio.Event()
+
+    @function_tool
+    async def work() -> str:
+        in_tool.set()
+        await finish_tool.wait()
+        return "done"
+
+    @input_guardrail
+    async def check(ctx, agent, value):
+        if value[0]["content"] == "start":
+            await in_tool.wait()
+            await sibling_started.wait()
+            if fails:
+                raise ValueError("initial guardrail failed")
+        else:
+            checked_steer.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @input_guardrail
+    async def sibling(ctx, agent, value):
+        if value[0]["content"] == "start":
+            sibling_started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cleaning.set()
+                await release.wait()
+                raise
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel()
+    model.enqueue([get_function_tool_call("work", arguments="{}")])
+    model.enqueue([get_text_message("finished")])
+    agent = Agent(name="worker", model=model, tools=[work], input_guardrails=[check, sibling])
+    inbox = RunInbox()
+    result = Runner.run_streamed(
+        agent, "start", inbox=inbox, run_config=RunConfig(tracing_disabled=True)
+    )
+    receipt = result.steer("before the verdict")
+
+    async def consume() -> None:
+        async for event in result.stream_events():
+            if event.type == "run_item_stream_event" and event.name == "tool_output":
+                tool_output.set()
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for((cleaning if fails else in_tool).wait(), timeout=3)
+        finish_tool.set()
+        await asyncio.wait_for(tool_output.wait(), timeout=3)
+        # The tool has completed, but the initial guardrails have not settled.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(checked_steer.wait(), timeout=SHORT_DELAY)
+        if fails:
+            with pytest.raises(UserError, match="not accepting input"):
+                inbox.queue("during sibling cleanup")
+            with pytest.raises(UserError, match="not accepting input"):
+                result.steer("during sibling cleanup")
+        release.set()
+        if fails:
+            with pytest.raises(ValueError, match="initial guardrail failed"):
+                await asyncio.wait_for(consumer, timeout=3)
+            assert not checked_steer.is_set()
+            assert len(model.calls) == 1
+            outcome = await asyncio.wait_for(receipt.wait(), timeout=3)
+            assert outcome.status == "not_submitted" and not outcome.retained
+        else:
+            await asyncio.wait_for(consumer, timeout=3)
+            assert checked_steer.is_set()
+            assert len(model.calls) == 2
+            assert (await receipt.wait()).status == "submitted"
+    finally:
+        finish_tool.set()
+        release.set()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("guard", ["input", "output"])
+async def test_tripwire_closes_inbox_before_sibling_cleanup(streamed: bool, guard: str) -> None:
+    started = asyncio.Event()
+    inbox = RunInbox()
+    rejected = False
+
+    async def trip(ctx, agent, value):
+        await started.wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    async def sibling(ctx, agent, value):
+        nonlocal rejected
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            try:
+                inbox.queue("during sibling cleanup")
+            except UserError:
+                rejected = True
+            raise
+
+    model = ScriptedModel()
+    model.enqueue([get_text_message("answer")])
+    agent = Agent(name="guarded", model=model)
+    error: type[Exception]
+    if guard == "input":
+        agent.input_guardrails = [
+            InputGuardrail(guardrail_function=fn, run_in_parallel=False) for fn in (trip, sibling)
+        ]
+        error = InputGuardrailTripwireTriggered
+    else:
+        agent.output_guardrails = [OutputGuardrail(guardrail_function=fn) for fn in (trip, sibling)]
+        error = OutputGuardrailTripwireTriggered
+    config = RunConfig(tracing_disabled=True)
+
+    with pytest.raises(error):
+        if streamed:
+            result = Runner.run_streamed(agent, "start", inbox=inbox, run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "start", inbox=inbox, run_config=config)
+    assert rejected
 
 
 @pytest.mark.asyncio
@@ -1119,6 +1261,43 @@ async def test_blocking_guardrail_prevents_tool_execution_streaming():
     assert guardrail_executed is True
     assert tool_was_executed is False
     assert not model.calls, "Model should not have been called"
+
+
+@pytest.mark.asyncio
+async def test_guardrail_trip_closes_stream_inbox_before_saving_input() -> None:
+    saving, release = asyncio.Event(), asyncio.Event()
+
+    # Hold the rejected input's session write after the guardrail has decided the run must stop.
+    class Session(SimpleListSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            saving.set()
+            await release.wait()
+            await super().add_items(items)
+
+    guardrail = InputGuardrail(
+        guardrail_function=get_sync_guardrail(triggers=True), run_in_parallel=False
+    )
+    model = ScriptedModel()
+    result = Runner.run_streamed(
+        Agent(name="guarded", model=model, input_guardrails=[guardrail]),
+        "start",
+        session=Session(),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    pending = result.queue("before the guardrail decision")
+    try:
+        await asyncio.wait_for(saving.wait(), timeout=3)
+        with pytest.raises(UserError, match="not accepting input"):
+            result.queue("after the guardrail decision")
+    finally:
+        release.set()
+        with pytest.raises(InputGuardrailTripwireTriggered):
+            async for _ in result.stream_events():
+                pass
+
+    outcome = await asyncio.wait_for(pending.wait(), timeout=3)
+    assert (outcome.status, outcome.reason) == ("not_submitted", "guardrail")
+    assert not model.calls
 
 
 @pytest.mark.asyncio

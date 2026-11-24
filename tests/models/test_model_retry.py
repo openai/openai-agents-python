@@ -284,8 +284,10 @@ async def test_stream_timeout_discards_owner_task_from_traceback_locals() -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload_kind", ["text", "tool_arguments"])
+@pytest.mark.parametrize("timeout", [0.05, None], ids=["sdk_deadline", "provider_timeout"])
 async def test_stream_timeout_discards_previous_event_from_retry_traceback(
     payload_kind: str,
+    timeout: float | None,
 ) -> None:
     sensitive_payload = "synthetic-sensitive-stream-payload"
     event: TResponseStreamEvent
@@ -308,17 +310,20 @@ async def test_stream_timeout_discards_previous_event_from_retry_traceback(
             sequence_number=0,
         )
     closed = asyncio.Event()
+    provider_timeout = ModelTimeoutError(3)
 
     async def stream_events(_call: ModelCall) -> AsyncIterator[TResponseStreamEvent]:
         try:
             yield event
+            if timeout is None:
+                raise provider_timeout
             await asyncio.Event().wait()
         finally:
             closed.set()
 
     model = ScriptedModel([ModelStep.stream(stream_events)])
     result = Runner.run_streamed(
-        Agent(name="test", model=model, model_settings=ModelSettings(timeout=0.05)),
+        Agent(name="test", model=model, model_settings=ModelSettings(timeout=timeout)),
         "synthetic-input",
         run_config=RunConfig(trace_include_sensitive_data=False),
     )
@@ -331,11 +336,71 @@ async def test_stream_timeout_discards_previous_event_from_retry_traceback(
     assert delivered == [event]
     assert event.delta == sensitive_payload
     assert closed.is_set()
-    assert exc_info.value.timeout_seconds == 0.05
+    if timeout is None:
+        assert exc_info.value is provider_timeout
+    else:
+        assert exc_info.value.timeout_seconds == timeout
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
+    _assert_timeout_retry_frame_cleared(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_provider_timeout_close_clears_retry_frame() -> None:
+    closing = asyncio.Event()
+    timeout = ModelTimeoutError(3)
+
+    class Stream:
+        sent = False
+        close_calls = 0
+
+        def __aiter__(self) -> AsyncIterator[TResponseStreamEvent]:
+            return self
+
+        async def __anext__(self) -> TResponseStreamEvent:
+            if self.sent:
+                raise timeout
+            self.sent = True
+            return ResponseTextDeltaEvent(
+                type="response.output_text.delta",
+                delta="synthetic-private-text",
+                content_index=0,
+                output_index=0,
+                item_id="synthetic-item",
+                sequence_number=0,
+                logprobs=[],
+            )
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            closing.set()
+            await asyncio.Event().wait()
+
+    stream = Stream()
+    events = stream_response_with_retry(
+        get_stream=lambda: stream,
+        rewind=lambda: asyncio.sleep(0),
+        retry_settings=None,
+        get_retry_advice=lambda _request: None,
+        previous_response_id=None,
+        conversation_id=None,
+    )
+    await anext(events)
+    pull = asyncio.create_task(anext(events))
+    try:
+        await asyncio.wait_for(closing.wait(), timeout=3)
+    finally:
+        pull.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pull, timeout=3)
+
+    assert stream.close_calls == 1
+    _assert_timeout_retry_frame_cleared(timeout)
+
+
+def _assert_timeout_retry_frame_cleared(error: ModelTimeoutError) -> None:
     retry_frames = []
-    traceback = exc_info.value.__traceback__
+    traceback = error.__traceback__
     while traceback is not None:
         if traceback.tb_frame.f_code is stream_response_with_retry.__code__:
             retry_frames.append(traceback.tb_frame)
@@ -345,7 +410,9 @@ async def test_stream_timeout_discards_previous_event_from_retry_traceback(
         # Only the retry wrapper's aliases are covered, not caller-owned run state.
         assert frame.f_locals.get("event") is None
         assert frame.f_locals.get("result_value") is None
+        assert frame.f_locals.get("stream") is None
         assert frame.f_locals.get("stream_owner") is None
+        assert frame.f_locals.get("stream_requests") is None
         assert frame.f_locals.get("stream_results") is None
 
 

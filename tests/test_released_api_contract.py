@@ -1411,6 +1411,22 @@ def test_typed_dict_requiredness_annotation_contract_is_python_version_independe
     assert contract_surface._annotation_contract(annotation) == expected
 
 
+def test_native_mcp_result_field_contract_is_python_version_independent() -> None:
+    from agents import NativeMCPResult
+
+    for name, annotation in {
+        "content": "list[dict[str, Any]]",
+        "structuredContent": "Any",
+        "isError": "bool | None",
+        "_meta": "dict[str, Any] | None",
+    }.items():
+        assert contract_surface._typed_dict_field_contract(NativeMCPResult, name) == {
+            "name": name,
+            "annotation": annotation,
+            "required": name == "content",
+        }
+
+
 def test_curated_public_property_contract_honors_optional_dependency_availability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3673,6 +3689,26 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
         }
     ) == (
         {
+            "class_name": "RunResultBase",
+            "module": "agents.result",
+            "names": ["previous_outputs"],
+        },
+        {
+            "class_name": "RunResult",
+            "module": "agents.result",
+            "names": ["previous_outputs"],
+        },
+        {
+            "class_name": "RunResultStreaming",
+            "module": "agents.result",
+            "names": ["previous_outputs"],
+        },
+        {
+            "class_name": "MessageReceipt",
+            "module": "agents.run_inbox",
+            "names": ["status"],
+        },
+        {
             "class_name": "RunState",
             "module": "agents.run_state",
             "names": ["pending_input"],
@@ -4019,6 +4055,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
                 "quality",
                 "size",
             ],
+        },
+        {
+            "class_name": "NativeMCPResult",
+            "module": "agents",
+            "names": ["content", "structuredContent", "isError", "_meta"],
         },
         {
             "class_name": "ModelStepSpec",

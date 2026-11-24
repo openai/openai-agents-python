@@ -17,9 +17,11 @@ from ._redaction import (
     require_clean,
     require_clean_agent,
     require_clean_final_output,
+    set_final_output_item,
 )
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
+from .decisions import _DecisionRun
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -55,14 +57,17 @@ from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .models._run_context import ModelToolHooks
 from .result import RunResult, RunResultStreaming
-from .run_budget import _check_resume, _prepare_budget
+from .run_budget import _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
     CallModelInputFilter,
+    MCPTextTransform,
     ModelInputData,
     ModelSelectionData,
     ModelSelector,
+    NativeMCPResult,
+    NativeMCPResultTransform,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -77,8 +82,8 @@ from .run_config import (
     ToolNotFoundBehavior,
 )
 from .run_context import RunContextWrapper, TContext
-from .run_control import RunControl, control_scope, current_control
 from .run_error_handlers import RunErrorHandlers
+from .run_inbox import RunInbox, current_inbox, inbox_scope, stop_inbox_intake
 from .run_internal.agent_bindings import bind_public_agent
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
@@ -101,6 +106,7 @@ from .run_internal.agent_runner_helpers import (
     update_run_state_for_interruption,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
+    validate_resumed_agent_tools,
     validate_session_conversation_settings,
 )
 from .run_internal.agent_tool_configuration import agent_tool_configuration_run
@@ -142,6 +148,7 @@ from .run_internal.resumable_session import ResumableRun, prepare_run_session
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
+    _stop_inbox_for_terminal_step,
     _ToolTaskCancellation,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
@@ -229,9 +236,12 @@ __all__ = [
     "OutputGuardrailBlockedMessageFormatter",
     "ToolNameCollisionPolicy",
     "ReasoningItemIdPolicy",
+    "MCPTextTransform",
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
+    "NativeMCPResult",
+    "NativeMCPResultTransform",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",
@@ -316,7 +326,7 @@ class Runner:
         hooks: RunHooks[TContext] | None = None,
         run_config: RunConfig | dict[str, Any] | None = None,
         error_handlers: RunErrorHandlers[TContext] | None = None,
-        control: RunControl | None = None,
+        inbox: RunInbox | None = None,
         previous_response_id: str | None = None,
         auto_previous_response_id: bool = False,
         conversation_id: str | None = None,
@@ -329,7 +339,7 @@ class Runner:
 
           1. The agent is invoked with the given input.
           2. If there is a final output (i.e. the agent produces something of type
-             `agent.output_type`), the loop terminates.
+             `agent.output_type`), the loop finishes unless user messages are waiting.
           3. If there's a handoff, we run the loop again, with the new agent.
           4. Else, we run tool calls (if any), and re-run the loop.
 
@@ -340,10 +350,9 @@ class Runner:
              e.g. InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered.
 
         Note:
-            Only the first agent's input guardrails are run.
+            The starting agent checks the initial input. The active agent checks each inbox batch.
 
         Args:
-            control: A fresh input handle for corrections during this run.
             starting_agent: The starting agent to run.
             input: The initial input to the agent. You can pass a single string for a
                 user message, or a list of input items.
@@ -369,7 +378,7 @@ class Runner:
                 other model providers don't write to the Conversation object,
                 so you'll end up having partial conversations stored.
             session: A session for automatic conversation history management.
-            control: A fresh handle for sending user text to the next scheduled request.
+            inbox: An optional RunInbox for steering the current task or queuing follow-ups.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -391,8 +400,8 @@ class Runner:
                 conversation_id=conversation_id,
                 session=session,
             )
-            if control is not None:
-                options["control"] = control
+            if inbox is not None:
+                return await runner.run(starting_agent, input, inbox=inbox, **options)
             return await runner.run(starting_agent, input, **options)
         except BaseException as error:
             if not _is_error_data_redacted(error):
@@ -411,7 +420,7 @@ class Runner:
         conversation_id = None
         session = cast(Any, None)
         options = RunOptions()
-        control = None
+        inbox = None
         runner = cast(Any, None)
         assert redacted_error is not None
         _raise_data_redacted_error(redacted_error)
@@ -535,10 +544,13 @@ class Runner:
         session: Session | ResumableSession | None = None,
         *,
         error_handlers: RunErrorHandlers[TContext] | None = None,
-        control: RunControl | None = None,
+        inbox: RunInbox | None = None,
     ) -> RunResultStreaming:
         """
         Run a workflow starting at the given agent in streaming mode.
+
+        Call result.steer(text) to guide the current task or result.queue(text) to
+        start a follow-up after it finishes. Both methods work in Python and Codex modes.
 
         The returned result object contains a method you can use to stream semantic
         events as they are generated.
@@ -547,7 +559,7 @@ class Runner:
 
           1. The agent is invoked with the given input.
           2. If there is a final output (i.e. the agent produces something of type
-             `agent.output_type`), the loop terminates.
+             `agent.output_type`), the loop finishes unless user messages are waiting.
           3. If there's a handoff, we run the loop again, with the new agent.
           4. Else, we run tool calls (if any), and re-run the loop.
 
@@ -558,10 +570,9 @@ class Runner:
              e.g. InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered.
 
         Note:
-            Only the first agent's input guardrails are run.
+            The starting agent checks the initial input. The active agent checks each inbox batch.
 
         Args:
-            control: A fresh input handle for corrections during this run.
             starting_agent: The starting agent to run.
             input: The initial input to the agent. You can pass a single string for a
                 user message, or a list of input items.
@@ -580,7 +591,7 @@ class Runner:
                 ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
-            control: A fresh handle for sending user text to the next scheduled request.
+            inbox: An optional RunInbox for steering the current task or queuing follow-ups.
 
         Returns:
             A result object that contains data about the run, as well as a method to
@@ -599,8 +610,8 @@ class Runner:
             conversation_id=conversation_id,
             session=session,
         )
-        if control is not None:
-            options["control"] = control
+        if inbox is not None:
+            return runner.run_streamed(starting_agent, input, inbox=inbox, **options)
         return runner.run_streamed(starting_agent, input, **options)
 
 
@@ -610,6 +621,10 @@ def _prepare_private_input(
     config: RunConfig,
     options: RunOptions[TContext],
 ) -> str | list[TResponseInputItem] | RunState[TContext]:
+    from ._run_state_agent_identity import _decision_bindings
+
+    if not isinstance(input, RunState):
+        _decision_bindings(agent)
     if current_redactor() is None:
         if isinstance(input, RunState) and input._requires_redaction:
             error = UserError("Continuing this run requires RunConfig.redact_text.")
@@ -660,11 +675,12 @@ class AgentRunner:
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
+        *,
+        inbox: RunInbox | None = None,
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
-        control = kwargs.get("control")
-        if control is not None:
-            control._reserve()
+        if inbox is not None:
+            inbox._reserve()
         session = prepare_run_session(kwargs.get("session"), input)
         kwargs["session"] = session
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
@@ -672,7 +688,9 @@ class AgentRunner:
         redacted_error: BaseException | None = None
         # Mask caller tracing before any run-owned preparation or cleanup can execute.
         with contextlib.ExitStack() as trace_stack:
-            trace_stack.enter_context(control_scope(control))
+            if inbox is not None:
+                inbox._bind(owner=asyncio.current_task())
+            trace_stack.enter_context(inbox_scope(inbox))
             trace_stack.enter_context(redaction_scope(run_config.redact_text))
             trace_stack.enter_context(
                 operation_tracing_scope(run_config.tracing, run_config.trace_include_sensitive_data)
@@ -702,24 +720,33 @@ class AgentRunner:
                         if isinstance(input, RunState) and input._current_agent is not None
                         else starting_agent
                     )
+                    decisions = _DecisionRun(
+                        starting_agent, run_config.tracing_disabled, kwargs.get("context")
+                    )
                     with agent_tool_configuration_run(configuration_agent):
-                        result = await self._run_impl(starting_agent, input, **kwargs)
+                        async with decisions.bind():
+                            result = await self._run_impl(starting_agent, input, **kwargs)
                         require_clean_final_output(
                             result.final_output, result.input, result.new_items
                         )
+                        if inbox is not None:
+                            inbox._check_final_output(result.final_output)
+                            result._previous_outputs = inbox._previous_outputs
                         if isinstance(session, ResumableRun):
                             await session.finish(result)
-                        if control is not None and result.interruptions:
-                            control._end_reason = "approval_pause"
+                        if inbox is not None and result.interruptions:
+                            inbox._end_reason = "approval_pause"
                         return result
                 except BaseException as error:
                     if not _is_error_data_redacted(error):
                         raise
                     _detach_data_redacted_error_traceback(error)
-                    if control is not None:
-                        control._end_reason = "run_failed"
+                    if inbox is not None:
+                        inbox._end_reason = "run_failed"
                     redacted_error = error
             finally:
+                if inbox is not None:
+                    inbox._stop_accepting()
                 if owns_model_provider:
                     await _close_runner_owned_model_provider(run_config.model_provider)
 
@@ -790,9 +817,16 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            await run_state._check_pending_specialists(starting_agent, context_wrapper)
             context_wrapper._resolve_function_approval_owners(starting_agent)
             validate_resume_policy(run_state, context_wrapper, run_config)
-            await _check_resume(run_state, run_config.budget, context_wrapper)
+            await validate_resumed_agent_tools(
+                run_state,
+                run_config.budget,
+                context_wrapper,
+                run_config.tool_execution,
+                manual_root=not isinstance(session, ResumableRun),
+            )
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -804,6 +838,7 @@ class AgentRunner:
                         context_wrapper,
                         hooks,
                         run_config.tool_execution,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -824,7 +859,11 @@ class AgentRunner:
                 await session.begin(
                     input,
                     ModelToolHooks(
-                        starting_agent, context_wrapper, hooks, run_config.tool_execution
+                        starting_agent,
+                        context_wrapper,
+                        hooks,
+                        run_config.tool_execution,
+                        run_config=run_config,
                     ),
                     run_config.tool_not_found_behavior,
                 )
@@ -983,9 +1022,9 @@ class AgentRunner:
             if isinstance(session, ResumableRun):
                 session.bind_state(run_state)
 
-            control = current_control()
-            if control is not None and is_resumed_state:
-                control._accepting = True
+            inbox = current_inbox()
+            if inbox is not None and is_resumed_state:
+                inbox._started = True
 
             use_task_and_turn_spans = include_task_and_turn_spans(run_config.tracing)
             current_task_span: Span[TaskSpanData] | None = (
@@ -1046,6 +1085,8 @@ class AgentRunner:
                             run_state._generated_prompt_cache_key
                         )
                         finalized_result._pending_input_for_state = run_state.pending_input
+                        finalized_result._task_input_ids_for_state = run_state._task_input_ids
+                        finalized_result._pending_input_ids_for_state = run_state._pending_input_ids
                         finalized_result._current_step_for_state = run_state._current_step
                         finalized_result._nested_history_owned_session_item_refs = list(
                             run_state._nested_history_owned_session_item_refs
@@ -1077,6 +1118,9 @@ class AgentRunner:
                         run_state=run_state,
                         tracker=server_conversation_tracker,
                         admission_items=pending_input_admission_items,
+                        prior_responses=model_responses,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
                         generated_items=generated_items,
                         session_items=session_items,
                         model_response=model_response,
@@ -1125,6 +1169,23 @@ class AgentRunner:
                 )
                 sandbox_runtime.assert_agent_supported(current_agent)
                 should_run_agent_start_hooks = True
+
+                def _start_inbox_turn(step: NextStepFinalOutput) -> bool:
+                    nonlocal should_run_agent_start_hooks
+                    if (
+                        inbox is None
+                        or step.is_error_handler_output
+                        or not inbox._advance(current_turn, max_turns, context_wrapper._budget)
+                    ):
+                        return False
+                    require_clean_final_output(step.output, original_input, session_items)
+                    inbox._stage_output(step.output)
+                    set_final_output_item(None)
+                    should_run_agent_start_hooks = True
+                    if run_state is not None:
+                        run_state._current_step = NextStepRunAgain()
+                    return True
+
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store
@@ -1167,6 +1228,7 @@ class AgentRunner:
                 raise
 
             try:
+                pending_feedback: str | None = None
                 while True:
                     validate_output_guardrails_with_server_managed_conversation(
                         current_agent,
@@ -1334,6 +1396,7 @@ class AgentRunner:
                                 error_handlers=error_handlers,
                             )
 
+                            _stop_inbox_for_terminal_step(turn_result)
                             store_setting = resumed_response_store(
                                 run_state, turn_result.model_response.response_id, store_setting
                             )
@@ -1452,6 +1515,7 @@ class AgentRunner:
                                     model_responses=model_responses,
                                     current_agent=current_agent,
                                     input_guardrail_results=input_guardrail_results,
+                                    output_guardrail_results=output_guardrail_results,
                                     tool_input_guardrail_results=tool_input_guardrail_results,
                                     tool_output_guardrail_results=tool_output_guardrail_results,
                                     context_wrapper=context_wrapper,
@@ -1501,6 +1565,7 @@ class AgentRunner:
                                 except _blocked_output_errors(
                                     turn_result.next_step.continue_after_guardrails
                                 ) as exc:
+                                    stop_inbox_intake()
                                     if (
                                         not turn_result.next_step.continue_after_guardrails
                                         and not _is_terminal_tool_output_response(
@@ -1572,6 +1637,7 @@ class AgentRunner:
                                         ) from None
                                     raise
                                 except (Exception, asyncio.CancelledError) as guardrail_error:
+                                    stop_inbox_intake()
                                     if retry_terminal_output:
                                         # Keep accepted execution private and retryable until
                                         # the final guardrails permit delivery.
@@ -1643,7 +1709,10 @@ class AgentRunner:
                                 if run_state is not None:
                                     run_state._terminal_unrecoverable = False
                                 if turn_result.next_step.continue_after_guardrails:
+                                    pending_feedback = turn_result.feedback
                                     run_state._current_step = NextStepRunAgain()
+                                    continue
+                                if _start_inbox_turn(turn_result.next_step):
                                     continue
                                 if session is None:
                                     take_held_session_write(run_state)
@@ -1697,9 +1766,8 @@ class AgentRunner:
                             run_state._current_step = NextStepRunAgain()
 
                         live_input = (
-                            control._take(current_turn + 1)
-                            if control is not None
-                            and (max_turns is None or current_turn < max_turns)
+                            inbox._take(current_turn, max_turns, context_wrapper._budget)
+                            if inbox is not None
                             else []
                         )
                         pending_input = run_state.pending_input + deepcopy(live_input)
@@ -1718,9 +1786,9 @@ class AgentRunner:
                             finally:
                                 run_state._input_guardrail_results = list(input_guardrail_results)
 
-                            if live_input and control is not None:
-                                run_state._pending_input.extend(live_input)
-                                control._retained = True
+                            if live_input and inbox is not None:
+                                inbox._check_owner_cancellation()
+                                inbox._stage(live_input, run_state)
                             admission_items = await admit_pending_input(
                                 run_state=run_state,
                                 agent=current_agent,
@@ -1736,13 +1804,18 @@ class AgentRunner:
                             pending_input_admission_items = [
                                 item for item in admission_items if isinstance(item, InputItem)
                             ]
-                            if control is not None:
-                                control._admitted(pending_input_admission_items)
+                            if inbox is not None:
+                                inbox._admitted(pending_input_admission_items)
                             if not run_state._pending_input:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
+                    if inbox is not None:
+                        inbox._begin_turn()
                     current_turn += 1
+                    feedback, pending_feedback = pending_feedback, None
                     if max_turns is not None and current_turn > max_turns:
+                        if inbox is not None:
+                            inbox._stop_accepting()
                         _error_tracing.attach_error_to_span(
                             current_span,
                             SpanError(
@@ -1898,12 +1971,6 @@ class AgentRunner:
                         ),
                     )
 
-                    items_for_model = (
-                        pending_server_items
-                        if server_conversation_tracker is not None and pending_server_items
-                        else generated_items
-                    )
-
                     turn_usage_start = snapshot_usage(context_wrapper.usage)
                     current_turn_span = (
                         turn_span(
@@ -1950,10 +2017,12 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 preserve_tool_task_cancellation(
                                     run_single_turn(
+                                        feedback=feedback,
                                         current_turn=current_turn,
                                         bindings=current_bindings,
                                         original_input=original_input,
-                                        generated_items=items_for_model,
+                                        generated_items=generated_items,
+                                        pending_server_items=pending_server_items,
                                         session_items=session_items,
                                         hooks=hooks,
                                         context_wrapper=context_wrapper,
@@ -2059,10 +2128,12 @@ class AgentRunner:
                                 turn_result = await model_task
                         else:
                             turn_result = await run_single_turn(
+                                feedback=feedback,
                                 current_turn=current_turn,
                                 bindings=current_bindings,
                                 original_input=original_input,
-                                generated_items=items_for_model,
+                                generated_items=generated_items,
+                                pending_server_items=pending_server_items,
                                 session_items=session_items,
                                 hooks=hooks,
                                 context_wrapper=context_wrapper,
@@ -2150,7 +2221,8 @@ class AgentRunner:
                             )
                             current_turn_span.finish(reset_current=True)
 
-                    # Start hooks should only run on the first turn unless reset by a handoff.
+                    _stop_inbox_for_terminal_step(turn_result)
+                    # Start hooks run once per task, and again after a handoff.
                     last_saved_input_snapshot_for_rewind = None
                     should_run_agent_start_hooks = False
 
@@ -2285,6 +2357,7 @@ class AgentRunner:
                             except _blocked_output_errors(
                                 turn_result.next_step.continue_after_guardrails
                             ) as exc:
+                                stop_inbox_intake()
                                 if (
                                     not turn_result.next_step.continue_after_guardrails
                                     and not _is_terminal_tool_output_response(
@@ -2348,6 +2421,7 @@ class AgentRunner:
                                     ) from None
                                 raise
                             except (Exception, asyncio.CancelledError) as guardrail_error:
+                                stop_inbox_intake()
                                 if not isinstance(
                                     guardrail_error, asyncio.CancelledError
                                 ) or not _is_terminal_tool_output_response(
@@ -2399,8 +2473,11 @@ class AgentRunner:
                                 run_state._terminal_unrecoverable = False
 
                             if turn_result.next_step.continue_after_guardrails:
+                                pending_feedback = turn_result.feedback
                                 if run_state is not None:
                                     run_state._current_step = NextStepRunAgain()
+                                continue
+                            if _start_inbox_turn(turn_result.next_step):
                                 continue
 
                             if session is None and run_state is not None:
@@ -2545,6 +2622,7 @@ class AgentRunner:
                                 model_responses=model_responses,
                                 current_agent=current_agent,
                                 input_guardrail_results=input_guardrail_results,
+                                output_guardrail_results=output_guardrail_results,
                                 tool_input_guardrail_results=tool_input_guardrail_results,
                                 tool_output_guardrail_results=tool_output_guardrail_results,
                                 context_wrapper=context_wrapper,
@@ -2633,6 +2711,8 @@ class AgentRunner:
                         )
                 raise
             finally:
+                if inbox is not None:
+                    inbox._stop_accepting()
                 await cleanup_models_after_run(tool_use_tracker)
                 try:
                     try:
@@ -2691,6 +2771,8 @@ class AgentRunner:
     ) -> RunResult:
         redacted_error: BaseException | None = None
         redacted_source: BaseException | None
+        if "inbox" in kwargs:
+            raise TypeError("run_sync does not accept inbox. Use run or run_streamed.")
         try:
             return self._run_sync_impl(starting_agent, input, **kwargs)
         except BaseException as error:
@@ -2809,6 +2891,8 @@ class AgentRunner:
         self,
         starting_agent: Agent[TContext],
         input: str | list[TResponseInputItem] | RunState[TContext],
+        *,
+        inbox: RunInbox | None = None,
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResultStreaming:
         context = kwargs.get("context")
@@ -2819,9 +2903,9 @@ class AgentRunner:
         previous_response_id = kwargs.get("previous_response_id")
         auto_previous_response_id = kwargs.get("auto_previous_response_id", False)
         conversation_id = kwargs.get("conversation_id")
-        control = kwargs.get("control")
-        if control is not None:
-            control._reserve()
+        if inbox is None:
+            inbox = RunInbox()
+        inbox._reserve()
         session = prepare_run_session(kwargs.get("session"), input)
 
         run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
@@ -2842,6 +2926,9 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            decisions = _DecisionRun(
+                starting_agent, run_config.tracing_disabled, kwargs.get("context")
+            )
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
             budget = _prepare_budget(
                 run_config, starting_agent, input if isinstance(input, RunState) else None
@@ -3076,8 +3163,12 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
+            async with decisions.bind():
+                await stream()
+
+        async def stream() -> None:
             with (
-                control_scope(control),
+                inbox_scope(inbox),
                 redaction_scope(run_config.redact_text),
                 operation_tracing_scope(
                     run_config.tracing, run_config.trace_include_sensitive_data
@@ -3088,13 +3179,25 @@ class AgentRunner:
                 else contextlib.nullcontext(),
             ):
                 try:
+                    if run_state is not None and is_resumed_state:
+                        await run_state._check_pending_specialists(starting_agent, context_wrapper)
                     if is_resumed_state and run_state is not None:
-                        await _check_resume(run_state, run_config.budget, context_wrapper)
+                        await validate_resumed_agent_tools(
+                            run_state,
+                            run_config.budget,
+                            context_wrapper,
+                            run_config.tool_execution,
+                            manual_root=not isinstance(session, ResumableRun),
+                        )
                     if isinstance(session, ResumableRun):
                         await session.begin(
                             input,
                             ModelToolHooks(
-                                schema_agent, context_wrapper, hooks, run_config.tool_execution
+                                schema_agent,
+                                context_wrapper,
+                                hooks,
+                                run_config.tool_execution,
+                                run_config=run_config,
                             ),
                             run_config.tool_not_found_behavior,
                         )
@@ -3128,21 +3231,29 @@ class AgentRunner:
                         sandbox_runtime=sandbox_runtime,
                     )
 
-                if control is not None:
-                    if streamed_result.interruptions:
-                        control._end_reason = "approval_pause"
-                    elif isinstance(
-                        streamed_result._stored_exception, InputGuardrailTripwireTriggered
-                    ):
-                        control._end_reason = "guardrail"
-                    elif streamed_result._stored_exception is not None:
-                        control._end_reason = "run_failed"
-                    elif streamed_result._cancel_mode != "none":
-                        control._end_reason = "cancelled"
+                if streamed_result.interruptions:
+                    inbox._end_reason = "approval_pause"
+                elif isinstance(streamed_result._stored_exception, InputGuardrailTripwireTriggered):
+                    inbox._end_reason = "guardrail"
+                elif streamed_result._stored_exception is not None:
+                    inbox._end_reason = "run_failed"
+                elif streamed_result._cancel_mode != "none":
+                    inbox._end_reason = "cancelled"
 
+        # The caller can send messages as soon as run_streamed returns.
+        streamed_result._inbox = inbox
+        inbox._bind()
         # Keep the outer task frame inside the boundary so it cannot retain run payloads.
-        streamed_result.run_loop_task = asyncio.create_task(
-            _await_data_redacted_error_boundary(run_loop)
+        producer = _await_data_redacted_error_boundary(run_loop)
+        try:
+            streamed_result.run_loop_task = asyncio.create_task(producer)
+        except BaseException:
+            inbox._close("run_failed")
+            producer.close()
+            raise
+        # A task cancelled before its first instruction never enters inbox_scope.
+        streamed_result.run_loop_task.add_done_callback(
+            lambda task: inbox._close("cancelled") if task.cancelled() else None
         )
         if owns_model_provider:
             model_provider = run_config.model_provider

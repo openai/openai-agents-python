@@ -62,7 +62,7 @@ from .._tool_invocation import (
     tool_invocation_identity_and_scope,
     tool_output_identity,
 )
-from ..agent import Agent, ProposedFinalOutput, ToolsToFinalOutputResult
+from ..agent import Agent, ContinueWithFeedback, ProposedFinalOutput, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
     agent_tool_resume_checkpoint_owns_approval,
@@ -92,6 +92,7 @@ from ..items import (
     CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
+    InputItem,
     ItemHelpers,
     MCPApprovalRequestItem,
     MCPListToolsItem,
@@ -121,6 +122,7 @@ from ..models._codex_items import (
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
+from ..run_inbox import stop_inbox_intake
 from ..run_state import RunState
 from ..tool import (
     ApplyPatchTool,
@@ -227,6 +229,7 @@ from .tool_planning import (
     _select_function_tool_runs_for_resume,
     _validate_unresolved_function_calls,
 )
+from .tool_text import bind_text_transform
 from .turn_preparation import get_handoffs, get_output_schema
 
 _DEFAULT_NEST_HANDOFF_HISTORY = nest_handoff_history
@@ -387,6 +390,33 @@ async def _build_tool_not_found_output_items(
     return items
 
 
+def _get_turn_input(
+    run_state: RunState[Any, Any] | None,
+    original_input: str | list[TResponseInputItem],
+    generated_items: list[RunItem],
+) -> list[TResponseInputItem]:
+    if run_state is not None and run_state._task_input_ids == ():
+        # The caller withdrew the follow-up. Do not revive the previous task.
+        return []
+    if run_state is not None and run_state._task_input_ids:
+        # An approval can pause the run before the server accepts the whole
+        # task. Restore its order from pending input and the agent's history.
+        visible: dict[str, TResponseInputItem | None] = dict.fromkeys(run_state._task_input_ids)
+        for index, input_id in enumerate(run_state._pending_input_ids):
+            if input_id in visible:
+                visible[input_id] = run_state._pending_input[index]
+        for item in generated_items:
+            if isinstance(item, InputItem) and item.input_id in visible:
+                visible[item.input_id] = item.raw_item
+        task_input = [item for item in visible.values() if item is not None]
+        if task_input:
+            original_input = task_input
+    try:
+        return ItemHelpers.input_to_new_input_list(original_input)
+    except Exception:
+        return []
+
+
 async def run_final_output_hooks(
     agent: Agent[TContext],
     hooks: RunHooks[TContext],
@@ -411,6 +441,7 @@ async def run_final_output_hooks(
 
 async def execute_final_output_step(
     *,
+    is_error_handler_output: bool = False,
     public_agent: Agent[Any],
     original_input: str | list[TResponseInputItem],
     new_response: ModelResponse,
@@ -427,6 +458,9 @@ async def execute_final_output_step(
     | None = None,
 ) -> SingleStepResult:
     """Finalize a turn once final output is known and run end hooks."""
+    if is_error_handler_output:
+        # A fallback ends the run. Ordinary end hooks can still steer or queue.
+        stop_inbox_intake()
     final_output_hooks = (
         run_final_output_hooks_fn
         if run_final_output_hooks_fn is not None
@@ -440,7 +474,9 @@ async def execute_final_output_step(
         model_response=new_response,
         pre_step_items=pre_step_items,
         new_step_items=new_step_items,
-        next_step=NextStepFinalOutput(final_output),
+        next_step=NextStepFinalOutput(
+            final_output, is_error_handler_output=is_error_handler_output
+        ),
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
         output_guardrail_results=[],
@@ -483,9 +519,12 @@ async def execute_final_output(
         )
 
         # Isolate even synchronous cancellation from cancellation of the owning run.
-        async def decide() -> Literal["continue", "finish"]:
-            value = policy(context_wrapper, proposal)
-            return await value if inspect.isawaitable(value) else value
+        async def decide() -> Literal["continue", "finish"] | ContinueWithFeedback:
+            from ..decisions import _bind_decisions
+
+            async with _bind_decisions(proposal, public_agent):
+                value = policy(context_wrapper, proposal)
+                return await value if inspect.isawaitable(value) else value
 
         def on_policy_failure(error: BaseException) -> None:
             if isinstance(error, asyncio.CancelledError):
@@ -493,17 +532,28 @@ async def execute_final_output(
                 if on_tool_error_selected is not None:
                     on_tool_error_selected()
 
+        feedback: str | None = None
         policy_error: BaseException | None = None
         try:
             require_clean_final_output(final_output, original_input, pre_step_items, new_step_items)
             (decision,) = await gather_with_cancel(decide(), on_child_failure=on_policy_failure)
+            if isinstance(decision, ContinueWithFeedback):
+                if not isinstance(decision.message, str) or not decision.message.strip():
+                    raise UserError("ContinueWithFeedback requires a nonblank message")
+                feedback = decision.message
+                decision = "continue"
             if decision == "continue":
                 require_clean_final_output(
                     final_output, original_input, pre_step_items, new_step_items
                 )
             if decision not in ("continue", "finish"):
-                raise UserError('Agent final_output_policy must return "continue" or "finish"')
+                raise UserError(
+                    'final_output_policy must return "continue", "finish" or ContinueWithFeedback'
+                )
         except (Exception, asyncio.CancelledError) as exc:
+            # A guarded tool defers this error until its effect has been saved.
+            # Both paths end the run, so neither can accept another message.
+            stop_inbox_intake()
             if not guarded_tool:
                 raise
             # Let the blocked-output path record the effect without its unchecked result.
@@ -517,11 +567,13 @@ async def execute_final_output(
                 new_step_items=new_step_items,
                 next_step=NextStepFinalOutput(final_output, continue_after_guardrails=True),
                 policy_error=policy_error,
+                feedback=feedback,
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
 
     return await execute_final_output_step(
+        is_error_handler_output=kind is None,
         public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
@@ -708,6 +760,7 @@ async def execute_handoffs(
                 raise
             # A failed invocation is not a transfer. Do not run transfer hooks or filters.
             span_handoff.set_error(SpanError(message="Handoff invocation failed", data={}))
+            _detach_data_redacted_error_traceback(error)
             error_output = handoff.failure_error_function(context_wrapper, error)
             if inspect.isawaitable(error_output):
                 error_output = await error_output
@@ -750,6 +803,9 @@ async def execute_handoffs(
             source_agent=public_agent,
             target_agent=new_agent,
         )
+        from ..decisions import _record_transfer
+
+        _record_transfer(context_wrapper, public_agent, new_agent, handoff)
         new_step_items.append(handoff_output)
         if handoff_output_committer is not None:
             _register_tool_call_items(context_wrapper, [handoff_output])
@@ -1171,8 +1227,14 @@ async def execute_tools_and_side_effects(
             *tool_output_guardrail_results,
         ]
 
+    def _on_tool_error_selected() -> None:
+        stop_inbox_intake()
+        if on_tool_error_selected is not None:
+            on_tool_error_selected()
+
     def _publish_completed_tools() -> None:
         nonlocal accepting_outputs
+        stop_inbox_intake()
         accepting_outputs = False
         # Server-managed continuation retains its separate recovery path.
         if (
@@ -1217,7 +1279,7 @@ async def execute_tools_and_side_effects(
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_output_committer=_commit_accepted_response_tool_output,
-            on_tool_error_selected=on_tool_error_selected,
+            on_tool_error_selected=_on_tool_error_selected,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
@@ -1728,11 +1790,7 @@ async def resolve_interrupted_turn(
         except Exception:
             return pending
 
-    try:
-        context_wrapper.turn_input = ItemHelpers.input_to_new_input_list(original_input)
-    except Exception:
-        context_wrapper.turn_input = []
-
+    context_wrapper.turn_input = _get_turn_input(run_state, original_input, original_pre_step_items)
     pending_approval_items = _pending_approvals_from_state()
 
     def _allow_legacy_name_agent_match() -> bool:
@@ -2650,6 +2708,13 @@ async def resolve_interrupted_turn(
             if approval_record is not None
             else True
         )
+        if approval_status is not False:
+            queued = current_functions.get(call_id)
+            bind_text_transform(
+                run_config.tool_execution,
+                queued.function_tool if queued else None,
+                context_wrapper._tool_invocations.get(call_id),
+            )
         stale_function = stale_functions.get(call_id)
         original_binding = processed_response.mcp_tool_bindings.get(call_id)
         current_function = current_functions.get(call_id)
@@ -3042,11 +3107,13 @@ async def resolve_interrupted_turn(
             hooks=hooks,
             context_wrapper=context_wrapper,
             run_config=run_config,
+            on_tool_error_selected=stop_inbox_intake,
             tool_output_committer=_commit_tool_output,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
     except BaseException:
+        stop_inbox_intake()
         accepting_outputs = False
         if run_state is not None and not server_manages_conversation:
             run_state._generated_items = _snapshot_tool_outputs(
@@ -4383,6 +4450,14 @@ async def get_single_step_result_from_response(
         bind_declarations(prepared_tools, processed_response, context_wrapper, run_config)
     for call_id, rewrite in new_bindings.items():
         context_wrapper._tool_invocations[call_id].input_rewrite = rewrite
+
+    if settings is not None and settings.tool_text_transforms:
+        for action in processed_response.functions:
+            bind_text_transform(
+                settings,
+                action.function_tool,
+                context_wrapper._tool_invocations.get(action.tool_call.call_id),
+            )
 
     if after_invocation_validation is not None:
         await after_invocation_validation(processed_response)

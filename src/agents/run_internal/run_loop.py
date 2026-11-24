@@ -27,6 +27,7 @@ from .._redaction import (
     current_redactor,
     redact_model_input,
     redact_response,
+    require_clean,
     require_clean_final_output,
     set_final_output_item,
 )
@@ -72,7 +73,7 @@ from ..logger import (
     log_tool_action_warning,
     logger,
 )
-from ..memory import Session
+from ..memory import Session, is_openai_responses_compaction_aware_session
 from ..models._response_terminal import (
     response_error_event_failure_error,
     response_terminal_failure_error,
@@ -82,8 +83,8 @@ from ..result import RunResultStreaming
 from ..run_budget import _admit
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
-from ..run_control import current_control
 from ..run_error_handlers import RunErrorHandlers
+from ..run_inbox import current_inbox, stop_inbox_intake
 from ..run_state import RunState
 from ..sandbox.runtime import SandboxRuntime
 from ..stream_events import (
@@ -164,7 +165,6 @@ from .items import (
     run_items_to_input_items,
 )
 from .model_retry import (
-    _close_async_iterator_quietly,
     _StreamAttemptSkipped,
     apply_retry_attempt_usage,
     get_response_with_retry,
@@ -248,6 +248,7 @@ from .turn_preparation import (
     validate_run_hooks,
 )
 from .turn_resolution import (
+    _get_turn_input,
     _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
@@ -350,6 +351,12 @@ def _ensure_stream_event_item_occurrence_key(item: RunItem) -> str:
     return key
 
 
+def _stop_inbox_for_terminal_step(turn_result: SingleStepResult) -> None:
+    """An approval pause ends this invocation before its checkpoint is saved."""
+    if isinstance(turn_result.next_step, NextStepInterruption):
+        stop_inbox_intake()
+
+
 async def cleanup_models_after_run(tool_use_tracker: AgentToolUseTracker) -> None:
     """Notify every model resolved during the run that its owning run has ended."""
     for model in tool_use_tracker.models:
@@ -373,6 +380,37 @@ async def _should_persist_stream_items(
         return False
     should_skip_session_save = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
     return should_skip_session_save is False
+
+
+def _prepare_request_input(
+    items: list[TResponseInputItem],
+    feedback: str | None,
+    tracker: OpenAIServerConversationTracker | None,
+    session: Session | None,
+    run_config: RunConfig,
+    system_prompt: str | None,
+) -> list[TResponseInputItem]:
+    request = items
+    if feedback is not None:
+        if tracker is not None or (
+            is_openai_responses_compaction_aware_session(session)
+            and getattr(session, "compaction_mode", None) != "input"
+        ):
+            raise UserError("ContinueWithFeedback requires SDK-managed input without response IDs")
+        # Keep the extra item out of replay and check it before exposing it to the filter.
+        request = [*items, {"role": "user", "content": feedback}]
+        require_clean(request)
+    inbox = current_inbox()
+    if inbox is not None:
+        # Identify live occurrences in the original input. The filter sees the
+        # complete request, which can include one additional feedback message.
+        inbox._before_filter(
+            items,
+            tracker,
+            filter_input=request if run_config.call_model_input_filter is not None else None,
+            instructions=system_prompt,
+        )
+    return request
 
 
 def _prepare_turn_input_items(
@@ -585,6 +623,17 @@ def _retained_items_for_blocked_output(
     )
 
 
+async def _await_initial_input_guardrails(streamed_result: RunResultStreaming) -> None:
+    """Only admit live input after the initial parallel guardrails have passed."""
+    task = streamed_result._input_guardrails_task
+    if task is not None:
+        # This task can cancel the producer on failure. Wait without linking their cancellation.
+        await streamed_result._await_task_safely(task)
+        task.result()
+    if (tripwire := streamed_result._triggered_input_guardrail_result) is not None:
+        raise InputGuardrailTripwireTriggered(tripwire)
+
+
 async def _finalize_streamed_final_output(
     *,
     streamed_result: RunResultStreaming,
@@ -604,7 +653,9 @@ async def _finalize_streamed_final_output(
     stream_items_after_guardrails: bool = False,
     retry_on_guardrail_error: bool = False,
     continued_step: SingleStepResult | None = None,
-) -> None:
+    allow_inbox_advance: bool = False,
+) -> Callable[[], Awaitable[None]] | None:
+    """Guard and persist the answer. Defer completion while admitting an inbox message."""
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
     continue_after_guardrails = continued_step is not None
@@ -621,6 +672,7 @@ async def _finalize_streamed_final_output(
         if continued_step is not None:
             continued_step.check_continued_output()
     except _blocked_output_errors(continue_after_guardrails) as exc:
+        stop_inbox_intake()
         if not continue_after_guardrails and not _is_terminal_tool_output_response(
             items,
             processed_response,
@@ -679,12 +731,13 @@ async def _finalize_streamed_final_output(
                     streamed_result._stored_exception = safe_error
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    return
+                    return None
                 raise safe_error from None
         if isinstance(exc, asyncio.CancelledError) and streamed_result._cancel_mode != "immediate":
             streamed_result._stored_exception = exc
         raise
     except Exception as guardrail_error:
+        stop_inbox_intake()
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
@@ -712,9 +765,9 @@ async def _finalize_streamed_final_output(
                     streamed_result._stored_exception = safe_persistence_error
                     streamed_result.is_complete = True
                     streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                    return
+                    return None
                 if isinstance(safe_persistence_error, asyncio.CancelledError):
-                    return
+                    return None
                 redacted_persistence_error = safe_persistence_error
             if (
                 isinstance(persistence_error, asyncio.CancelledError)
@@ -759,7 +812,7 @@ async def _finalize_streamed_final_output(
             streamed_result._stored_exception = persistence_error
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-            return
+            return None
     # The append and any post-append maintenance both succeeded, so the turn is durable and the
     # state is open again.
     if streamed_result._state is not None:
@@ -768,18 +821,44 @@ async def _finalize_streamed_final_output(
     if stream_items_after_guardrails:
         _publish_stream_items(items, streamed_result)
     if continue_after_guardrails:
-        return
-    await checkpoint_streamed_result(streamed_result)
-    # A fallback or a recovered tool turn can still be missing from new_items.
-    require_clean_final_output(output, streamed_result.input, *final_history)
-    streamed_result.final_output = output
-    if streamed_result._approved_output is not None:
-        streamed_result._approved_output.accepted = True
-    if on_persisted_after_guardrails is not None:
-        on_persisted_after_guardrails(True)
-    streamed_result.is_complete = True
+        return None
+    inbox = current_inbox()
 
-    streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+    async def finish_answer() -> None:
+        if inbox is not None:
+            inbox._stop_accepting()
+        await checkpoint_streamed_result(streamed_result)
+        # A fallback or a recovered tool turn can still be missing from new_items.
+        require_clean_final_output(output, streamed_result.input, *final_history)
+        if inbox is not None:
+            inbox._check_final_output(output)
+        streamed_result.final_output = output
+        if streamed_result._approved_output is not None:
+            streamed_result._approved_output.accepted = True
+        if on_persisted_after_guardrails is not None:
+            on_persisted_after_guardrails(True)
+        streamed_result.is_complete = True
+        streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+
+    if inbox is not None:
+        if allow_inbox_advance and inbox._has_pending and streamed_result._cancel_mode == "none":
+            # A run without a local session may still be checking its initial input.
+            await _await_initial_input_guardrails(streamed_result)
+            # Let a consumer cancel after this turn while its answer can still finish the run.
+            if (
+                streamed_result.max_turns is None
+                or streamed_result.current_turn < streamed_result.max_turns
+            ):
+                await streamed_result._wait_for_turn_event_consumption()
+            require_clean_final_output(output, streamed_result.input, *final_history)
+            if streamed_result._cancel_mode == "none" and inbox._advance(
+                streamed_result.current_turn, streamed_result.max_turns, context_wrapper._budget
+            ):
+                inbox._stage_output(output)
+                # Until the next turn starts, graceful cancellation can still return this answer.
+                return finish_answer
+    await finish_answer()
+    return None
 
 
 async def finalize_max_turns_handler_output(
@@ -829,6 +908,7 @@ async def finalize_max_turns_handler_output(
         take_held_session_write(run_state)
         raise
     except Exception as guardrail_error:
+        stop_inbox_intake()
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
@@ -964,9 +1044,9 @@ async def start_streaming(
     sandbox_runtime: SandboxRuntime[TContext] | None = None,
 ):
     """Run the streaming loop for a run result."""
-    control = current_control()
-    if control is not None and is_resumed_state:
-        control._accepting = True
+    inbox = current_inbox()
+    if inbox is not None and is_resumed_state:
+        inbox._started = True
     streamed_result._stream_started = True
     if streamed_result._approved_output is not None and session is not None:
         streamed_result._approved_output.session_id = session.session_id or None
@@ -1121,6 +1201,38 @@ async def start_streaming(
         pending_server_items: list[RunItem] | None = None
         pending_input_admission_items: list[InputItem] = []
         session_input_items_for_persistence: list[TResponseInputItem] | None = None
+        finish_previous_answer: Callable[[], Awaitable[None]] | None = None
+
+        async def _stop_before_turn_if_cancelled(*, during_admission: bool = False) -> bool:
+            if streamed_result.is_complete or streamed_result._cancel_mode == "immediate":
+                return True
+            if streamed_result._cancel_mode != "after_turn":
+                return False
+            if finish_previous_answer is not None:
+                await finish_previous_answer()
+                if session is None:
+                    take_held_session_write(run_state)
+                if run_state is not None:
+                    run_state._current_step = None
+                return True
+            if during_admission:
+                # A steer can follow a tool turn that has no final answer.
+                await checkpoint_streamed_result(streamed_result, interruptions=[])
+            streamed_result.is_complete = True
+            streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
+            return True
+
+        def _start_inbox_turn(completed_turn: SingleStepResult) -> None:
+            nonlocal should_run_agent_start_hooks
+            should_run_agent_start_hooks = True
+            if run_state is not None:
+                run_state._current_step = NextStepRunAgain()
+            accepted_tool_input_guardrail_results.extend(
+                completed_turn.tool_input_guardrail_results
+            )
+            accepted_tool_output_guardrail_results.extend(
+                completed_turn.tool_output_guardrail_results
+            )
 
         def _commit_pending_server_response(
             model_response: ModelResponse,
@@ -1136,6 +1248,9 @@ async def start_streaming(
                 run_state=run_state,
                 tracker=server_conversation_tracker,
                 admission_items=pending_input_admission_items,
+                prior_responses=streamed_result.raw_responses,
+                tool_input_guardrail_results=accepted_tool_input_guardrail_results,
+                tool_output_guardrail_results=accepted_tool_output_guardrail_results,
                 generated_items=streamed_result._model_input_items,
                 session_items=streamed_result.new_items,
                 model_response=model_response,
@@ -1325,6 +1440,7 @@ async def start_streaming(
         raise
 
     try:
+        pending_feedback: str | None = None
         while True:
             validate_output_guardrails_with_server_managed_conversation(
                 current_agent,
@@ -1509,6 +1625,7 @@ async def start_streaming(
                             )[:result_start]
                         raise
 
+                    _stop_inbox_for_terminal_step(turn_result)
                     tool_use_tracker.record_processed_response(
                         current_agent, run_state._last_processed_response
                     )
@@ -1626,11 +1743,12 @@ async def start_streaming(
                             if turn_result.processed_response is not None
                             else run_state._last_processed_response
                         )
-                        await _finalize_streamed_final_output(
+                        finish_previous_answer = await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
                             run_config=run_config,
                             output=turn_result.next_step.output,
+                            allow_inbox_advance=not turn_result.next_step.is_error_handler_output,
                             continued_step=turn_result
                             if turn_result.next_step.continue_after_guardrails
                             else None,
@@ -1663,7 +1781,11 @@ async def start_streaming(
                         streamed_result.tool_output_guardrail_results.extend(
                             turn_result.tool_output_guardrail_results
                         )
+                        if finish_previous_answer is not None:
+                            _start_inbox_turn(turn_result)
+                            continue
                         if turn_result.next_step.continue_after_guardrails:
+                            pending_feedback = turn_result.feedback
                             if run_state is not None:
                                 run_state._current_step = NextStepRunAgain()
                             if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
@@ -1695,19 +1817,18 @@ async def start_streaming(
 
                     run_state._current_step = None
 
-            if streamed_result._cancel_mode == "after_turn":
-                streamed_result.is_complete = True
-                streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
-                break
-
-            if streamed_result.is_complete:
+            if await _stop_before_turn_if_cancelled():
                 break
 
             live_input = (
-                control._take(current_turn + 1)
-                if control is not None and (max_turns is None or current_turn < max_turns)
+                inbox._take(current_turn, max_turns, context_wrapper._budget)
+                if inbox is not None
                 else []
             )
+            if live_input:
+                await _await_initial_input_guardrails(streamed_result)
+                if await _stop_before_turn_if_cancelled(during_admission=True):
+                    break
             if run_state is not None and (run_state._pending_input or live_input):
                 if run_state._current_step is None:
                     run_state._current_step = NextStepRunAgain()
@@ -1742,12 +1863,14 @@ async def start_streaming(
                 if tripping_result is not None:
                     raise InputGuardrailTripwireTriggered(tripping_result)
 
+                if await _stop_before_turn_if_cancelled(during_admission=True):
+                    break
+
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store
-                if live_input and control is not None:
-                    run_state._pending_input.extend(live_input)
-                    control._retained = True
+                if live_input and inbox is not None:
+                    inbox._stage(live_input, run_state)
                 admission_items = await admit_pending_input(
                     run_state=run_state,
                     agent=current_agent,
@@ -1763,19 +1886,30 @@ async def start_streaming(
                 pending_input_admission_items = [
                     item for item in admission_items if isinstance(item, InputItem)
                 ]
-                if control is not None:
-                    control._admitted(pending_input_admission_items)
+                if inbox is not None:
+                    inbox._admitted(pending_input_admission_items)
                 if not run_state._pending_input:
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
+                if await _stop_before_turn_if_cancelled(during_admission=True):
+                    # The session append completed. Keep the admitted input in history.
+                    break
 
+            if finish_previous_answer is not None:
+                if inbox is not None:
+                    streamed_result._previous_outputs = inbox._begin_turn()
+                finish_previous_answer = None
+                set_final_output_item(None)
             current_turn += 1
+            feedback, pending_feedback = pending_feedback, None
             streamed_result.current_turn = current_turn
             streamed_result._current_turn_persisted_item_count = 0
             if run_state is not None:
                 run_state._current_turn_persisted_item_count = 0
 
             if max_turns is not None and current_turn > max_turns:
+                if inbox is not None:
+                    inbox._stop_accepting()
                 _error_tracing.attach_error_to_span(
                     current_span,
                     SpanError(
@@ -2014,6 +2148,7 @@ async def start_streaming(
                         tool_use_tracker,
                         server_conversation_tracker,
                         pending_server_items=pending_server_items,
+                        feedback=feedback,
                         session=session,
                         reasoning_item_id_policy=resolved_reasoning_item_id_policy,
                         prompt_cache_key_resolver=prompt_cache_key_resolver,
@@ -2121,6 +2256,7 @@ async def start_streaming(
                             usage_delta(turn_usage_start, context_wrapper.usage),
                         )
                         current_turn_span.finish(reset_current=True)
+                _stop_inbox_for_terminal_step(turn_result)
                 logger.debug(
                     "Turn %s complete, next_step type=%s",
                     current_turn,
@@ -2237,11 +2373,12 @@ async def start_streaming(
                     if await _wait_for_streamed_turn_events_and_stop_if_cancelled(streamed_result):
                         break
                 elif isinstance(turn_result.next_step, NextStepFinalOutput):
-                    await _finalize_streamed_final_output(
+                    finish_previous_answer = await _finalize_streamed_final_output(
                         streamed_result=streamed_result,
                         agent=current_agent,
                         run_config=run_config,
                         output=turn_result.next_step.output,
+                        allow_inbox_advance=not turn_result.next_step.is_error_handler_output,
                         continued_step=turn_result
                         if turn_result.next_step.continue_after_guardrails
                         else None,
@@ -2257,7 +2394,11 @@ async def start_streaming(
                     )
                     if streamed_result._stored_exception is not None:
                         break
+                    if finish_previous_answer is not None:
+                        _start_inbox_turn(turn_result)
+                        continue
                     if turn_result.next_step.continue_after_guardrails:
+                        pending_feedback = turn_result.feedback
                         streamed_result._model_input_items = model_input_items
                         streamed_result.new_items.extend(turn_session_items)
                         streamed_result._replay_from_model_input_items = (
@@ -2409,6 +2550,8 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        if inbox is not None:
+            inbox._stop_accepting()
         await cleanup_models_after_run(tool_use_tracker)
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
@@ -2473,12 +2616,19 @@ async def run_single_turn_streamed(
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    feedback: str | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
 
-    async def raise_if_input_guardrail_tripwire_known() -> None:
+    def check_immediate_cancellation() -> None:
+        # A provider or application callback can return after catching CancelledError.
+        if streamed_result._cancel_mode == "immediate":
+            raise asyncio.CancelledError
+
+    async def check_before_side_effects() -> None:
+        check_immediate_cancellation()
         tripwire_result = streamed_result._triggered_input_guardrail_result
         if tripwire_result is not None:
             raise InputGuardrailTripwireTriggered(tripwire_result)
@@ -2495,10 +2645,9 @@ async def run_single_turn_streamed(
         if tripwire_result is not None:
             raise InputGuardrailTripwireTriggered(tripwire_result)
 
-    try:
-        turn_input = ItemHelpers.input_to_new_input_list(streamed_result.input)
-    except Exception:
-        turn_input = []
+    turn_input = _get_turn_input(
+        run_state, streamed_result.input, streamed_result._model_input_items
+    )
     context_wrapper.turn_input = list(turn_input)
 
     with guard_agent_tool_configuration(public_agent):
@@ -2596,14 +2745,14 @@ async def run_single_turn_streamed(
             reasoning_item_id_policy,
         )
 
-    control = current_control()
-    if control is not None:
-        control._before_filter(input, server_conversation_tracker)
+    inbox = current_inbox()
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
         context_wrapper=context_wrapper,
-        input_items=input,
+        input_items=_prepare_request_input(
+            input, feedback, server_conversation_tracker, session, run_config, system_prompt
+        ),
         system_instructions=system_prompt,
     )
     redact_model_input(filtered, prompt_config)
@@ -2684,6 +2833,9 @@ async def run_single_turn_streamed(
         tripwire = streamed_result._triggered_input_guardrail_result
         if tripwire is not None:
             raise _StreamAttemptSkipped(InputGuardrailTripwireTriggered(tripwire))
+        check_immediate_cancellation()
+        if inbox is not None:
+            inbox._dispatch(filtered.input, filtered.instructions)
         return model.stream_response(
             filtered.instructions,
             filtered.input,
@@ -2699,29 +2851,14 @@ async def run_single_turn_streamed(
             prompt=prompt_config,
         )
 
-    async def controlled_stream() -> AsyncIterator[TResponseStreamEvent]:
-        # Defer dispatch until the retry driver actually pulls the stream.
-        assert control is not None
-        stream = get_model_stream()
-        try:
-            control._dispatch(filtered.input)
-            async for event in stream:
-                yield event
-        finally:
-            # The retry driver cannot see this attempt end until provider cleanup returns.
-            if preview is not None:
-                preview.retire()
-            await _close_async_iterator_quietly(stream)
-
     await _admit(context_wrapper._budget, model, session, streamed_result=streamed_result)
-    preview = (
-        streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
-        if streamed_result._approved_output is not None and current_redactor() is None
-        else None
-    )
     retry_stream = stream_response_with_retry(
-        get_stream=controlled_stream if control is not None else get_model_stream,
-        preview=preview,
+        get_stream=get_model_stream,
+        preview=(
+            streamed_result._approved_output.for_turn(streamed_result.current_turn, model)
+            if streamed_result._approved_output is not None and current_redactor() is None
+            else None
+        ),
         rewind=rewind_model_request,
         retry_settings=model_settings.retry,
         get_retry_advice=model.get_retry_advice,
@@ -2860,12 +2997,15 @@ async def run_single_turn_streamed(
     response_accepted = False
     if on_response_accepted is not None:
         response_accepted = on_response_accepted(final_response, None)
+    # Account for the completed request before stopping any new local work.
+    check_immediate_cancellation()
 
     async def after_invocation_validation(
         processed_response: ProcessedResponse | None,
     ) -> bool:
         if response_accepted and on_response_accepted is not None:
             on_response_accepted(final_response, processed_response)
+        check_immediate_cancellation()
         if response_accepted and on_response_hooks_started is not None:
             on_response_hooks_started()
         if processed_response is not None:
@@ -2878,6 +3018,7 @@ async def run_single_turn_streamed(
                 tool_execution.prepare_tool_declaration is not None
                 or tool_execution.prepare_tool_input is not None
                 or tool_execution.prepare_tool_output is not None
+                or tool_execution.tool_text_transforms
             ):
                 # A stream consumer must not change the invocation seen by preparation hooks.
                 model_items = [
@@ -2896,9 +3037,6 @@ async def run_single_turn_streamed(
             hooks.on_llm_end(context_wrapper, public_agent, final_response),
         )
         return response_accepted
-
-    async def check_input_guardrails_before_side_effects() -> None:
-        await raise_if_input_guardrail_tripwire_known()
 
     def on_tool_error_selected() -> None:
         # The category has selected its failure, before draining native finalization.
@@ -2921,7 +3059,7 @@ async def run_single_turn_streamed(
         tool_use_tracker=tool_use_tracker,
         server_manages_conversation=server_conversation_tracker is not None,
         after_invocation_validation=after_invocation_validation,
-        before_side_effects=check_input_guardrails_before_side_effects,
+        before_side_effects=check_before_side_effects,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
         on_tool_error_selected=on_tool_error_selected,
@@ -2938,6 +3076,7 @@ async def run_single_turn_streamed(
 
 async def run_single_turn(
     *,
+    feedback: str | None = None,
     current_turn: int,
     bindings: AgentBindings[TContext],
     original_input: str | list[TResponseInputItem],
@@ -2949,6 +3088,7 @@ async def run_single_turn(
     should_run_agent_start_hooks: bool,
     tool_use_tracker: AgentToolUseTracker,
     server_conversation_tracker: OpenAIServerConversationTracker | None = None,
+    pending_server_items: list[RunItem] | None = None,
     session: Session | None = None,
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
@@ -2964,10 +3104,7 @@ async def run_single_turn(
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
-    try:
-        turn_input = ItemHelpers.input_to_new_input_list(original_input)
-    except Exception:
-        turn_input = []
+    turn_input = _get_turn_input(run_state, original_input, generated_items)
     context_wrapper.turn_input = list(turn_input)
 
     with guard_agent_tool_configuration(public_agent):
@@ -3018,14 +3155,18 @@ async def run_single_turn(
     )
     output_schema = get_output_schema(execution_agent)
     if server_conversation_tracker is not None:
-        input = server_conversation_tracker.prepare_input(original_input, generated_items)
+        input = server_conversation_tracker.prepare_input(
+            original_input, pending_server_items or generated_items
+        )
     else:
         input = _prepare_turn_input_items(original_input, generated_items, reasoning_item_id_policy)
 
     new_response = await get_new_response(
         bindings,
         system_prompt,
-        input,
+        _prepare_request_input(
+            input, feedback, server_conversation_tracker, session, run_config, system_prompt
+        ),
         output_schema,
         model_tools,
         handoffs,
@@ -3115,9 +3256,7 @@ async def get_new_response(
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
-    control = current_control()
-    if control is not None:
-        control._before_filter(input, server_conversation_tracker)
+    inbox = current_inbox()
     filtered = await maybe_filter_model_input(
         agent=public_agent,
         run_config=run_config,
@@ -3226,8 +3365,8 @@ async def get_new_response(
     ):
 
         async def request_response() -> ModelResponse:
-            if control is not None:
-                control._dispatch(filtered.input)
+            if inbox is not None:
+                inbox._dispatch(filtered.input, filtered.instructions)
             return await model.get_response(
                 system_instructions=filtered.instructions,
                 input=filtered.input,

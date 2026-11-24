@@ -51,10 +51,12 @@ from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
 from ..run_state import RunState, _PendingSessionWrite, _SessionCompactionModelExchange
+from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .blocked_output import (
     _current_response_boundary,
     _identity_sequence_start,
     _should_defer_interrupted_session_items,
+    _synchronize_accepted_run_state,
 )
 from .items import (
     _TOOL_CALL_TO_OUTPUT_TYPE,
@@ -197,12 +199,13 @@ async def admit_pending_input(
     before the model call, while server-managed conversations keep it pending until a model
     response confirms that the server accepted the request.
     """
-    pending_input = run_state.pending_input
-    if not pending_input:
+    if not run_state._pending_input:
         return []
 
+    input_ids = run_state._track_pending_input()
     admission_items: list[RunItem] = [
-        InputItem(agent=agent, raw_item=item) for item in pending_input
+        InputItem(agent=agent, raw_item=item, input_id=input_id)
+        for item, input_id in zip(run_state.pending_input, input_ids, strict=True)
     ]
     require_clean_run_items(run_state._original_input, run_state._session_items, admission_items)
 
@@ -216,7 +219,8 @@ async def admit_pending_input(
             wrapper=wrapper,
         )
     if server_conversation_tracker is None:
-        run_state.clear_pending_input()
+        # Successful admission keeps these messages in the current task.
+        run_state._consume_pending_input()
 
     return admission_items
 
@@ -226,6 +230,9 @@ def commit_server_pending_input(
     run_state: RunState[Any],
     tracker: OpenAIServerConversationTracker,
     admission_items: list[InputItem],
+    prior_responses: list[ModelResponse],
+    tool_input_guardrail_results: list[ToolInputGuardrailResult],
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     generated_items: list[RunItem],
     session_items: list[RunItem],
     model_response: ModelResponse,
@@ -252,9 +259,9 @@ def commit_server_pending_input(
 
     retain_accepted_admissions(generated_items)
     retain_accepted_admissions(session_items)
-    run_state._pending_input = copy.deepcopy(
-        [item.raw_item for item in admission_items if item.input_id not in accepted_ids]
-    )
+    unacknowledged = [item for item in admission_items if item.input_id not in accepted_ids]
+    run_state._pending_input = copy.deepcopy([item.raw_item for item in unacknowledged])
+    run_state._pending_input_ids = tuple(item.input_id for item in unacknowledged)
 
     # A model input filter may omit every staged occurrence. In that case the response does not
     # acknowledge pending input, so normal turn processing owns the response and the input remains
@@ -262,13 +269,18 @@ def commit_server_pending_input(
     if not accepted_ids:
         return False
 
-    state_generated_items = list(generated_items)
-    state_session_items = list(session_items)
-
-    run_state._generated_items = state_generated_items
-    run_state._session_items = state_session_items
-    if not run_state._model_responses or run_state._model_responses[-1] is not model_response:
-        run_state._model_responses.append(model_response)
+    # Acceptance and validation checkpoint the same request. Snapshot completed
+    # turns first so recording this response never mutates the stream's list.
+    _synchronize_accepted_run_state(
+        run_state,
+        generated_items=generated_items,
+        session_items=session_items,
+        model_responses=prior_responses,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
+        current_turn=current_turn,
+    )
+    run_state._model_responses.append(model_response)
     run_state._last_processed_response = processed_response
     run_state._current_step = NextStepInterruption(
         interruptions=(
@@ -277,13 +289,17 @@ def commit_server_pending_input(
         response_accepted=True,
         llm_end_hooks_started=False,
     )
-    run_state._current_turn = current_turn
     run_state._conversation_id = tracker.conversation_id
     run_state._previous_response_id = tracker.previous_response_id
     run_state._auto_previous_response_id = tracker.auto_previous_response_id
-    # The accepted model response is durable, but its processed items have not yet been merged
-    # because local hooks and tool work can still fail. Preserve that distinction across retries.
     run_state._clear_generated_items_last_processed_marker()
+    if processed_response is not None and processed_response.has_tools_or_approvals_to_run():
+        # A tool can commit its output before a hook fails. Its validated call must
+        # precede that output in both checkpoint histories, just as on approval.
+        # Text-only responses still go through normal final-output processing on resume.
+        run_state._generated_items.extend(processed_response.new_items)
+        run_state._session_items.extend(processed_response.new_items)
+        run_state._mark_generated_items_merged_with_last_processed()
     return True
 
 

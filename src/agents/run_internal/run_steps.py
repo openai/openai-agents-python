@@ -172,6 +172,7 @@ class NextStepHandoff:
 class NextStepFinalOutput:
     output: Any
     continue_after_guardrails: bool = False
+    is_error_handler_output: bool = False
 
 
 @dataclass
@@ -244,6 +245,8 @@ class SingleStepResult:
 
     policy_error: BaseException | None = None
     """Failure to accept a guarded tool output, held only until blocked-output cleanup."""
+
+    feedback: str | None = dataclasses.field(default=None, repr=False)
 
     def check_continued_output(self) -> None:
         """Check guardrail mutations before releasing a provisional reply."""

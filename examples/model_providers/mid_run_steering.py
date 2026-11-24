@@ -1,55 +1,67 @@
-"""Send a correction while an SDK tool runs, with either Python or CodexProvider.
+"""Change a flight search in progress, then ask a separate follow-up.
 
-The tool signals when it starts so this example can simulate a user sending a
-message from the UI. A real UI can call control.send from its event handler.
+Run with Python's default provider or pass --codex to use CodexProvider.
+The flight data is fictional. Both providers use a live model.
 """
 
 import argparse
 import asyncio
 
-from agents import Agent, RunConfig, RunControl, Runner
+from agents import Agent, ItemHelpers, MessageReceipt, RunConfig, Runner
 from agents.decorators import tool
 from agents.models.codex import CodexProvider
 
 
 async def main(use_codex: bool) -> None:
-    started = asyncio.Event()
-    release = asyncio.Event()
+    search_started = asyncio.Event()
+    finish_search = asyncio.Event()
 
     @tool
-    async def run_tests() -> str:
-        """Return a simulated test result after the user has had time to respond."""
-        started.set()
-        await release.wait()
-        return "FAILED test_total: expected 42, got 41"
+    async def search_flights() -> str:
+        """Search for flights from Seattle to Boston. Prices are per person."""
+        search_started.set()
+        await finish_search.wait()
+        return "Flight A: $220, one stop. Flight B: $310, nonstop. Flight C: $350, nonstop."
 
     agent = Agent(
-        name="Test reviewer",
-        instructions="Call run_tests once, then respond to the user. Do not edit files.",
-        tools=[run_tests],
+        name="Flight assistant",
+        instructions="Call search_flights once. Use its results for the search and follow-ups.",
+        tools=[search_flights],
     )
     config = RunConfig(model_provider=CodexProvider()) if use_codex else RunConfig()
-    control = RunControl()
-    run = asyncio.create_task(
-        Runner.run(agent, "Run the tests.", run_config=config, control=control)
-    )
-    tool_started = asyncio.create_task(started.wait())
     try:
-        done, _ = await asyncio.wait((run, tool_started), return_when=asyncio.FIRST_COMPLETED)
-        if run in done:
-            print((await run).final_output)
-            return
-        receipt = control.send("Explain the failure before proposing a fix.")
-        release.set()
-        result = await run
-        outcome = await receipt.wait()
-        print(f"Correction: {outcome.status} ({outcome.reason})")
-        print(result.final_output)
+        stream = Runner.run_streamed(
+            agent, "Find flights from Seattle to Boston.", run_config=config
+        )
+
+        async def simulate_ui() -> tuple[MessageReceipt, MessageReceipt]:
+            # A real UI sends each message from its own event handler.
+            await search_started.wait()
+            try:
+                steering = stream.steer("Only show nonstop flights.")
+                follow_up = stream.queue("What would two seats on the cheapest nonstop cost?")
+                return steering, follow_up
+            finally:
+                finish_search.set()
+
+        ui = asyncio.create_task(simulate_ui())
+        try:
+            # The stream shows both answers. At the end, stream.final_output holds the last one.
+            async for event in stream.stream_events():
+                if (
+                    event.type == "run_item_stream_event"
+                    and event.item.type == "message_output_item"
+                ):
+                    print(ItemHelpers.text_message_output(event.item))
+            if search_started.is_set():
+                steering, follow_up = await ui
+                print("Steering:", (await steering.wait()).status)
+                print("Follow-up:", (await follow_up.wait()).status)
+        finally:
+            # The run can finish without calling the search tool.
+            ui.cancel()
+            await asyncio.gather(ui, return_exceptions=True)
     finally:
-        release.set()
-        for task in (tool_started, run):
-            task.cancel()
-        await asyncio.gather(tool_started, run, return_exceptions=True)
         await config.model_provider.aclose()
 
 

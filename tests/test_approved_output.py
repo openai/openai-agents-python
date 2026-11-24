@@ -18,7 +18,6 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RetryDecision,
     RunConfig,
-    RunControl,
     Runner,
     function_tool,
     output_guardrail,
@@ -553,8 +552,8 @@ async def test_hosted_child_raw_text_never_reaches_approval(previews):
 
 
 @pytest.mark.parametrize("ending", ["eof", "error", "cancel", "timeout"])
-@pytest.mark.parametrize("controlled", [False, True])
-async def test_pending_approval_expires_before_attempt_cleanup(ending, controlled):
+@pytest.mark.parametrize("with_followup", [False, True])
+async def test_pending_approval_expires_before_attempt_cleanup(ending, with_followup):
     entered, closing, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
     reply = asyncio.get_running_loop().create_future()
 
@@ -607,7 +606,8 @@ async def test_pending_approval_expires_before_attempt_cleanup(ending, controlle
         model=Model([[assistant_message("draft")]]),
         model_settings=ModelSettings(timeout=1 if ending == "timeout" else None),
     )
-    run = Runner.run_streamed(root, "start", control=RunControl() if controlled else None)
+    run = Runner.run_streamed(root, "start")
+    queued = run.queue("follow up") if with_followup else None
     reading = asyncio.create_task(collect(run.subscribe_approved_output(approve)))
     try:
         await asyncio.wait_for(entered.wait(), 5)
@@ -630,6 +630,8 @@ async def test_pending_approval_expires_before_attempt_cleanup(ending, controlle
         error = {"eof": ModelBehaviorError, "error": ConnectionError, "timeout": ModelTimeoutError}
         with pytest.raises(error[ending]):
             await collect(run.stream_events())
+    if queued is not None:
+        assert (await asyncio.wait_for(queued.wait(), 3)).status == "not_submitted"
 
 
 @pytest.mark.parametrize("timeout", [None, 30])
@@ -879,3 +881,22 @@ async def test_cancelling_preview_reader_leaves_borrowed_future_and_run_active(t
         await collect(run.stream_events())
         await asyncio.gather(reading, return_exceptions=True)
     assert thread.closed and run.final_output == thread.text
+
+
+async def test_queued_task_emits_one_completion_after_the_last_guarded_answer():
+    guarded = []
+
+    @output_guardrail
+    def check(ctx, agent, output):
+        guarded.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[assistant_message("first")], [assistant_message("second")]])
+    run = Runner.run_streamed(Agent(name="root", model=model, output_guardrails=[check]), "start")
+    receipt = run.queue("follow up")
+    async with run.stream_approved_output() as reader:
+        events = await collect(reader)
+    assert [type(event) for event in events] == [RunCompleted]
+    assert guarded == ["first", "second"]
+    assert run.final_output == "second"
+    assert (await asyncio.wait_for(receipt.wait(), 3)).status == "submitted"

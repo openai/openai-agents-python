@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, ModelSettings, RunConfig, Runner, SQLiteSession
 from agents.agent_output import AgentOutputSchema
 from agents.stream_events import StreamEvent
 from agents.testing import ScriptedModel
@@ -413,6 +413,40 @@ async def test_soft_cancel_mixed_modes():
     assert result._cancel_mode == "immediate"
     # Queues should be empty (immediate cancel behavior)
     assert result._event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_after_turn_cannot_restart_an_immediately_cancelled_timed_request():
+    filtering = asyncio.Event()
+    model = ScriptedModel([[get_text_message("first")], [get_text_message("unexpected")]])
+
+    async def filter_input(data):
+        if model.calls:
+            filtering.set()
+            # Finish preparing the request even if the caller cancels during the filter.
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+        return data.model_data
+
+    result = Runner.run_streamed(
+        Agent(name="Assistant", model=model, model_settings=ModelSettings(timeout=5)),
+        "start",
+        run_config=RunConfig(tracing_disabled=True, call_model_input_filter=filter_input),
+    )
+    receipt = result.queue("follow-up")
+    try:
+        await asyncio.wait_for(filtering.wait(), timeout=3)
+    finally:
+        result.cancel()
+        result.cancel(mode="after_turn")
+        async for _ in result.stream_events():
+            pass
+
+    assert len(model.calls) == 1
+    outcome = await asyncio.wait_for(receipt.wait(), timeout=3)
+    assert (outcome.status, outcome.reason) == ("not_submitted", "cancelled")
 
 
 @pytest.mark.asyncio

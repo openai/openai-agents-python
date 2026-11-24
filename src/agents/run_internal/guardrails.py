@@ -14,6 +14,7 @@ from ..guardrail import (
 from ..items import TResponseInputItem
 from ..result import RunResultStreaming
 from ..run_context import RunContextWrapper, TContext
+from ..run_inbox import stop_inbox_intake
 from ..tracing import Span, SpanError, guardrail_span
 from ..util import _error_tracing
 from .run_steps import QueueCompleteSentinel
@@ -101,6 +102,8 @@ async def run_input_guardrails_with_queue(
                     )
                 )
                 streamed_result._triggered_input_guardrail_result = result
+                if streamed_result._inbox is not None:
+                    streamed_result._inbox._stop_accepting()
                 queue.put_nowait(result)
                 for t in guardrail_tasks:
                     t.cancel()
@@ -120,6 +123,8 @@ async def run_input_guardrails_with_queue(
                 break
             queue.put_nowait(result)
     except BaseException as error:
+        if streamed_result._inbox is not None:
+            streamed_result._inbox._stop_accepting()
         for t in guardrail_tasks:
             if not t.done():
                 t.cancel()
@@ -168,6 +173,7 @@ async def run_input_guardrails(
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
             if result.output.tripwire_triggered:
+                stop_inbox_intake()
                 record(result)
                 for sibling in _unreported_guardrail_results(guardrail_tasks, guardrail_results):
                     record(sibling)
@@ -183,6 +189,7 @@ async def run_input_guardrails(
                 raise InputGuardrailTripwireTriggered(result)
             record(result)
     except BaseException:
+        stop_inbox_intake()
         # On any error (including a guardrail raising or the caller being cancelled),
         # cancel and await siblings so they don't leak past this function's return.
         for t in guardrail_tasks:
@@ -226,6 +233,7 @@ async def run_output_guardrails(
         for done in asyncio.as_completed(guardrail_tasks):
             result = await done
             if result.output.tripwire_triggered:
+                stop_inbox_intake()
                 record(result)
                 for sibling in _unreported_guardrail_results(guardrail_tasks, guardrail_results):
                     record(sibling)
@@ -241,6 +249,7 @@ async def run_output_guardrails(
                 raise OutputGuardrailTripwireTriggered(result)
             record(result)
     except BaseException:
+        stop_inbox_intake()
         # On any error (including a guardrail raising or the caller being cancelled),
         # cancel and await siblings so they don't leak past this function's return.
         for t in guardrail_tasks:

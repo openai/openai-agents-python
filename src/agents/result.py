@@ -21,6 +21,7 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     RunErrorDetails,
+    UserError,
     _await_data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
@@ -29,6 +30,7 @@ from .exceptions import (
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import (
+    InputItem,
     ItemHelpers,
     ModelResponse,
     RunItem,
@@ -38,6 +40,7 @@ from .items import (
 )
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
+from .run_inbox import MessageReceipt, RunInbox
 from .run_internal._approved_output import Approve, ApprovedOutput
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
@@ -57,6 +60,7 @@ from .stream_events import ApprovedText, RunCompleted, StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
 from .tracing.traces import TraceState
+from .usage import Usage
 from .util._pretty_print import (
     pretty_print_result,
     pretty_print_run_result_streaming,
@@ -135,6 +139,23 @@ def _populate_state_from_result(
     else:
         state._generated_items = result.new_items
     state._session_items = list(result.new_items)
+    source_state = getattr(result, "_state", None)
+    state._pending_input_ids = (
+        source_state._pending_input_ids
+        if isinstance(source_state, RunState)
+        else result._pending_input_ids_for_state
+    )
+    if state._pending_input_ids:
+        # A stream can fail between staging input and receiving a response.
+        # Keep those occurrences only in pending_input so a retry sends each
+        # once and clear_pending_input() really withdraws them.
+        pending = set(state._pending_input_ids)
+
+        def acknowledged(item: RunItem) -> bool:
+            return not isinstance(item, InputItem) or item.input_id not in pending
+
+        state._generated_items = [item for item in state._generated_items if acknowledged(item)]
+        state._session_items = [item for item in state._session_items if acknowledged(item)]
     snapshot_refs = _state_snapshot_owned_item_refs(result, state._original_input)
     live_refs = rebase_nested_history_owned_item_refs(
         state._original_input,
@@ -154,10 +175,10 @@ def _populate_state_from_result(
     state._conversation_id = conversation_id
     state._previous_response_id = previous_response_id
     state._auto_previous_response_id = auto_previous_response_id
-    source_state = getattr(result, "_state", None)
     if isinstance(source_state, RunState):
         state._generated_prompt_cache_key = source_state._generated_prompt_cache_key
         state._pending_input = copy.deepcopy(source_state._pending_input)
+        state._task_input_ids = source_state._task_input_ids
         state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
         if isinstance(source_state._current_step, NextStepInterruption):
@@ -165,12 +186,37 @@ def _populate_state_from_result(
             # normal resume write. Keep the checkpoint's publication boundary so
             # recovery does not mistake those outputs for already persisted work.
             state._session_items = list(source_state._session_items)
+            if source_state._current_step.response_accepted:
+                from .run_internal.blocked_output import _synchronize_accepted_run_state
+
+                # Hooks and tools can fail after server acceptance. Resume from
+                # the checkpoint that owns any committed effects, even if the
+                # stream has not published them. A response that failed validation
+                # must still have no processed response.
+                _synchronize_accepted_run_state(
+                    state,
+                    generated_items=source_state._generated_items,
+                    session_items=source_state._session_items,
+                    model_responses=source_state._model_responses,
+                    tool_input_guardrail_results=source_state._tool_input_guardrail_results,
+                    tool_output_guardrail_results=source_state._tool_output_guardrail_results,
+                    current_turn=source_state._current_turn,
+                )
+                state._current_step = replace(source_state._current_step)
+                state._last_processed_response = source_state._last_processed_response
+                state._generated_items_last_processed_marker = (
+                    source_state._generated_items_last_processed_marker
+                )
+                state._conversation_id = source_state._conversation_id
+                state._previous_response_id = source_state._previous_response_id
+                state._auto_previous_response_id = source_state._auto_previous_response_id
         # A streamed result exists before its terminal append does, so a checkpoint taken from a
         # failed stream has to keep the fail-closed marker or it would look resumable.
         state._terminal_unrecoverable = source_state._terminal_unrecoverable
     else:
         state._generated_prompt_cache_key = getattr(result, "_generated_prompt_cache_key", None)
         state._pending_input = copy.deepcopy(getattr(result, "_pending_input_for_state", []))
+        state._task_input_ids = result._task_input_ids_for_state
         state._pending_session_write = copy.deepcopy(
             getattr(result, "_pending_session_write", None)
         )
@@ -405,6 +451,21 @@ class RunResultBase(abc.ABC):
     context_wrapper: RunContextWrapper[Any]
     """The context wrapper for the agent run."""
 
+    _previous_outputs: tuple[Any, ...] = field(default=(), init=False, repr=False, compare=False)
+
+    @property
+    def previous_outputs(self) -> tuple[Any, ...]:
+        """Earlier answers, in order, when an inbox message started another turn.
+
+        The last answer is final_output. These values belong to the caller. A tool
+        callback can return an answer that never appears in the model's transcript.
+        Runner copies answer data using Python's copy protocol. Private attributes
+        on Pydantic models remain shared with the original answer.
+        Runner does not copy this tuple into messages, sessions, or saved run state.
+        Existing records, such as output guardrail results, may contain the same values.
+        """
+        return self._previous_outputs
+
     _redact_text: Callable[[str], str] | None = field(
         default_factory=current_redactor, init=False, repr=False, compare=False
     )
@@ -436,6 +497,12 @@ class RunResultBase(abc.ABC):
         default_factory=list, init=False, repr=False
     )
     """Pending input preserved when a non-streaming result is converted back to RunState."""
+    _task_input_ids_for_state: tuple[str, ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _pending_input_ids_for_state: tuple[str, ...] = field(
+        default=(), init=False, repr=False, compare=False
+    )
     _pending_session_write: _PendingSessionWrite | None = field(
         default=None, init=False, repr=False
     )
@@ -456,6 +523,11 @@ class RunResultBase(abc.ABC):
         # RunResult objects are runtime values; schema generation should treat them as instances
         # instead of recursively traversing internal dataclass annotations.
         return core_schema.is_instance_schema(cls)
+
+    @property
+    def usage(self) -> Usage:
+        """Reported request and token counts for this run, updated as the run progresses."""
+        return self.context_wrapper.usage
 
     @property
     @abc.abstractmethod
@@ -796,6 +868,7 @@ class RunResultStreaming(RunResultBase):
     )
 
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
+        self._inbox: RunInbox | None = None
         self._approved_output: ApprovedOutput | None = None
         self._stream_started = False
         self._display_driver: asyncio.Task[None] | None = None
@@ -967,6 +1040,26 @@ class RunResultStreaming(RunResultBase):
             _detach_data_redacted_error_traceback(error)
         return error
 
+    def steer(self, text: str) -> MessageReceipt:
+        """Guide this task after the current model request and its tools finish.
+
+        If the model has already answered, Runner continues with the new input.
+        Call on the run's event loop. This never interrupts a tool or a Codex request.
+        """
+        if self._inbox is None:
+            raise UserError("This result has no active run")
+        return self._inbox.steer(text)
+
+    def queue(self, text: str) -> MessageReceipt:
+        """Run a follow-up after this task finishes successfully.
+
+        Follow-ups run one at a time in the same conversation and share the run's limits.
+        Keep consuming stream_events() until the last answer.
+        """
+        if self._inbox is None:
+            raise UserError("This result has no active run")
+        return self._inbox.queue(text)
+
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
 
@@ -990,11 +1083,15 @@ class RunResultStreaming(RunResultBase):
                     # result.cancel()  # Immediate (default)
             ```
 
-        Note: After calling cancel(), you should continue consuming stream_events()
-        to allow the cancellation to complete properly.
+        You can escalate an after_turn cancellation to immediate. Once you request
+        immediate cancellation, later after_turn requests have no effect.
+        Continue consuming stream_events() to let cancellation finish.
         """
-        # Store the cancel mode for the background task to check
+        if self._cancel_mode == "immediate" and mode == "after_turn":
+            return
         self._cancel_mode = mode
+        if self._inbox is not None:
+            self._inbox._stop_accepting()
         if self._approved_output is not None:
             self._approved_output.interrupt_preview()
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator, Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import httpx2
@@ -11,13 +13,16 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunBudget, RunConfig, Runner
+from agents.decorators import tool
 from agents.extensions.tracing import OpenTelemetryTracingProcessor
 from agents.models.openai_responses import OpenAIResponsesModel
+from agents.testing import ScriptedModel, assistant_message, function_call
 from agents.tracing import (
     add_trace_processor,
     function_span,
     generation_span,
+    metadata_only_run_tracing,
     set_trace_processors,
     trace,
 )
@@ -616,3 +621,168 @@ async def test_any_llm_responses_capture_bounds_sdk_and_otel_without_changing_pr
             assert "input-visible" in json.dumps(value)
             assert "wire-instructions-visible" in json.dumps(value)
         assert "output-visible" in json.dumps(captured_output)
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_metadata_only_scope_bounds_agent_tool_and_nested_runner(exporter, stream):
+    from tests.model_test_helpers import get_response_obj
+    from tests.test_responses import get_text_message
+
+    native = SpanProcessorForTests()
+    add_trace_processor(native)
+
+    # A real adapter exercises model request and response capture, including streaming.
+    def respond(request):
+        assert b"INPUT_CANARY" in request.content
+        payload = get_response_obj([get_text_message("OUTPUT_CANARY")]).model_dump()
+        if stream:
+            event = {"type": "response.completed", "sequence_number": 0, "response": payload}
+            return httpx2.Response(
+                200,
+                content=f"data: {json.dumps(event)}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="synthetic",
+        base_url="https://fixture.invalid/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)),
+    ) as client:
+        leaf = Agent(name="leaf", model=OpenAIResponsesModel("fixture", client))
+
+        async def run(agent, question, config=None):
+            if stream:
+                result = Runner.run_streamed(agent, question, run_config=config)
+                async for _ in result.stream_events():
+                    pass
+                return result.final_output
+            return (await Runner.run(agent, question, run_config=config)).final_output
+
+        @tool
+        async def lookup(question: str) -> str:
+            config = {
+                "tracing": {"operation_detail": "content"},
+                "trace_include_sensitive_data": True,
+            }
+            return await run(leaf, question, config)
+
+        specialist = Agent(
+            name="specialist",
+            model=ScriptedModel(
+                [[function_call("lookup", {"question": "INPUT_CANARY"}, call_id="lookup")]]
+            ),
+            tools=[lookup],
+            tool_use_behavior="stop_on_first_tool",
+        )
+        parent = Agent(
+            name="parent",
+            model=ScriptedModel(
+                [[function_call("consult", {"input": "INPUT_CANARY"}, call_id="consult")]]
+            ),
+            tools=[
+                specialist.as_tool(
+                    "consult",
+                    "Consult",
+                    run_config=RunConfig(trace_include_sensitive_data=True),
+                    on_stream=(lambda event: None) if stream else None,
+                )
+            ],
+            tool_use_behavior="stop_on_first_tool",
+        )
+        with metadata_only_run_tracing():
+            answer = await run(parent, "INPUT_CANARY")
+
+    assert answer == "OUTPUT_CANARY"
+    spans = native.get_ordered_spans()
+    operations = [s.span_data for s in spans if hasattr(s.span_data, "operation")]
+    assert {"response", "function"} <= {op.type for op in operations}
+    for op in operations:
+        assert op.operation.detail == "metadata"
+        assert op.input is None and op.output is None
+        if op.type == "response":
+            assert op.response is None
+    assert "CANARY" not in json.dumps([s.export() for s in spans])
+    exported = exporter.get_finished_spans()
+    assert any(s.name == "execute_tool lookup" for s in exported)
+    assert "CANARY" not in "".join(s.to_json() for s in exported)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scoped", [False, True])
+async def test_budget_only_child_uses_fresh_trace_defaults(scoped, monkeypatch):
+    monkeypatch.delenv("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", raising=False)
+
+    @tool
+    def lookup() -> str:
+        return "CHILD_OUTPUT"
+
+    worker = Agent(
+        name="worker",
+        tools=[lookup],
+        model=ScriptedModel([[function_call("lookup", {}, call_id="lookup")]]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    child = RunConfig(budget=RunBudget(max_model_calls=1))
+    manager = Agent(
+        name="manager",
+        tools=[worker.as_tool("consult", "Consult", run_config=child)],
+        model=ScriptedModel([[function_call("consult", {"input": "question"}, call_id="consult")]]),
+        tool_use_behavior="stop_on_first_tool",
+    )
+    parent = RunConfig(tracing={"operation_detail": "metadata"})
+    with metadata_only_run_tracing() if scoped else nullcontext():
+        result = await Runner.run(manager, "question", run_config=parent)
+
+    assert result.final_output == "CHILD_OUTPUT"
+    spans = SPAN_PROCESSOR_TESTING.get_ordered_spans()
+    outputs = {
+        s.span_data.name: s.span_data.output for s in spans if s.span_data.type == "function"
+    }
+    assert outputs == {"consult": None, "lookup": None if scoped else "CHILD_OUTPUT"}
+
+
+def test_metadata_only_scope_rejects_async_decorator():
+    with pytest.raises(TypeError):
+
+        @metadata_only_run_tracing()  # type: ignore[operator]
+        async def run():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_metadata_only_scope_is_task_local_and_restored_after_cancellation():
+    config = RunConfig(tracing={"operation_detail": "content"}, trace_include_sensitive_data=True)
+    entered = asyncio.Event()
+
+    async def capture(config):
+        model = ScriptedModel([[assistant_message("ok")]])
+        await Runner.run(Agent(name="worker", model=model), "question", run_config=config)
+        return model.calls[0].tracing
+
+    async def scoped():
+        try:
+            with metadata_only_run_tracing():
+                with metadata_only_run_tracing():
+                    assert (await capture(RunConfig(tracing_disabled=True))).is_disabled()
+                assert not (await capture(config)).include_data()
+                entered.set()
+                await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert (await capture(config)).include_data()
+            raise
+        finally:
+            entered.set()
+
+    task = asyncio.create_task(scoped())
+    try:
+        await entered.wait()
+        assert (await capture(config)).include_data()
+        assert config.tracing == {"operation_detail": "content"}
+        assert config.trace_include_sensitive_data
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task

@@ -9,19 +9,26 @@ from typing import Any, cast
 from openai.types.responses.response_usage import OutputTokensDetails
 
 from .._redaction import current_redactor
+from .._tool_identity import get_function_tool_lookup_key_for_call, get_function_tool_lookup_keys
 from ..agent import Agent
-from ..agent_tool_state import set_agent_tool_state_scope
+from ..agent_tool_state import (
+    get_agent_tool_resume_state,
+    peek_agent_tool_run_result,
+    set_agent_tool_state_scope,
+)
 from ..exceptions import UserError
-from ..guardrail import InputGuardrailResult
+from ..guardrail import InputGuardrailResult, OutputGuardrailResult
 from ..items import ModelResponse, RunItem, ToolApprovalItem, TResponseInputItem
 from ..memory import Session
 from ..models.interface import Model
 from ..models.openai_agent_registration import add_openai_harness_id_to_metadata
 from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
-from ..run_config import ReasoningItemIdPolicy, RunConfig
+from ..run_budget import RunBudget, _check_resumed_budget, _tool_config
+from ..run_config import ReasoningItemIdPolicy, RunConfig, ToolExecutionConfig
 from ..run_context import RunContextWrapper, TContext
 from ..run_state import RunState
+from ..tool import FunctionTool, _unique_enabled_function
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span
 from ..tracing.config import TracingConfig
@@ -52,6 +59,7 @@ from .session_persistence import (
     save_resumed_turn_items,
     take_held_session_write,
 )
+from .tool_text import validate_pending_text_transforms
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
 
@@ -70,6 +78,7 @@ __all__ = [
     "input_guardrails_triggered",
     "validate_output_guardrails_for_server_model",
     "validate_output_guardrails_with_server_managed_conversation",
+    "validate_resumed_agent_tools",
     "validate_session_conversation_settings",
     "resolve_trace_settings",
     "resolve_processed_response",
@@ -379,6 +388,103 @@ def resolve_resumed_context(
     return run_state._context
 
 
+async def validate_resumed_agent_tools(
+    state: RunState[Any],
+    limits: RunBudget | None,
+    context: RunContextWrapper[Any],
+    settings: ToolExecutionConfig | None,
+    *,
+    manual_root: bool = False,
+    delegate_replaced: bool = False,
+) -> tuple[bool, bool]:
+    """Check required delegate bindings once for both budgets and text editors."""
+    budgeted = _check_resumed_budget(state, limits)
+    # Delegated tools can have a different context from the specialist check.
+    state._restore_task_input(context)
+    edited = False
+    for action in getattr(state._last_processed_response, "functions", ()):
+        if not action.function_tool._is_agent_tool:
+            continue
+        result = peek_agent_tool_run_result(
+            action.tool_call, scope_id=state._agent_tool_state_scope_id
+        )
+        child = get_agent_tool_resume_state(result)
+        if child is None and result is not None and result.interruptions:
+            child = result.to_state()
+        if child is None:
+            continue
+        # Turn resolution can rebind a queued call after load_state(). Check
+        # the current qualified binding and grant only for required branches.
+        key = get_function_tool_lookup_key_for_call(action.tool_call)
+        tools = state._current_agent.tools if state._current_agent is not None else []
+        bindings = [
+            tool
+            for tool in tools
+            if isinstance(tool, FunctionTool) and key in get_function_tool_lookup_keys(tool)
+        ]
+        # A replacement can introduce a policy even on an unmarked branch.
+        # Resolve that key before inspecting its child, and reuse the grant.
+        retained = action.function_tool
+        active = None
+        for candidate in bindings:
+            if candidate is retained or candidate.is_enabled is False:
+                continue
+            override = _tool_config(candidate)
+            execution = override.tool_execution if override is not None else settings
+            if (override and override.budget is not None) or (
+                execution and execution.tool_text_transforms
+            ):
+                if state._current_agent is not None:
+                    active = await _unique_enabled_function(bindings, context, state._current_agent)
+                if active is None or active._agent_instance is not retained._agent_instance:
+                    requirement = "RunBudget" if override and override.budget else "text editor"
+                    raise UserError(
+                        f"A pending {requirement} requires the same unique enabled agent tool."
+                    )
+                break
+        recipient = active or (bindings[0] if len(bindings) == 1 else retained)
+        override = _tool_config(recipient)
+        policy = override.budget if override is not None else None
+        child_settings = override.tool_execution if override is not None else settings
+        replaced = delegate_replaced or recipient is not retained
+        # Agent.as_tool keeps the child's wrapper but forwards current context and usage.
+        # Use the same view for leaf and delegate grants without mutating saved state.
+        owner = context
+        if child._context is not None and child._context is not context:
+            owner = copy.copy(child._context)
+            owner.context = context.context
+            owner.usage = context.usage
+        budget, editor = await validate_resumed_agent_tools(
+            child, policy, owner, child_settings, delegate_replaced=replaced
+        )
+        # Check delegated editors now, before any approved sibling can run.
+        editor |= await validate_pending_text_transforms(
+            child, child_settings, owner, delegate_replaced=replaced
+        )
+        if budget or editor:
+            active = active or (
+                await _unique_enabled_function(bindings, context, state._current_agent)
+                if state._current_agent is not None and state._context is not None
+                else None
+            )
+            if (
+                active is None
+                or active is not recipient
+                or active._agent_instance is not action.function_tool._agent_instance
+            ):
+                requirement = "RunBudget" if budget else "text editor"
+                raise UserError(
+                    f"A pending {requirement} requires the same unique enabled agent tool."
+                )
+            budgeted |= budget
+            edited |= editor
+    # Managed roots check after the session's missing-tool diagnostics. Ordinary
+    # roots can check local approvals now and reconcile MCP against live discovery.
+    if manual_root:
+        await validate_pending_text_transforms(state, settings, context, local_only=True)
+    return budgeted, edited
+
+
 def ensure_context_wrapper(
     context: RunContextWrapper[TContext] | TContext | None,
 ) -> RunContextWrapper[TContext]:
@@ -470,6 +576,7 @@ def build_interruption_result(
     model_responses: list[ModelResponse],
     current_agent: Agent[Any],
     input_guardrail_results: list[InputGuardrailResult],
+    output_guardrail_results: list[OutputGuardrailResult],
     tool_input_guardrail_results: list[ToolInputGuardrailResult],
     tool_output_guardrail_results: list[ToolOutputGuardrailResult],
     context_wrapper: RunContextWrapper[TContext],
@@ -497,7 +604,7 @@ def build_interruption_result(
         final_output=None,
         _last_agent=current_agent,
         input_guardrail_results=input_guardrail_results,
-        output_guardrail_results=[],
+        output_guardrail_results=output_guardrail_results,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
         context_wrapper=context_wrapper,

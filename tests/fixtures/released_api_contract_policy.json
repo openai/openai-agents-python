@@ -575,6 +575,34 @@
   ],
   "public_properties": [
     {
+      "class_name": "RunResultBase",
+      "module": "agents.result",
+      "names": [
+        "previous_outputs"
+      ]
+    },
+    {
+      "class_name": "RunResult",
+      "module": "agents.result",
+      "names": [
+        "previous_outputs"
+      ]
+    },
+    {
+      "class_name": "RunResultStreaming",
+      "module": "agents.result",
+      "names": [
+        "previous_outputs"
+      ]
+    },
+    {
+      "class_name": "MessageReceipt",
+      "module": "agents.run_inbox",
+      "names": [
+        "status"
+      ]
+    },
+    {
       "class_name": "RunState",
       "module": "agents.run_state",
       "names": [
@@ -736,6 +764,16 @@
         "partial_images",
         "quality",
         "size"
+      ]
+    },
+    {
+      "class_name": "NativeMCPResult",
+      "module": "agents",
+      "names": [
+        "content",
+        "structuredContent",
+        "isError",
+        "_meta"
       ]
     },
     {
