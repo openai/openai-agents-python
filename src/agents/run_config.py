@@ -187,6 +187,11 @@ class ToolExecutionConfig:
     return the original result or replacement text for the model. API-hosted tools execute
     outside the client hook lifecycle.
 
+    For Runner tools, use `tool_text_transforms` with `(report, edit_text)` for a
+    `FunctionTool` or `((server, "lookup"), edit_text)` for MCP. Select the server
+    object and use the raw tool name. The async editor replaces text parts and
+    keeps the original media.
+
     Supply the same callbacks when resuming a run in another process.
     """
 
@@ -290,19 +295,21 @@ class ToolExecutionConfig:
     editor for a previously unselected MCP call on restore and no catalog is
     available yet, an unknown raw name may fail only after the session claim.
 
-    For example,
+    Here, `report` is the agent's `FunctionTool`, `server` is the object in
+    `agent.mcp_servers`, and `lookup` is the raw MCP tool name.
 
     ```python
-    async def hide(call, texts):
+    async def edit_text(call, texts: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(text.replace("internal draft", "[hidden]") for text in texts)
 
     config = ToolExecutionConfig(tool_text_transforms=[
-        (report, hide),
-        ((server, "read.report"), hide),
+        (report, edit_text),
+        ((server, "lookup"), edit_text),
     ])
     ```
 
-    The editor receives ordered text slots and must return one string per slot.
+    The editor receives a tuple of strings. Return a tuple of strings of the same
+    length, with one replacement per text slot in the original order.
     Images and function file parts stay in place. A typed function result uses one JSON
     slot. The caller receives the accepted JSON object as a dictionary. Unchanged text
     keeps the serialized values. Changed JSON must validate against the declared type
@@ -376,7 +383,11 @@ class ToolExecutionConfig:
                 ):
                     key = (id(target[0]), target[1])
                 else:
-                    raise ValueError("Invalid tool_text_transforms target.")
+                    raise ValueError(
+                        "For tool_text_transforms, use a local FunctionTool object or "
+                        "(server, raw_tool_name) with the MCP server object and a nonempty "
+                        "raw tool name. A server name string is invalid here."
+                    )
                 if key in seen or not callable(edit):
                     raise ValueError("Each tool_text_transforms target requires one editor.")
                 seen.add(key)

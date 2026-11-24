@@ -406,6 +406,9 @@ def test_invalid_or_duplicate_registration():
         {"tool_text_transforms": [((peer, "read.report"), edit)]}
     )
     assert settings.tool_text_transforms[0][0][0] is peer
+    with pytest.raises(ValueError, match="MCP server object") as error:
+        ToolExecutionConfig(tool_text_transforms=[(("example-server", "read.report"), edit)])
+    assert "example-server" not in str(error.value) and "read.report" not in str(error.value)
     for entries in [[("read.report", edit)], [((peer, "read.report"), edit)] * 2]:
         with pytest.raises(ValueError, match="tool_text_transforms"):
             ToolExecutionConfig(tool_text_transforms=entries)
