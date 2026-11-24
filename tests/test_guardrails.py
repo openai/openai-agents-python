@@ -542,6 +542,7 @@ async def test_parallel_guardrail_may_not_prevent_tool_execution():
 @pytest.mark.asyncio
 async def test_parallel_guardrail_trip_cancels_model_task():
     model_started = asyncio.Event()
+    release_model = asyncio.Event()
     model_cancelled = asyncio.Event()
     model_finished = asyncio.Event()
 
@@ -561,7 +562,8 @@ async def test_parallel_guardrail_trip_cancels_model_task():
     async def slow_get_response(*args, **kwargs):
         model_started.set()
         try:
-            await asyncio.sleep(0.02)
+            # Keep the request in flight until Runner handles the tripwire.
+            await release_model.wait()
             return await original_get_response(*args, **kwargs)
         except asyncio.CancelledError:
             model_cancelled.set()
@@ -578,8 +580,11 @@ async def test_parallel_guardrail_trip_cancels_model_task():
     model.enqueue([get_text_message("should_not_finish")])
 
     with patch.object(model, "get_response", side_effect=slow_get_response):
-        with pytest.raises(InputGuardrailTripwireTriggered):
-            await Runner.run(agent, "trigger guardrail")
+        try:
+            with pytest.raises(InputGuardrailTripwireTriggered):
+                await asyncio.wait_for(Runner.run(agent, "trigger guardrail"), timeout=3)
+        finally:
+            release_model.set()
 
     await asyncio.wait_for(model_finished.wait(), timeout=1)
     assert model_started.is_set() is True

@@ -133,9 +133,12 @@ from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprov
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
+    copy_input_items,
     digest_input_item,
     ensure_nested_history_run_item_occurrence_key,
     nested_history_run_item_occurrence_key,
+    normalize_resumed_input,
+    reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
 )
 from .run_internal.tool_caller import (
@@ -879,6 +882,29 @@ def _copy_tool_approval_raw_item(raw_item: Any) -> Any:
     raise TypeError("Unsupported tool approval raw item")
 
 
+# Follow-up message IDs, or (position, content digest) pairs after a history rewrite.
+_TaskInputRef = str | tuple[int, str]
+_TaskInputRefs = tuple[_TaskInputRef, ...] | None
+
+
+def _user_message_key(item: object) -> str | None:
+    if not isinstance(item, dict) or item.get("role") != "user":
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        content = [{"type": "input_text", "text": content}]
+    return digest_input_item({"role": "user", "content": content})
+
+
+def _user_message_keys(history: str | list[TResponseInputItem]) -> dict[int, str]:
+    """Compare user content across handoffs, including string and message-list inputs."""
+    return {
+        index: key
+        for index, item in enumerate(ItemHelpers.input_to_new_input_list(history))
+        if (key := _user_message_key(item)) is not None
+    }
+
+
 @dataclass
 class RunState(Generic[TContext, TAgent]):
     """Serializable snapshot of an agent run, including context, usage, and interruptions.
@@ -933,12 +959,10 @@ class RunState(Generic[TContext, TAgent]):
     _pending_input: list[TResponseInputItem] = field(default_factory=list)
     """Input staged for admission immediately before the next resumed model call."""
 
-    # None selects the original task. "handoff" selects the replacement input
-    # supplied by a handoff filter. An empty tuple means the caller withdrew
-    # the whole follow-up. The next admitted input becomes its replacement.
-    _task_input_ids: tuple[str, ...] | Literal["handoff"] | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    # None selects the original task. A follow-up can span history, generated
+    # items and pending input. Keep its references in the order seen by the agent.
+    # An empty tuple means there is no visible task until new input arrives.
+    _task_input_ids: _TaskInputRefs = field(default=None, init=False, repr=False, compare=False)
     # Input stays pending until the session saves it or the server acknowledges it.
     _pending_input_ids: tuple[str, ...] = field(default=(), init=False, repr=False, compare=False)
 
@@ -1088,40 +1112,82 @@ class RunState(Generic[TContext, TAgent]):
 
             context.turn_input = _get_turn_input(self, self._original_input, self._generated_items)
 
-    def _visible_task_input_ids(
+    def _validate_task_history(self, history: str | list[TResponseInputItem]) -> dict[int, str]:
+        keys = _user_message_keys(history)
+        for ref in self._task_input_ids or ():
+            if isinstance(ref, tuple) and keys.get(ref[0]) != ref[1]:
+                raise UserError("Invalid active task input references.")
+        return keys
+
+    def _normalize_resume_history(self) -> str | list[TResponseInputItem]:
+        """Normalize once at each resume entry, keeping user occurrences in order."""
+        previous = self._original_input
+        normalized, session_refs = reconcile_nested_history_owned_input_after_rewrite(
+            previous,
+            normalize_resumed_input(previous),
+            self._nested_history_owned_session_item_refs,
+        )
+        task = self._task_input_ids
+        if task and any(isinstance(ref, tuple) for ref in task):
+            # Normalization removes orphan tool records. It preserves every
+            # user message in order, including distinct occurrences of equal text.
+            before = self._validate_task_history(previous)
+            after = _user_message_keys(normalized)
+            if list(before.values()) != list(after.values()):
+                raise UserError("Cannot identify active task input after resume normalization.")
+            positions = dict(zip(before, after, strict=True))
+            self._task_input_ids = tuple(
+                (positions[ref[0]], ref[1]) if isinstance(ref, tuple) else ref for ref in task
+            )
+        self._nested_history_owned_session_item_refs = session_refs
+        self._original_input = copy_input_items(normalized)
+        return normalized
+
+    def _visible_task_inputs(
         self,
         ids: set[str],
-        validation_error_factory: RunStateValidationErrorFactory,
-    ) -> set[str]:
+        generated_items: list[RunItem],
+        validation_error_factory: RunStateValidationErrorFactory | None = None,
+    ) -> dict[str, TResponseInputItem]:
         # A handoff filter may repeat an occurrence. Its ID still identifies one
         # task message as long as all visible copies have the same content.
-        visible: dict[str, InputItem] = {}
-        for item in self._generated_items:
+        visible = {
+            key: self._pending_input[index]
+            for index, key in enumerate(self._pending_input_ids)
+            if key in ids
+        }
+        for item in generated_items:
             if not isinstance(item, InputItem) or item.input_id not in ids:
                 continue
-            previous = visible.setdefault(item.input_id, item)
-            if previous is not item and json.dumps(
-                _serialize_raw_item_value(previous.raw_item), sort_keys=True
+            previous = visible.setdefault(item.input_id, item.raw_item)
+            if previous is not item.raw_item and json.dumps(
+                _serialize_raw_item_value(previous), sort_keys=True
             ) != json.dumps(_serialize_raw_item_value(item.raw_item), sort_keys=True):
-                raise validation_error_factory("Invalid active task input references.", UserError)
-        return set(visible)
+                invalid = validation_error_factory or _default_run_state_validation_error
+                raise invalid("Invalid active task input references.", UserError)
+        # A filter may keep an occurrence ID while converting the message
+        # into a transcript quote. Only user messages can carry task input.
+        # Check for conflicting copies above before discarding other roles.
+        return {
+            key: item
+            for key, item in visible.items()
+            if isinstance(item, dict) and item.get("role") == "user"
+        }
 
-    def _task_input_refs(self) -> list[str | int] | Literal["handoff"] | None:
-        """Reference only input visible to the current agent, without copying its text."""
-        if not isinstance(self._task_input_ids, tuple):
-            return self._task_input_ids
+    def _task_input_refs(self) -> list[str | int] | dict[str, Any] | None:
+        """Use history positions, generated IDs and pending positions without copying text."""
+        task = self._task_input_ids
+        if task is None:
+            return None
         pending = {key: index for index, key in enumerate(self._pending_input_ids)}
-        visible = self._visible_task_input_ids(
-            set(self._task_input_ids), _default_run_state_validation_error
-        )
-        refs = [
-            pending.get(key, key)
-            for key in self._task_input_ids
-            if key in pending or key in visible
-        ]
-        # A handoff can replace the entire task with the receiving agent's input.
-        # An explicitly withdrawn task stays empty instead.
-        return refs if refs or not self._task_input_ids else "handoff"
+        ids = {key for key in task if isinstance(key, str)}
+        visible = self._visible_task_inputs(ids, self._generated_items)
+        items = [pending.get(key, key) for key in task if isinstance(key, str) and key in visible]
+        history = [key for key in task if isinstance(key, tuple)]
+        if history:
+            self._validate_task_history(self._original_input)
+            return {"history": [i for i, _ in history], "items": items}
+        return items
 
     def _restore_task_input_refs(
         self, refs: object, validation_error_factory: RunStateValidationErrorFactory
@@ -1132,19 +1198,34 @@ class RunState(Generic[TContext, TAgent]):
         def invalid() -> RunStateValidationError:
             return validation_error_factory("Invalid active task input references.", UserError)
 
-        if refs == "handoff":
-            self._task_input_ids = "handoff"
-            return
+        ids: list[_TaskInputRef] = []
+        if isinstance(refs, dict) and set(refs) == {"history", "items"}:
+            positions = refs["history"]
+            keys = _user_message_keys(self._original_input)
+            if (
+                not isinstance(positions, list)
+                or not positions
+                or any(type(i) is not int or i not in keys for i in positions)
+                or positions != sorted(set(positions))
+            ):
+                raise invalid()
+            ids.extend((i, keys[i]) for i in positions)
+            refs = refs["items"]
         if not isinstance(refs, list):
             raise invalid()
-        visible = self._visible_task_input_ids(
-            {ref for ref in refs if isinstance(ref, str)}, validation_error_factory
+        visible = self._visible_task_inputs(
+            {ref for ref in refs if isinstance(ref, str)},
+            self._generated_items,
+            validation_error_factory,
         )
-        ids: list[str] = []
         for ref in refs:
             if isinstance(ref, str) and ref and ref in visible:
                 ids.append(ref)
-            elif type(ref) is int and 0 <= ref < len(self._pending_input):
+            elif (
+                type(ref) is int
+                and 0 <= ref < len(self._pending_input)
+                and _user_message_key(self._pending_input[ref]) is not None
+            ):
                 ids.append(self._track_pending_input()[ref])
             else:
                 raise invalid()

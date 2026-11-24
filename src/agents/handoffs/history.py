@@ -12,6 +12,8 @@ from ..items import (
     RunItem,
     ToolApprovalItem,
     TResponseInputItem,
+    _copy_observer,
+    _CopyObserver,
 )
 
 if TYPE_CHECKING:
@@ -111,11 +113,8 @@ def _nest_handoff_history_with_provenance(
 ) -> tuple[HandoffInputData, tuple[NestedHistoryOwnedItem, ...]]:
     """Return nested input and exact provenance for items moved into default history."""
 
-    normalized_history = _normalize_input_history(handoff_input_data.input_history)
-    flattened_history = [
-        _strip_transcript_item_metadata(item)
-        for item in _flatten_nested_history_messages(normalized_history)
-    ]
+    observe = _copy_observer.get()
+    flattened_history = _flatten_nested_history_messages(handoff_input_data, observe)
 
     # Partition items between summary segments and lossless model input while retaining order.
     normalized_pre_items: list[tuple[TResponseInputItem, bool, RunItem]] = []
@@ -135,6 +134,9 @@ def _nest_handoff_history_with_provenance(
         normalized_new_items.append((plain_input, forward_verbatim, run_item))
 
     normalized_items = normalized_pre_items + normalized_new_items
+    if observe is not None:
+        for plain_input, _, run_item in normalized_items:
+            observe(run_item, plain_input)
 
     owned_items: list[NestedHistoryOwnedItem] = []
     if history_mapper is not None:
@@ -147,6 +149,9 @@ def _nest_handoff_history_with_provenance(
         )
 
     copied_history = [deepcopy(item) for item in history_items]
+    if observe is not None:
+        for source, target in zip(history_items, copied_history, strict=True):
+            observe(source, target)
     owned_items = [
         replace(
             owned_item,
@@ -464,15 +469,27 @@ def _stringify_content(content: Any) -> str:
 
 
 def _flatten_nested_history_messages(
-    items: list[TResponseInputItem],
+    data: HandoffInputData,
+    observe: _CopyObserver | None,
 ) -> list[TResponseInputItem]:
     flattened: list[TResponseInputItem] = []
-    for item in items:
+    history = data.input_history
+    # A bare string cannot identify an occurrence without its surrounding inputs.
+    sources = (data,) if isinstance(history, str) else history
+    for source, item in zip(sources, _normalize_input_history(history), strict=True):
         nested_transcript = _extract_nested_history_transcript(item)
         if nested_transcript is not None:
-            flattened.extend(nested_transcript)
+            # A user quote recovered from an assistant summary is history.
+            for message in nested_transcript:
+                cleaned = _strip_transcript_item_metadata(message)
+                if observe is not None:
+                    observe(None, cleaned)
+                flattened.append(cleaned)
             continue
-        flattened.append(deepcopy(item))
+        cleaned = _strip_transcript_item_metadata(deepcopy(item))
+        if observe is not None:
+            observe(source, cleaned)
+        flattened.append(cleaned)
     return flattened
 
 

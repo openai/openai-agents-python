@@ -55,7 +55,7 @@ from .run_internal.run_steps import (
     ProcessedResponse,
     QueueCompleteSentinel,
 )
-from .run_state import RunState, _PendingSessionWrite
+from .run_state import RunState, _PendingSessionWrite, _TaskInputRefs
 from .stream_events import ApprovedText, RunCompleted, StreamEvent
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from .tracing import Trace
@@ -497,7 +497,7 @@ class RunResultBase(abc.ABC):
         default_factory=list, init=False, repr=False
     )
     """Pending input preserved when a non-streaming result is converted back to RunState."""
-    _task_input_ids_for_state: tuple[str, ...] | Literal["handoff"] | None = field(
+    _task_input_ids_for_state: _TaskInputRefs = field(
         default=None, init=False, repr=False, compare=False
     )
     _pending_input_ids_for_state: tuple[str, ...] = field(
@@ -1043,8 +1043,12 @@ class RunResultStreaming(RunResultBase):
     def steer(self, text: str) -> MessageReceipt:
         """Guide this task after the current model request and its tools finish.
 
-        If the model has already answered, Runner continues with the new input.
-        Call on the run's event loop. This never interrupts a tool or a Codex request.
+        Call ``receipt = result.steer(text)`` on the run's event loop without ``await``.
+        This queues the message immediately, without interrupting a tool or a Codex
+        request. If the model has already answered, Runner continues with the new input.
+
+        Keep consuming ``stream_events()``. Check ``receipt.status`` for the submission
+        status, or use ``await receipt.wait()`` in a separate task for the full outcome.
         """
         if self._inbox is None:
             raise UserError("This result has no active run")
@@ -1053,8 +1057,13 @@ class RunResultStreaming(RunResultBase):
     def queue(self, text: str) -> MessageReceipt:
         """Run a follow-up after this task finishes successfully.
 
-        Follow-ups run one at a time in the same conversation and share the run's limits.
-        Keep consuming stream_events() until the last answer.
+        Call ``receipt = result.queue(text)`` on the run's event loop without ``await``.
+        This queues the follow-up immediately. Follow-ups run one at a time in the
+        same conversation and share the run's limits.
+
+        Keep consuming ``stream_events()`` until the last answer. Check ``receipt.status``
+        for the submission status, or use ``await receipt.wait()`` in a separate task
+        for the full outcome.
         """
         if self._inbox is None:
             raise UserError("This result has no active run")

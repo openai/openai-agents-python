@@ -64,6 +64,7 @@ from ..items import (
     ToolCallItem,
     TResponseInputItem,
     TResponseStreamEvent,
+    _observe_input_copies,
 )
 from ..lifecycle import RunHooks
 from ..logger import (
@@ -87,6 +88,7 @@ from ..run_error_handlers import RunErrorHandlers
 from ..run_inbox import current_inbox, stop_inbox_intake
 from ..run_state import RunState
 from ..sandbox.runtime import SandboxRuntime
+from ..sandbox.sandbox_agent import SandboxAgent
 from ..stream_events import (
     AgentUpdatedStreamEvent,
     RawResponsesStreamEvent,
@@ -155,11 +157,11 @@ from .guardrails import (
 )
 from .items import (
     REJECTION_MESSAGE,
+    NestedHistoryOwnedItemRef,
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     ensure_input_item_format,
     ensure_nested_history_run_item_occurrence_key,
-    normalize_resumed_input,
     prepare_model_input_items,
     reconcile_nested_history_owned_input_after_rewrite,
     run_items_to_input_items,
@@ -249,6 +251,7 @@ from .turn_preparation import (
 )
 from .turn_resolution import (
     _get_turn_input,
+    _HandoffTaskInputs,
     _snapshot_function_calls,
     check_for_final_output_from_tools,
     execute_final_output,
@@ -1024,6 +1027,55 @@ async def preserve_tool_task_cancellation(awaitable: Awaitable[T]) -> T:
         raise
 
 
+async def prepare_agent_for_turn(
+    *,
+    sandbox_runtime: SandboxRuntime[TContext],
+    current_agent: Agent[TContext],
+    current_input: str | list[TResponseInputItem],
+    context_wrapper: RunContextWrapper[TContext],
+    is_resumed_state: bool,
+    run_state: RunState[Any, Any] | None,
+    owned_refs: list[NestedHistoryOwnedItemRef],
+) -> tuple[
+    AgentBindings[TContext], str | list[TResponseInputItem], list[NestedHistoryOwnedItemRef]
+]:
+    """Keep the model input and the task seen by tool guardrails aligned."""
+    task_inputs = None
+    if isinstance(current_agent, SandboxAgent) and run_state is not None:
+        task = run_state._task_input_ids
+        inbox = current_inbox()
+        # Sandbox preparation precedes admission. Check the first request
+        # after an answer too, while the checkpoint still owns that answer.
+        if task is not None or (inbox is not None and inbox._pending_output):
+            run_state._validate_task_history(current_input)
+            # A capability may edit nested message content and then raise.
+            # Keep the published stream and the last checkpoint intact.
+            memo: dict[int, Any] = {}
+            current_input = deepcopy(current_input, memo)
+            owned_refs = [
+                _dc.replace(ref, input_item=memo.get(id(ref.input_item), ref.input_item))
+                for ref in owned_refs
+            ]
+            task_inputs = _HandoffTaskInputs(current_input, [], task or (), [])
+    before = copy_input_items(current_input)
+    with _observe_input_copies(task_inputs.record_context_copy if task_inputs else None):
+        prepared = await sandbox_runtime.prepare_agent(
+            current_agent=current_agent,
+            current_input=current_input,
+            context_wrapper=context_wrapper,
+            is_resumed_state=is_resumed_state,
+        )
+    rewritten, retained = reconcile_nested_history_owned_input_after_rewrite(
+        before, prepared.input, owned_refs
+    )
+    if run_state is not None:
+        if task_inputs is not None:
+            task_inputs.rebase_context(run_state, rewritten)
+        run_state._original_input = copy_input_items(rewritten)
+        run_state._nested_history_owned_session_item_refs = list(retained)
+    return prepared.bindings, rewritten, retained
+
+
 async def start_streaming(
     starting_input: str | list[TResponseInputItem],
     streamed_result: RunResultStreaming,
@@ -1222,9 +1274,9 @@ async def start_streaming(
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
             return True
 
-        def _start_inbox_turn(completed_turn: SingleStepResult) -> None:
-            nonlocal should_run_agent_start_hooks
-            should_run_agent_start_hooks = True
+        def _record_continued_turn(completed_turn: SingleStepResult) -> None:
+            # Both policy and inbox continuations have now passed output guardrails.
+            # Include this turn's checks in the next server acceptance checkpoint.
             if run_state is not None:
                 run_state._current_step = NextStepRunAgain()
             accepted_tool_input_guardrail_results.extend(
@@ -1286,16 +1338,7 @@ async def start_streaming(
 
         prepared_input: str | list[TResponseInputItem]
         if is_resumed_state and run_state is not None:
-            prepared_input = normalize_resumed_input(starting_input)
-            (
-                prepared_input,
-                run_state._nested_history_owned_session_item_refs,
-            ) = reconcile_nested_history_owned_input_after_rewrite(
-                starting_input,
-                prepared_input,
-                run_state._nested_history_owned_session_item_refs,
-            )
-            run_state._original_input = copy_input_items(prepared_input)
+            prepared_input = run_state._normalize_resume_history()
             streamed_result._nested_history_owned_session_item_refs = list(
                 run_state._nested_history_owned_session_item_refs
             )
@@ -1493,28 +1536,23 @@ async def start_streaming(
                 sequential_guardrails = []
 
             if sandbox_runtime is not None:
-                input_before_sandbox = copy_input_items(prepared_turn_input)
-                prepared_sandbox = await sandbox_runtime.prepare_agent(
+                (
+                    current_bindings,
+                    prepared_turn_input,
+                    retained_owned_refs,
+                ) = await prepare_agent_for_turn(
+                    sandbox_runtime=sandbox_runtime,
                     current_agent=current_agent,
                     current_input=prepared_turn_input,
                     context_wrapper=context_wrapper,
                     is_resumed_state=is_resumed_state,
+                    run_state=run_state,
+                    owned_refs=streamed_result._nested_history_owned_session_item_refs,
                 )
-                current_bindings = prepared_sandbox.bindings
                 execution_agent = current_bindings.execution_agent
-                prepared_turn_input, retained_owned_refs = (
-                    reconcile_nested_history_owned_input_after_rewrite(
-                        input_before_sandbox,
-                        prepared_sandbox.input,
-                        streamed_result._nested_history_owned_session_item_refs,
-                    )
-                )
                 streamed_result._nested_history_owned_session_item_refs = retained_owned_refs
                 streamed_result.input = prepared_turn_input
                 streamed_result._original_input = copy_input_items(prepared_turn_input)
-                if run_state is not None:
-                    run_state._original_input = copy_input_items(prepared_turn_input)
-                    run_state._nested_history_owned_session_item_refs = list(retained_owned_refs)
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
             # Resumed tool work belongs to the agent even when it finishes or fails
@@ -1782,12 +1820,12 @@ async def start_streaming(
                             turn_result.tool_output_guardrail_results
                         )
                         if finish_previous_answer is not None:
-                            _start_inbox_turn(turn_result)
+                            _record_continued_turn(turn_result)
+                            should_run_agent_start_hooks = True
                             continue
                         if turn_result.next_step.continue_after_guardrails:
                             pending_feedback = turn_result.feedback
-                            if run_state is not None:
-                                run_state._current_step = NextStepRunAgain()
+                            _record_continued_turn(turn_result)
                             if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
                                 streamed_result
                             ):
@@ -2395,7 +2433,8 @@ async def start_streaming(
                     if streamed_result._stored_exception is not None:
                         break
                     if finish_previous_answer is not None:
-                        _start_inbox_turn(turn_result)
+                        _record_continued_turn(turn_result)
+                        should_run_agent_start_hooks = True
                         continue
                     if turn_result.next_step.continue_after_guardrails:
                         pending_feedback = turn_result.feedback
@@ -2404,8 +2443,7 @@ async def start_streaming(
                         streamed_result._replay_from_model_input_items = (
                             model_input_items != streamed_result.new_items
                         )
-                        if run_state is not None:
-                            run_state._current_step = NextStepRunAgain()
+                        _record_continued_turn(turn_result)
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
                             streamed_result
                         ):

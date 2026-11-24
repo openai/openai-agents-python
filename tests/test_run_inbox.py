@@ -19,11 +19,13 @@ from agents import (
     MaxTurnsExceeded,
     MessageOutputItem,
     MessageReceipt,
+    ModelResponse,
     ModelSettings,
     ModelTimeoutError,
     OutputGuardrailTripwireTriggered,
     RunConfig,
     RunContextWrapper,
+    RunHooks,
     RunInbox,
     Runner,
     RunState,
@@ -31,12 +33,14 @@ from agents import (
     ToolExecutionConfig,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
+    ToolOutputGuardrailData,
     ToolsToFinalOutputResult,
     UserError,
     function_tool,
     handoff,
     output_guardrail,
     tool_input_guardrail,
+    tool_output_guardrail,
 )
 from agents.decorators import tool
 from agents.models.interface import ModelProvider
@@ -1005,6 +1009,16 @@ async def test_approved_tool_guardrail_checks_follow_up_after_resume(
         "boolean-position",
         "negative-position",
         "out-of-range-position",
+        "history-missing-items",
+        "history-empty",
+        "history-negative",
+        "history-boolean",
+        "history-duplicate",
+        "history-out-of-range",
+        "history-unsorted",
+        "history-non-user",
+        "generated-non-user",
+        "pending-non-user",
         "non-list",
         "older-schema",
     ],
@@ -1052,6 +1066,14 @@ async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
                     else:
                         item["input_id"] = first
         payload["task_input_refs"] = [second if invalid == "missing-item-id" else first]
+    elif invalid == "generated-non-user":
+        for history in ("generated_items", "session_items"):
+            for item in payload[history]:
+                if item.get("input_id") == first:
+                    item["raw_item"]["role"] = "assistant"
+    elif invalid == "pending-non-user":
+        payload["pending_input"][0]["role"] = "assistant"
+        payload["task_input_refs"] = [0]
     elif invalid == "older-schema":
         payload["$schemaVersion"] = "1.26"
         payload.pop("task_input_refs", None)
@@ -1062,6 +1084,25 @@ async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
         # The older label alone is valid. It cannot carry a newer task selection.
         await RunState.from_json(agent, payload)
         payload["task_input_refs"] = [first, second]
+    elif invalid.startswith("history-"):
+        payload["original_input"] = [
+            {"role": "user", "content": "Review the public draft."},
+            {"role": "assistant", "content": "Which section?"},
+            {"role": "user", "content": "The introduction."},
+        ]
+        positions = {
+            "history-missing-items": [0],
+            "history-empty": [],
+            "history-negative": [-1],
+            "history-boolean": [False],
+            "history-duplicate": [0, 0],
+            "history-out-of-range": [3],
+            "history-unsorted": [2, 0],
+            "history-non-user": [1],
+        }[invalid]
+        payload["task_input_refs"] = {"history": positions, "items": []}
+        if invalid == "history-missing-items":
+            del payload["task_input_refs"]["items"]
     else:
         payload["task_input_refs"] = {
             "unknown-id": ["missing"],
@@ -1218,6 +1259,81 @@ async def test_resume_after_stream_filter_failure_respects_pending_task_input(
     assert effects == ([] if clear_pending else ["ran"])
     assert bool(request.tools) == (not clear_pending)
     assert request.system_instructions == ("replacement" if clear_pending else "second task")
+
+
+@pytest.mark.parametrize("needs_approval", [False, True], ids=["fresh", "resumed"])
+@pytest.mark.parametrize("serialize", [False, True], ids=["in-memory", "json"])
+async def test_policy_continuation_preserves_tool_guardrails_after_stream_recovery(
+    needs_approval: bool, serialize: bool
+) -> None:
+    inbox = RunInbox()
+    effects: list[str] = []
+
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @function_tool(
+        needs_approval=needs_approval,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
+    async def work() -> str:
+        effects.append("worked")
+        inbox.steer("Use the result.")
+        return "value"
+
+    model = ScriptedModel(
+        [[function_call("work", "{}", call_id="work-1")], [assistant_message("done")]]
+    )
+
+    class Hooks(RunHooks[Any]):
+        async def on_llm_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], response: ModelResponse
+        ) -> None:
+            if len(model.calls) == 2:
+                raise RuntimeError("after acceptance")
+
+    agent = Agent(
+        name="worker",
+        model=model,
+        tools=[work],
+        tool_use_behavior="stop_on_first_tool",
+        hooks=AgentHooks(
+            final_output_policy=lambda ctx, proposal: (
+                "continue" if proposal.kind == "tool" else "finish"
+            )
+        ),
+    )
+    config = RunConfig(tracing_disabled=True)
+    value: str | RunState[Any] = "start"
+    if needs_approval:
+        paused = await Runner.run(agent, value, auto_previous_response_id=True, run_config=config)
+        value = paused.to_state()
+        value.approve(value.get_interruptions()[0])
+
+    failed = Runner.run_streamed(
+        agent, value, auto_previous_response_id=True, hooks=Hooks(), inbox=inbox, run_config=config
+    )
+    with pytest.raises(RuntimeError, match="after acceptance"):
+        async for _ in failed.stream_events():
+            pass
+
+    state = failed.to_state()
+    if serialize:
+        state = await RunState.from_string(agent, state.to_string())
+    recovered = await Runner.run(agent, state, run_config=config)
+
+    assert recovered.final_output == "done"
+    assert len(model.calls) == 2
+    assert effects == ["worked"]
+    for result in (failed, recovered):
+        assert [r.output.output_info for r in result.tool_input_guardrail_results] == ["work-1"]
+        assert [r.output.output_info for r in result.tool_output_guardrail_results] == ["work-1"]
 
 
 @pytest.mark.parametrize("streamed", [False, True])
@@ -1805,7 +1921,7 @@ async def test_immediate_cancel_during_committed_input_write_never_dispatches() 
     assert outcome.retained
 
 
-@pytest.mark.parametrize("pause", ["session", "filter"])
+@pytest.mark.parametrize("pause", ["answer_write", "session", "filter"])
 @pytest.mark.parametrize("mode", ["propagate", "swallow", "preexisting", "uncancel"])
 async def test_awaited_inbox_respects_owner_cancellation(pause: str, mode: str) -> None:
     if mode in ("swallow", "uncancel") and not hasattr(asyncio.Task, "cancelling"):
@@ -1830,6 +1946,10 @@ async def test_awaited_inbox_respects_owner_cancellation(pause: str, mode: str) 
         async def add_items(self, items):
             if pause == "session" and "next" in messages(items):
                 await pause_before_dispatch()
+            if pause == "answer_write" and any(
+                message_text(item, role="assistant") == "first" for item in items
+            ):
+                await pause_before_dispatch()
             await super().add_items(items)
 
     async def filter_input(data):
@@ -1843,6 +1963,22 @@ async def test_awaited_inbox_respects_owner_cancellation(pause: str, mode: str) 
 
     model = ScriptedModel([ModelStep.respond(first), [assistant_message("second")]])
     session = Session()
+    config = RunConfig(tracing_disabled=True, call_model_input_filter=filter_input)
+    agent = Agent(name="worker", model=model)
+    preparations: list[str] = []
+    if pause == "answer_write":
+        from agents.sandbox import Capability, SandboxAgent, SandboxRunConfig
+        from agents.testing import scripted_sandbox_session
+
+        class ObservePreparation(Capability):
+            def process_context(self, context):
+                preparations.append("prepared")
+                return context
+
+        agent = SandboxAgent(
+            name="worker", model=model, capabilities=[ObservePreparation(type="observe")]
+        )
+        config.sandbox = SandboxRunConfig(session=scripted_sandbox_session())
 
     async def run():
         if mode != "propagate":
@@ -1853,11 +1989,11 @@ async def test_awaited_inbox_respects_owner_cancellation(pause: str, mode: str) 
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.sleep(0)
         return await Runner.run(
-            Agent(name="worker", model=model),
+            agent,
             "start",
             inbox=inbox,
             session=session,
-            run_config=RunConfig(tracing_disabled=True, call_model_input_filter=filter_input),
+            run_config=config,
         )
 
     task = asyncio.create_task(run())
@@ -1879,8 +2015,16 @@ async def test_awaited_inbox_respects_owner_cancellation(pause: str, mode: str) 
             assert (outcome.status, outcome.reason) == ("not_submitted", "cancelled")
         else:
             assert outcome.status == "submitted"
-        assert outcome.retained
-        wrote_input = pause == "filter" or mode != "propagate"
+        stopped_at_answer = pause == "answer_write" and mode in ("propagate", "swallow")
+        assert outcome.retained == (not stopped_at_answer)
+        if pause == "answer_write":
+            assert len(preparations) == len(model.calls)
+            if mode == "swallow":
+                assert any(
+                    message_text(item, role="assistant") == "first"
+                    for item in await session.get_items()
+                )
+        wrote_input = not stopped_at_answer and (pause == "filter" or mode != "propagate")
         expected = ["start", "next"] if wrote_input else ["start"]
         assert messages(await session.get_items()) == expected
     finally:

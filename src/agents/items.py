@@ -3,7 +3,9 @@ from __future__ import annotations
 import abc
 import json
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
 from uuid import uuid4
@@ -72,6 +74,30 @@ from .util._json import _to_dump_compatible
 
 if TYPE_CHECKING:
     from .agent import Agent
+
+# A handoff filter can convert a message before editing or moving it. Record
+# these copies at the conversion boundary without adding fields to model input.
+_CopyObserver = Callable[[object, object], None]
+_copy_observer: ContextVar[_CopyObserver | None] = ContextVar(
+    "handoff_input_copy_observer", default=None
+)
+
+
+@contextmanager
+def _observe_input_copies(observer: _CopyObserver | None) -> Iterator[None]:
+    def notify(source: object, target: object) -> None:
+        if observer is not None:
+            observer(source, target)
+
+    token = _copy_observer.set(notify if observer is not None else None)
+    try:
+        yield
+    finally:
+        # Child tasks may have inherited the callback. Release the messages
+        # and stop accepting copies as soon as the filter returns.
+        observer = None
+        _copy_observer.reset(token)
+
 
 TResponse = Response
 """A type alias for the Response type from the OpenAI SDK."""
@@ -150,7 +176,10 @@ class RunItemBase(Generic[T], abc.ABC):
 
     def to_input_item(self) -> TResponseInputItem:
         """Converts this item into an input item suitable for passing to the model."""
-        return _output_item_to_input_item(self.raw_item)
+        result = _output_item_to_input_item(self.raw_item)
+        if (observe := _copy_observer.get()) is not None:
+            observe(self, result)
+        return result
 
 
 @dataclass
@@ -814,14 +843,17 @@ class ItemHelpers:
         cls, input: str | list[TResponseInputItem]
     ) -> list[TResponseInputItem]:
         """Converts a string or list of input items into a list of input items."""
+        observe = _copy_observer.get()
         if isinstance(input, str):
-            return [
-                {
-                    "content": input,
-                    "role": "user",
-                }
-            ]
-        return cast(list[TResponseInputItem], _to_dump_compatible(input))
+            message: TResponseInputItem = {"content": input, "role": "user"}
+            if observe is not None:
+                observe(input, message)
+            return [message]
+        result = cast(list[TResponseInputItem], _to_dump_compatible(input))
+        if observe is not None:
+            for source, target in zip(input, result, strict=True):
+                observe(source, target)
+        return result
 
     @classmethod
     def text_message_outputs(cls, items: list[RunItem]) -> str:

@@ -22,7 +22,19 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 
 import agents._debug as _debug
 import agents.sandbox.runtime_agent_preparation as runtime_agent_preparation_module
-from agents import Agent, AgentHooks, LocalShellTool, RunHooks, Runner, function_tool
+from agents import (
+    Agent,
+    AgentHooks,
+    LocalShellTool,
+    RunHooks,
+    RunInbox,
+    Runner,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrailData,
+    function_tool,
+    handoff,
+    tool_input_guardrail,
+)
 from agents._run_state_agent_identity import _build_agent_identity_map
 from agents.exceptions import InputGuardrailTripwireTriggered, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail, OutputGuardrail
@@ -2492,6 +2504,256 @@ async def test_context_rewrite_releases_removed_nested_history_ownership(streame
         if isinstance(item, dict) and "content" in item
     ]
     assert replay_texts.count("handoff message") == 1
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize(
+    "rewrite", ["drop-prefix", "withdraw-task", "edit-in-place", "replace", "replace-with-earlier"]
+)
+@pytest.mark.asyncio
+async def test_context_rewrite_preserves_visible_follow_up_for_tool_guardrail(
+    streamed: bool, rewrite: str
+) -> None:
+    inbox = RunInbox()
+    restriction = "Do not publish."
+    checked: list[list[TResponseInputItem]] = []
+    effects: list[str] = []
+
+    class EditTask(Capability):
+        def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+            for index, item in enumerate(context):
+                if item.get("role") == "user" and item.get("content") == "Review only.":
+                    # Identical text, but only the in-place edit preserves the occurrence.
+                    if rewrite in ("replace", "replace-with-earlier"):
+                        context[index] = {"role": "user", "content": restriction}
+                    else:
+                        cast(dict[str, Any], item)["content"] = restriction
+            return context
+
+    collision = rewrite == "replace-with-earlier"
+    initial = restriction if collision else "old context"
+    edit = rewrite in ("edit-in-place", "replace", "replace-with-earlier")
+    capability = (
+        EditTask(type="edit-task")
+        if edit
+        else _DropContextTextCapability(
+            restriction if rewrite == "withdraw-task" else "old context"
+        )
+    )
+
+    @tool_input_guardrail
+    def check_task(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        checked.append(list(data.context.turn_input))
+        if any(item.get("content") == restriction for item in data.context.turn_input):
+            return ToolGuardrailFunctionOutput.reject_content("Publication blocked.")
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(tool_input_guardrails=[check_task])
+    async def publish() -> str:
+        effects.append("published")
+        return "done"
+
+    worker_model = ScriptedModel(
+        [[get_function_tool_call("publish", "{}")], [get_final_output_message("done")]]
+    )
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[capability],
+        tools=[publish],
+    )
+
+    def first_answer(call: Any) -> list[Any]:
+        inbox.queue("Review only." if edit else restriction)
+        return [get_final_output_message("first answer")]
+
+    triage = SandboxAgent(
+        name="triage",
+        model=ScriptedModel([ModelStep.respond(first_answer), [get_handoff_tool_call(worker)]]),
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    config = RunConfig(
+        sandbox=SandboxRunConfig(client=_ManifestSessionClient()),
+        nest_handoff_history=True,
+        # Keep the earlier user occurrence alongside its identically worded replacement.
+        handoff_history_mapper=(lambda items: items) if collision else None,
+    )
+
+    async def run() -> None:
+        if streamed:
+            stream = Runner.run_streamed(triage, initial, inbox=inbox, run_config=config)
+            async for _ in stream.stream_events():
+                pass
+        else:
+            await Runner.run(triage, initial, inbox=inbox, run_config=config)
+
+    if rewrite in ("replace", "replace-with-earlier"):
+        with pytest.raises(
+            UserError, match="Cannot identify active task input after context processing"
+        ):
+            await run()
+        assert not worker_model.calls and not checked and not effects
+        return
+
+    await run()
+    withdraw = rewrite == "withdraw-task"
+    expected = [] if withdraw else [{"role": "user", "content": restriction}]
+    assert [item for item in worker_model.calls[0].input if item.get("role") == "user"] == expected
+    assert checked == [expected]
+    assert effects == (["published"] if withdraw else [])
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("path", ["queue", "steer", "handoff", "withdrawn", "ordinary"])
+@pytest.mark.asyncio
+async def test_context_rewrite_without_history_backed_task(streamed: bool, path: str) -> None:
+    inbox = RunInbox()
+    direct = path in ("queue", "steer")
+    rewrite = not direct
+    effects: list[str] = []
+    initial: list[TResponseInputItem] = [{"role": "user", "content": "Old context."}]
+    restriction = "Do not publish."
+
+    class AddMessage(Capability):
+        def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+            if not rewrite or any(item.get("content") == restriction for item in context):
+                return context
+            # A rejected rewrite must also discard edits to existing messages.
+            cast(dict[str, Any], context[0])["content"] = "Edited context."
+            return [*context, {"role": "user", "content": restriction}]
+
+    @function_tool
+    async def publish() -> str:
+        effects.append("published")
+        return "done"
+
+    def first_answer(call: Any) -> list[Any]:
+        nonlocal rewrite
+        rewrite = True
+        send = inbox.steer if path == "steer" else inbox.queue
+        send("Review only.")
+        return [get_final_output_message("first answer")]
+
+    worker_model = ScriptedModel()
+    if direct:
+        worker_model.extend([ModelStep.respond(first_answer)])
+    worker_model.extend(
+        [[get_function_tool_call("publish", "{}")], [get_final_output_message("done")]]
+    )
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[AddMessage(type="add-message")],
+        tools=[publish],
+    )
+    agent = worker
+    if not direct:
+        triage_model = ScriptedModel()
+        if path != "ordinary":
+            triage_model.extend([ModelStep.respond(first_answer)])
+        triage_model.extend([[get_handoff_tool_call(worker)]])
+        agent = SandboxAgent(
+            name="triage",
+            model=triage_model,
+            default_manifest=Manifest(),
+            capabilities=[],
+            handoffs=[
+                handoff(worker, input_filter=lambda data: data.clone(pre_handoff_items=()))
+                if path == "withdrawn"
+                else worker
+            ],
+        )
+    config = RunConfig(
+        sandbox=SandboxRunConfig(client=_ManifestSessionClient()), nest_handoff_history=False
+    )
+    stream: RunResultStreaming | None = None
+
+    async def run() -> None:
+        nonlocal stream
+        if streamed:
+            stream = Runner.run_streamed(agent, initial, inbox=inbox, run_config=config)
+            async for _ in stream.stream_events():
+                pass
+        else:
+            await Runner.run(agent, initial, inbox=inbox, run_config=config)
+
+    if path == "ordinary":
+        await run()
+        assert restriction in [item.get("content") for item in worker_model.calls[0].input]
+        assert effects == ["published"]
+        return
+
+    with pytest.raises(
+        UserError, match="Cannot identify active task input after context processing"
+    ):
+        await run()
+    assert len(worker_model.calls) == (1 if direct else 0)
+    assert not effects
+    if streamed:
+        assert stream is not None
+        expected = [{"role": "user", "content": "Old context."}]
+        assert stream.input == expected
+        assert stream.to_state().to_json()["original_input"] == expected
+
+
+@pytest.mark.asyncio
+async def test_failed_context_edit_preserves_stream_checkpoint() -> None:
+    inbox = RunInbox()
+    fail = True
+
+    class EditTask(Capability):
+        def process_context(self, context: list[TResponseInputItem]) -> list[TResponseInputItem]:
+            if fail:
+                for item in context:
+                    if item.get("role") == "user":
+                        cast(dict[str, Any], item)["content"] = "Failed edit."
+                raise RuntimeError("context failed after editing")
+            return context
+
+    worker_model = ScriptedModel([[get_final_output_message("done")]])
+    worker = SandboxAgent(
+        name="worker",
+        model=worker_model,
+        default_manifest=Manifest(),
+        capabilities=[EditTask(type="edit-task")],
+    )
+
+    def first_answer(call: Any) -> list[Any]:
+        inbox.queue("Review only.")
+        return [get_final_output_message("first answer")]
+
+    triage_model = ScriptedModel([ModelStep.respond(first_answer), [get_handoff_tool_call(worker)]])
+    triage = SandboxAgent(
+        name="triage",
+        model=triage_model,
+        default_manifest=Manifest(),
+        capabilities=[],
+        handoffs=[worker],
+    )
+    config = RunConfig(
+        sandbox=SandboxRunConfig(client=_ManifestSessionClient()), nest_handoff_history=True
+    )
+    stream = Runner.run_streamed(triage, "old context", inbox=inbox, run_config=config)
+    with pytest.raises(RuntimeError, match="context failed after editing"):
+        async for _ in stream.stream_events():
+            pass
+    assert not worker_model.calls
+    state = await RunState.from_string(triage, stream.to_state().to_string())
+    assert isinstance(stream.input, list)
+    assert [item.get("content") for item in stream.input if item.get("role") == "user"] == [
+        "Review only."
+    ]
+
+    fail = False
+    result = await Runner.run(triage, state, run_config=config)
+    assert result.final_output == "done"
+    assert result.context_wrapper.turn_input == [{"role": "user", "content": "Review only."}]
+    assert len(triage_model.calls) == 2
+    assert len(worker_model.calls) == 1
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["non_streamed", "streamed"])

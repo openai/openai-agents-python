@@ -107,10 +107,12 @@ class MessageReceipt:
         return self._future.result().status if self._future.done() else "queued"
 
     async def wait(self) -> MessageOutcome:
-        """Wait until Runner knows the outcome.
+        """Wait for the outcome of the first attempt to submit this message to the adapter.
 
-        Keep consuming stream events while waiting. Waiting inside a tool or the
-        stream consumer can prevent the next model request from starting.
+        A run can end before it tries to submit the message. Use ``receipt.status``
+        to check without waiting. Waiting inside a tool or the stream consumer
+        can prevent the next model request from starting. Wait in a separate task
+        or after the run ends.
         """
         return await asyncio.shield(self._future)
 
@@ -119,19 +121,31 @@ class RunInbox:
     """Send messages to one asynchronous run.
 
     Pass a fresh inbox to Runner.run(..., inbox=inbox). For Runner.run_streamed,
-    you can call steer() and queue() directly on the returned result. Call these
-    methods on the run's event loop. Neither interrupts a running tool or model
+    you can call steer() and queue() directly on the returned result. Call either
+    method on the run's event loop without ``await``. Each queues the message and
+    returns a receipt immediately. Neither interrupts a running tool or model
     request. In Codex mode, messages arrive between Runner requests, never inside
     a native Codex turn.
 
     Messages stay in memory. Pausing for approval, cancellation, failure, or
     reaching the turn limit ends delivery. Check the receipt before resending.
     For a paused run, use RunState.add_input before resuming with a fresh inbox.
-    Do not wait for a receipt inside a tool that must finish before delivery.
+    Use ``await receipt.wait()`` in a separate task or after the run ends if you
+    need the submission outcome. Waiting inside a tool can block delivery.
 
     If approval pauses a follow-up, the checkpoint identifies the active task
     so guardrails see the same input after resume. It does not save the inbox
     or messages still waiting in the queue.
+
+    Custom handoff filters should preserve message objects or InputItem IDs
+    when editing or moving messages. This lets tool guardrails distinguish the
+    current task from earlier requests. To replace a task with a summary,
+    edit its message in place or keep its InputItem ID. Use steer() or queue()
+    to add a new instruction. If the run continues after an answer, a handoff
+    filter or sandbox context hook can rebuild messages without their original
+    objects or IDs only if it preserves the entire sequence of user messages
+    and the SDK can still identify each message's task. Otherwise the run
+    raises UserError before the next model request or tool call.
 
     Callbacks should propagate CancelledError after cleanup. On Python 3.10,
     Runner.run cannot detect cancellation if a callback suppresses that exception.
@@ -162,6 +176,7 @@ class RunInbox:
     def steer(self, text: str) -> MessageReceipt:
         """Guide the current task after the current model request and its tools finish.
 
+        Call ``receipt = inbox.steer(text)`` without ``await`` to queue the message now.
         Runner sends all pending steering messages in order before starting a queued
         task. If the model has already answered, Runner continues with the new input.
         """
@@ -172,6 +187,7 @@ class RunInbox:
     def queue(self, text: str) -> MessageReceipt:
         """Start this follow-up after the current task finishes successfully.
 
+        Call ``receipt = inbox.queue(text)`` without ``await`` to queue the follow-up now.
         Runner takes one follow-up at a time in arrival order. The same agent,
         conversation, guardrails and run limits apply. The last answer is final_output.
         """
@@ -242,6 +258,9 @@ class RunInbox:
         if not self._has_pending:
             self._stop_accepting()
             return False
+        # Saving the answer may have finished after the caller cancelled.
+        # Do not start preparing another task in that case.
+        self._check_owner_cancellation()
         if not self._can_admit_input(current_turn, max_turns, budget):
             return False
         if not self._steers:

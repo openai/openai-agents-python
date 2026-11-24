@@ -84,7 +84,6 @@ from .run_config import (
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
 from .run_inbox import RunInbox, current_inbox, inbox_scope, stop_inbox_intake
-from .run_internal.agent_bindings import bind_public_agent
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
     apply_resumed_conversation_settings,
@@ -136,7 +135,6 @@ from .run_internal.items import (
     copy_input_items,
     ensure_nested_history_run_item_occurrence_key,
     normalize_resumed_input,
-    reconcile_nested_history_owned_input_after_rewrite,
 )
 from .run_internal.model_provider_lifecycle import (
     _close_runner_owned_model_provider,
@@ -153,6 +151,7 @@ from .run_internal.run_loop import (
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
     get_output_schema,
+    prepare_agent_for_turn,
     preserve_tool_task_cancellation,
     resolve_interrupted_turn,
     run_input_guardrails,
@@ -983,17 +982,7 @@ class AgentRunner:
             if is_resumed_state and run_state is not None:
                 run_state.set_trace(get_current_trace())
                 current_turn = run_state._current_turn
-                raw_original_input = run_state._original_input
-                original_input = normalize_resumed_input(raw_original_input)
-                (
-                    original_input,
-                    run_state._nested_history_owned_session_item_refs,
-                ) = reconcile_nested_history_owned_input_after_rewrite(
-                    raw_original_input,
-                    original_input,
-                    run_state._nested_history_owned_session_item_refs,
-                )
-                run_state._original_input = copy_input_items(original_input)
+                original_input = run_state._normalize_resume_history()
                 # Copy every list adopted from the state: the run appends to these, and
                 # the caller still owns the state as a resumable snapshot.
                 generated_items = list(run_state._generated_items)
@@ -1279,32 +1268,20 @@ class AgentRunner:
                             raise
                         sequential_guardrails = []
 
-                    current_bindings = bind_public_agent(current_agent)
-                    execution_agent = current_bindings.execution_agent
-                    input_before_sandbox = copy_input_items(original_input)
-                    prepared_sandbox = await sandbox_runtime.prepare_agent(
+                    current_bindings, original_input, _ = await prepare_agent_for_turn(
+                        sandbox_runtime=sandbox_runtime,
                         current_agent=current_agent,
                         current_input=original_input,
                         context_wrapper=context_wrapper,
                         is_resumed_state=resuming_turn,
+                        run_state=run_state,
+                        owned_refs=run_state._nested_history_owned_session_item_refs
+                        if run_state
+                        else [],
                     )
-                    current_bindings = prepared_sandbox.bindings
                     execution_agent = current_bindings.execution_agent
-                    if run_state is not None:
-                        (
-                            original_input,
-                            run_state._nested_history_owned_session_item_refs,
-                        ) = reconcile_nested_history_owned_input_after_rewrite(
-                            input_before_sandbox,
-                            prepared_sandbox.input,
-                            run_state._nested_history_owned_session_item_refs,
-                        )
-                    else:
-                        original_input = copy_input_items(prepared_sandbox.input)
                     if starting_input is not None and not isinstance(starting_input, RunState):
                         starting_input = copy_input_items(original_input)
-                    if run_state is not None:
-                        run_state._original_input = copy_input_items(original_input)
 
                     normalized_starting_input: str | list[TResponseInputItem] = (
                         starting_input
@@ -2970,17 +2947,7 @@ class AgentRunner:
                 )
                 # When resuming, use the original_input from state.
                 # primeFromState will mark items as sent so prepareInput skips them
-                raw_input_for_result = run_state._original_input
-                input_for_result = normalize_resumed_input(raw_input_for_result)
-                (
-                    input_for_result,
-                    run_state._nested_history_owned_session_item_refs,
-                ) = reconcile_nested_history_owned_input_after_rewrite(
-                    raw_input_for_result,
-                    input_for_result,
-                    run_state._nested_history_owned_session_item_refs,
-                )
-                run_state._original_input = copy_input_items(input_for_result)
+                input_for_result = run_state._normalize_resume_history()
                 # Use context from RunState if not provided, otherwise override it.
                 context_wrapper = resolve_resumed_context(
                     run_state=run_state,

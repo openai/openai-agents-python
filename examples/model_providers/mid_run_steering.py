@@ -55,8 +55,8 @@ async def main(use_codex: bool) -> None:
                     print(ItemHelpers.text_message_output(event.item))
             if search_started.is_set():
                 steering, follow_up = await ui
-                print("Steering:", (await steering.wait()).status)
-                print("Follow-up:", (await follow_up.wait()).status)
+                print("Steering:", steering.status)
+                print("Follow-up:", follow_up.status)
         finally:
             # The run can finish without calling the search tool.
             ui.cancel()

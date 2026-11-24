@@ -107,6 +107,7 @@ from ..items import (
     ToolSearchOutputItem,
     TResponseInputItem,
     TResponseOutputItem,
+    _observe_input_copies,
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
@@ -123,7 +124,7 @@ from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
 from ..run_inbox import stop_inbox_intake
-from ..run_state import RunState
+from ..run_state import RunState, _user_message_key, _user_message_keys
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -162,7 +163,9 @@ from .items import (
     REJECTION_MESSAGE,
     NestedHistoryOwnedItem,
     apply_patch_rejection_item,
+    copy_input_items,
     drop_orphan_function_calls,
+    ensure_nested_history_run_item_occurrence_key,
     extract_mcp_request_id_from_run,
     function_rejection_item,
     order_current_turn_tool_outputs,
@@ -395,22 +398,25 @@ def _get_turn_input(
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
 ) -> list[TResponseInputItem]:
-    if run_state is not None and run_state._task_input_ids == ():
-        # The caller withdrew the follow-up. Do not revive the previous task.
-        return []
-    if run_state is not None and isinstance(run_state._task_input_ids, tuple):
-        # An approval can pause the run before the server accepts the whole
-        # task. Restore its order from pending input and the agent's history.
-        visible: dict[str, TResponseInputItem | None] = dict.fromkeys(run_state._task_input_ids)
-        for index, input_id in enumerate(run_state._pending_input_ids):
-            if input_id in visible:
-                visible[input_id] = run_state._pending_input[index]
-        for item in generated_items:
-            if isinstance(item, InputItem) and item.input_id in visible:
-                visible[item.input_id] = item.raw_item
-        task_input = [item for item in visible.values() if item is not None]
-        if task_input:
-            original_input = task_input
+    if run_state is not None and (task := run_state._task_input_ids) is not None:
+        # A handoff may split a task between rewritten history and retained items.
+        # Missing messages never grant the original task's permissions.
+        ids = {key for key in task if isinstance(key, str)}
+        visible = run_state._visible_task_inputs(ids, generated_items)
+        history = (
+            ItemHelpers.input_to_new_input_list(original_input) if len(ids) < len(task) else []
+        )
+        keys = _user_message_keys(history)
+        task_input: list[TResponseInputItem] = []
+        for key in task:
+            if isinstance(key, str):
+                if key in visible:
+                    task_input.append(visible[key])
+            elif keys.get(key[0]) == key[1]:
+                task_input.append(history[key[0]])
+            else:
+                raise UserError("Invalid active task input references.")
+        original_input = task_input
     try:
         return ItemHelpers.input_to_new_input_list(original_input)
     except Exception:
@@ -690,6 +696,208 @@ def _resolve_server_managed_handoff_behavior(
     return input_filter, False
 
 
+_MessageOwner = Literal["current", "earlier", "ambiguous"]
+
+
+def _copy_handoff_messages(items: list[RunItem], memo: dict[int, Any]) -> list[RunItem]:
+    """Isolate editable inputs without cloning agents, tools or session resources."""
+    copied: list[RunItem] = []
+    for item in items:
+        if isinstance(item, InputItem):
+            if id(item) not in memo:
+                # Session history still owns the original occurrence.
+                ensure_nested_history_run_item_occurrence_key(item)
+                clone = copy(item)
+                clone.raw_item = deepcopy(item.raw_item, memo)
+                memo[id(item)] = clone
+            copied.append(memo[id(item)])
+        else:
+            copied.append(item)
+    return copied
+
+
+class _HandoffTaskInputs:
+    """Identify the current task's user messages across a handoff filter."""
+
+    def __init__(
+        self,
+        history: str | list[TResponseInputItem],
+        items: list[RunItem],
+        task: Container[str | tuple[int, str]],
+        turn_input: list[TResponseInputItem],
+    ) -> None:
+        self._input_ids: dict[str, _MessageOwner] = {}
+        self._string_source: tuple[str, _MessageOwner] | None = None
+        self._user_item_ids: set[str] = set()
+        self._content: dict[str, _MessageOwner] = {}
+        self._sequence: list[tuple[str, _MessageOwner]] = []
+        # Keep each object alive while a filter can move or edit it.
+        self._objects: dict[int, tuple[object, _MessageOwner]] = {}
+        for i, key in _user_message_keys(history).items():
+            raw = history if isinstance(history, str) else history[i]
+            owner: _MessageOwner = "current" if (i, key) in task else "earlier"
+            if isinstance(raw, str):
+                self._string_source = (key, owner)
+            self._remember_source(raw, key, owner)
+        for item in items:
+            if isinstance(item, InputItem):
+                owner = "current" if item.input_id in task else "earlier"
+                self._input_ids[item.input_id] = owner
+                for key in _user_message_keys([item.raw_item]).values():
+                    self._remember_source(item.raw_item, key, owner)
+                    self._user_item_ids.add(item.input_id)
+        # Hooks receive a separate copy of the current task before the filter
+        # runs. Only recognize messages that are still part of that task.
+        for i, key in _user_message_keys(turn_input).items():
+            if self._content.get(key) in ("current", "ambiguous"):
+                self._remember(turn_input[i], key, "current")
+
+    def _remember_source(self, raw: object, key: str, owner: _MessageOwner) -> None:
+        self._sequence.append((key, owner))
+        self._remember(raw, key, owner)
+
+    def _remember(self, raw: object, key: str, owner: _MessageOwner) -> None:
+        if self._content.setdefault(key, owner) != owner:
+            self._content[key] = "ambiguous"
+        if isinstance(raw, str):
+            return
+        if self._objects.setdefault(id(raw), (raw, owner))[1] != owner:
+            self._objects[id(raw)] = (raw, "ambiguous")
+
+    def _owner(self, raw: object, input_id: str | None = None) -> _MessageOwner | None:
+        record = self._objects.get(id(raw))
+        by_object = record[1] if record is not None else None
+        by_id = self._input_ids.get(input_id) if input_id is not None else None
+        if by_object is not None and by_id is not None and by_object != by_id:
+            return "ambiguous"
+        return by_id or by_object
+
+    def record_copy(self, source: object, target: object) -> None:
+        # Record the source before a mapper can edit or reorder its inputs.
+        # Defer ambiguous cases until we know which messages the destination sees.
+        owner: _MessageOwner | None
+        if isinstance(source, HandoffInputData) and isinstance(source.input_history, str):
+            key = _user_message_key(target)
+            if key is None:
+                return
+            # Nesting reads new_items even when the filter sets input_items.
+            owner = self._string_owner(key, (*source.pre_handoff_items, *source.new_items))
+        elif isinstance(source, str):
+            # A standalone conversion has no surrounding items to disambiguate text.
+            return
+        elif source is None:
+            owner = "earlier"  # A quote from an earlier assistant summary.
+        elif isinstance(source, InputItem):
+            owner = self._owner(source.raw_item, source.input_id)
+        else:
+            owner = self._owner(source)
+        if owner is not None:
+            self._objects[id(target)] = (target, owner)
+
+    def _string_owner(self, key: str, items: Sequence[RunItem]) -> _MessageOwner | None:
+        # A filter such as remove_all_tools can keep a string history while
+        # retaining the other user messages by ID. If a message disappears,
+        # the string could be a replacement for it, even if its text is unchanged.
+        if self._string_source is None or self._string_source[0] != key:
+            return None
+        retained = {
+            item.input_id
+            for item in items
+            if isinstance(item, InputItem)
+            and _user_message_key(item.raw_item) is not None
+            and self._owner(item.raw_item, item.input_id) != "ambiguous"
+        }
+        return self._string_source[1] if self._user_item_ids <= retained else None
+
+    def _current_messages(
+        self, messages: list[tuple[str, _MessageOwner | None]], *, handoff: bool
+    ) -> list[bool]:
+        if all(owner in ("current", "earlier") for _, owner in messages):
+            return [owner == "current" for _, owner in messages]
+        # New wording cannot identify a task. An untracked copy is safe
+        # only when the entire user sequence and its task assignments agree.
+        resolved = [(key, owner or self._content.get(key)) for key, owner in messages]
+        if resolved == self._sequence:
+            return [owner == "current" for _, owner in resolved]
+        if handoff:
+            raise UserError(
+                "Cannot identify active task input after the handoff filter. "
+                "Preserve the original message objects or their InputItem IDs."
+            )
+        raise UserError(
+            "Cannot identify active task input after context processing. "
+            "Preserve the original user message objects."
+        )
+
+    def handoff_refs(
+        self,
+        history: str | list[TResponseInputItem],
+        items: list[RunItem],
+        *,
+        pending: dict[str, bool],
+    ) -> tuple[list[tuple[int, str]], set[str]]:
+        keys = _user_message_keys(history)
+        messages = [
+            (
+                key,
+                self._string_owner(key, items)
+                if isinstance(history, str)
+                else self._owner(history[i]),
+            )
+            for i, key in keys.items()
+        ]
+        item_ids: list[str] = []
+        for item in items:
+            if (
+                isinstance(item, InputItem)
+                and (key := _user_message_key(item.raw_item)) is not None
+            ):
+                messages.append((key, self._owner(item.raw_item, item.input_id)))
+                item_ids.append(item.input_id)
+        current = self._current_messages(messages, handoff=True)
+        refs = [ref for ref, keep in zip(keys.items(), current[: len(keys)], strict=True) if keep]
+        # A filter can wrap two distinct messages with the same new ID.
+        # Check each occurrence before reducing the active task to a set of
+        # IDs, including input still held for a server acknowledgement.
+        by_id = dict(pending)
+        for input_id, active in zip(item_ids, current[len(keys) :], strict=True):
+            if (
+                not isinstance(input_id, str)
+                or not input_id
+                or by_id.setdefault(input_id, active) != active
+            ):
+                raise UserError("Invalid active task input references.")
+        return refs, {key for key, active in by_id.items() if active}
+
+    def record_context_copy(self, source: object, target: object) -> None:
+        # Context processing can carry an existing occurrence through a public
+        # conversion. A bare string or a newly constructed transcript has no ID.
+        if isinstance(source, InputItem):
+            source = source.raw_item
+        if not isinstance(source, str) and (owner := self._owner(source)) is not None:
+            self._objects[id(target)] = (target, owner)
+
+    def rebase_context(
+        self,
+        state: RunState[Any, Any],
+        history: str | list[TResponseInputItem],
+    ) -> None:
+        """A context hook can retain or remove messages, without starting a new task."""
+        task = state._task_input_ids
+        keys = _user_message_keys(history)
+        messages = [
+            (key, self._owner(history if isinstance(history, str) else history[i]))
+            for i, key in keys.items()
+        ]
+        current = self._current_messages(messages, handoff=False)
+        if task is None:
+            # The first follow-up has not passed admission yet.
+            return
+        refs = [ref for ref, keep in zip(keys.items(), current, strict=True) if keep]
+        generated = (ref for ref in task if isinstance(ref, str))
+        state._task_input_ids = (*refs, *generated)
+
+
 async def execute_handoffs(
     *,
     public_agent: Agent[TContext],
@@ -706,6 +914,7 @@ async def execute_handoffs(
     tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
     handoff_output_committer: Callable[[HandoffOutputItem, Agent[Any]], None] | None = None,
+    run_state: RunState[Any] | None = None,
 ) -> SingleStepResult:
     """Execute a handoff and prepare the next turn for the new agent."""
 
@@ -851,7 +1060,24 @@ async def execute_handoffs(
         handoff_input_data: HandoffInputData | None = None
         session_step_items: list[RunItem] | None = None
         nested_history_owned_items: list[NestedHistoryOwnedItem] | None = None
+        task_inputs = None
+        source_history = original_input
+        filter_copies: dict[int, Any] = {}
         if input_filter is not None or should_nest_history:
+            # An empty follow-up can still receive replacement input at a later handoff.
+            if run_state is not None and (task := run_state._task_input_ids) is not None:
+                if input_filter is not None:
+                    # A filter can edit a message, then raise or be cancelled.
+                    # Publish its changes only after the handoff is validated.
+                    original_input = deepcopy(original_input, filter_copies)
+                    pre_step_items = _copy_handoff_messages(pre_step_items, filter_copies)
+                    new_step_items = _copy_handoff_messages(new_step_items, filter_copies)
+                task_inputs = _HandoffTaskInputs(
+                    original_input,
+                    pre_step_items + new_step_items,
+                    task,
+                    context_wrapper.turn_input,
+                )
             handoff_input_data = HandoffInputData(
                 input_history=tuple(original_input)
                 if isinstance(original_input, list)
@@ -880,9 +1106,10 @@ async def execute_handoffs(
                     ),
                 )
                 raise UserError(f"Invalid input filter: {input_filter}")
-            filtered = input_filter(handoff_input_data)
-            if inspect.isawaitable(filtered):
-                filtered = await filtered
+            with _observe_input_copies(task_inputs.record_copy if task_inputs else None):
+                filtered = input_filter(handoff_input_data)
+                if inspect.isawaitable(filtered):
+                    filtered = await filtered
             if not isinstance(filtered, HandoffInputData):
                 _error_tracing.attach_error_to_span(
                     span_handoff,
@@ -911,10 +1138,11 @@ async def execute_handoffs(
                 _get_nested_history_owned_items(filtered, source_data=handoff_input_data)
             )
         elif should_nest_history and handoff_input_data is not None:
-            nested, nested_history_owned_items = nest_history(
-                handoff_input_data,
-                run_config.handoff_history_mapper,
-            )
+            with _observe_input_copies(task_inputs.record_copy if task_inputs else None):
+                nested, nested_history_owned_items = nest_history(
+                    handoff_input_data,
+                    run_config.handoff_history_mapper,
+                )
             original_input = (
                 nested.input_history
                 if isinstance(nested.input_history, str)
@@ -937,6 +1165,45 @@ async def execute_handoffs(
             or (session_step_items is not None and handoff_output in session_step_items)
         ):
             _register_tool_call_items(context_wrapper, [handoff_output])
+
+    if (
+        task_inputs is not None
+        and run_state is not None
+        and (task := run_state._task_input_ids) is not None
+    ):
+        # History precedes generated items in the destination request. Keep both
+        # portions when a filter moves only some messages into input_history.
+        items = pre_step_items + new_step_items
+        history_refs, ids = task_inputs.handoff_refs(
+            original_input,
+            items,
+            pending={key: key in task for key in run_state._pending_input_ids},
+        )
+        visible = run_state._visible_task_inputs(ids, items)
+        item_refs = dict.fromkeys(
+            item.input_id
+            for item in items
+            if isinstance(item, InputItem) and item.input_id in visible
+        )
+        # A server-managed request can still be holding unacknowledged input.
+        for key in task:
+            if isinstance(key, str) and key in visible:
+                item_refs.setdefault(key)
+        # Commit references with the history and items they identify, including
+        # when persistence fails before the destination's first request.
+        if filter_copies and isinstance(source_history, list) and isinstance(original_input, list):
+            # Keep exact session occurrences when a filter retained equal messages.
+            sources = {
+                id(filter_copies[id(item)]): item
+                for item in source_history
+                if id(item) in filter_copies
+            }
+            for index, raw in enumerate(original_input):
+                if (source := sources.get(id(raw))) is not None and source == raw:
+                    original_input[index] = source
+        run_state._original_input = copy_input_items(original_input)
+        run_state._generated_items = list(items)
+        run_state._task_input_ids = (*history_refs, *item_refs)
 
     return SingleStepResult(
         original_input=original_input,
@@ -1346,6 +1613,7 @@ async def execute_tools_and_side_effects(
 
         if run_handoffs := processed_response.handoffs:
             return await execute_handoffs_call(
+                run_state=run_state,
                 public_agent=public_agent,
                 original_input=original_input,
                 pre_step_items=pre_step_items,
@@ -3313,6 +3581,7 @@ async def resolve_interrupted_turn(
 
         return _commit_missing_state(
             await execute_handoffs_call(
+                run_state=run_state,
                 public_agent=public_agent,
                 original_input=original_input,
                 pre_step_items=pre_step_items,
