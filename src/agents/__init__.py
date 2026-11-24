@@ -10,6 +10,7 @@ from .agent import (
     Agent,
     AgentBase,
     AgentToolStreamEvent,
+    ProposedFinalOutput,
     StopAtTools,
     ToolsToFinalOutputFunction,
     ToolsToFinalOutputResult,
@@ -114,6 +115,7 @@ from .retry import (
     retry_policies,
 )
 from .run import (
+    NativeMCPResult,
     OutputGuardrailBlockedMessageArgs,
     OutputGuardrailBlockedMessageFormatter,
     ReasoningItemIdPolicy,
@@ -375,6 +377,7 @@ __all__ = [
     "Agent",
     "AgentBase",
     "AgentToolStreamEvent",
+    "ProposedFinalOutput",
     "StopAtTools",
     "ToolsToFinalOutputFunction",
     "ToolsToFinalOutputResult",
@@ -501,6 +504,7 @@ __all__ = [
     "ToolExecutionConfig",
     "ToolCallHookContext",
     "ToolDeclaration",
+    "NativeMCPResult",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "ToolNotFoundBehavior",

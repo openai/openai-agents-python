@@ -159,6 +159,19 @@ class ToolCallHookContext(Generic[TContext]):
     """
 
 
+# Evaluate NotRequired now so runtime introspection also sees the optional keys.
+NativeMCPResult = TypedDict(  # noqa: UP013
+    "NativeMCPResult",
+    {
+        "content": list[dict[str, Any]],
+        "structuredContent": NotRequired[Any],
+        "isError": NotRequired[bool | None],
+        "_meta": NotRequired[dict[str, Any] | None],
+    },
+)
+"""A native MCP result. Content blocks may include peer-specific fields."""
+
+
 @dataclass(frozen=True)
 class ToolDeclaration:
     """Resolved function name, original description and optional namespace and raw MCP names."""
@@ -282,7 +295,7 @@ class ToolExecutionConfig:
     native_mcp_result_transforms: Sequence[
         tuple[
             tuple[str, str],
-            Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
+            Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]],
         ]
     ] = field(default=(), kw_only=True)
     """Experimental. Edit whole results from selected native MCP tools.
@@ -291,15 +304,16 @@ class ToolExecutionConfig:
     Both names are strings. Runner MCP text-only edits use the server object.
 
     ```python
-    from agents import ToolExecutionConfig
+    from agents import NativeMCPResult, ToolCallHookContext, ToolExecutionConfig
 
-    async def edit_result(call, result):
+    async def edit_result(
+        call: ToolCallHookContext[object], result: NativeMCPResult
+    ) -> NativeMCPResult:
         text = "Lookup failed." if result.get("isError") else "Lookup completed."
         return {"content": [{"type": "text", "text": text}]}
 
-    settings = ToolExecutionConfig(
-        native_mcp_result_transforms=[(("catalog", "lookup"), edit_result)]
-    )
+    target = ("catalog", "lookup")
+    settings = ToolExecutionConfig(native_mcp_result_transforms=[(target, edit_result)])
     ```
 
     This example discards all media and structured data. Before the first model request
@@ -329,7 +343,7 @@ class ToolExecutionConfig:
         self,
     ) -> dict[
         tuple[str, str],
-        Callable[[ToolCallHookContext[Any], dict[str, Any]], Awaitable[dict[str, Any]]],
+        Callable[[ToolCallHookContext[Any], NativeMCPResult], Awaitable[NativeMCPResult]],
     ]:
         entries = self.native_mcp_result_transforms
         if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):

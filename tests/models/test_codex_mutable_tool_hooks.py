@@ -493,7 +493,12 @@ async def test_native_hook_endpoint_rejects_untrusted_calls(hook_executable):
 
 
 def test_native_mcp_result_registrations():
-    async def edit(call, result):
+    from agents import NativeMCPResult, ToolCallHookContext
+
+    assert NativeMCPResult.__required_keys__ == {"content"}
+    assert NativeMCPResult.__optional_keys__ == {"structuredContent", "isError", "_meta"}
+
+    async def edit(call: ToolCallHookContext[object], result: NativeMCPResult) -> NativeMCPResult:
         return result
 
     pair = (("raw-peer", "lookup"), edit)
