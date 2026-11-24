@@ -3992,6 +3992,11 @@ def test_repository_release_policy_declares_public_state_surfaces() -> None:
             ],
         },
         {
+            "class_name": "NativeMCPResult",
+            "module": "agents",
+            "names": ["content", "structuredContent", "isError", "_meta"],
+        },
+        {
             "class_name": "ModelStepSpec",
             "module": "agents.testing.model",
             "names": [
