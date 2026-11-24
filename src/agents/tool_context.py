@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.responses import ResponseFunctionToolCall
 
+from ._decision_types import _Decider
 from ._tool_identity import get_tool_call_namespace, tool_trace_name
 from ._tool_invocation import tool_invocation_identity_and_scope
 from .agent_tool_state import (
@@ -43,7 +44,7 @@ _MISSING = object()
 
 
 @dataclass(eq=False)
-class ToolContext(RunContextWrapper[TContext]):
+class ToolContext(RunContextWrapper[TContext], _Decider):
     """The context of a tool call."""
 
     tool_name: str = field(default_factory=_assert_must_pass_tool_name)

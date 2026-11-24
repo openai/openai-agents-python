@@ -2364,15 +2364,24 @@ async def _invoke_function_tool_with_metadata(
     """Invoke a function tool and identify default SDK-generated timeout outputs."""
     _consume_function_tool_default_failure(context)
     invoke_context = _get_function_tool_invoke_context(function_tool, context)
+
+    async def invoke() -> Any:
+        from ._public_agent import get_public_agent
+        from .decisions import _bind_decisions
+
+        async with _bind_decisions(
+            invoke_context, get_public_agent(context.agent) if context.agent else None
+        ):
+            return await function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
+
     timeout_seconds = function_tool.timeout_seconds
     if timeout_seconds is None:
-        output = await function_tool.on_invoke_tool(cast(Any, invoke_context), arguments)
+        output = await invoke()
         return _FunctionToolInvocationResult(
             output,
             is_sdk_generated_error=_consume_function_tool_default_failure(context),
         )
 
-    invoke = functools.partial(function_tool.on_invoke_tool, cast(Any, invoke_context), arguments)
     tool_task: asyncio.Future[Any] = asyncio.ensure_future(
         _protect_selected_task(invoke) if context._edit_text is not None else invoke()
     )

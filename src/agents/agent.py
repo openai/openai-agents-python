@@ -10,13 +10,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeAlias, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict
 
 from . import _debug
+from ._decision_types import DecisionProvider, _Decider
 from ._tool_identity import get_tool_approval_item_call_id
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
@@ -91,7 +92,7 @@ class ContinueWithFeedback:
 
 
 @dataclass(frozen=True)
-class ProposedFinalOutput(Generic[TContext]):
+class ProposedFinalOutput(_Decider, Generic[TContext]):
     """A proposed final output from one SDK model turn. Treat its contents as read-only."""
 
     agent: Agent[TContext]
@@ -340,18 +341,8 @@ class AgentBase(Generic[TContext]):
 
 
 @dataclass
-class Agent(AgentBase, Generic[TContext]):
-    """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
-
-    We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
-    addition, you can pass `handoff_description`, which is a human-readable description of the
-    agent, used when the agent is used inside tools/handoffs.
-
-    Agents are generic on the context type. The context is a (mutable) object you create. It is
-    passed to tool functions, handoffs, guardrails, etc.
-
-    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
-    """
+class _AgentFields(AgentBase, Generic[TContext]):
+    """Fields shared by the released Agent and SandboxAgent constructors."""
 
     instructions: (
         str
@@ -444,6 +435,26 @@ class Agent(AgentBase, Generic[TContext]):
     """Whether to reset the tool choice to the default value after a tool has been called. Defaults
     to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
 
+
+@dataclass
+class Agent(_AgentFields[TContext], _Decider):
+    """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
+
+    We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
+    addition, you can pass `handoff_description`, which is a human-readable description of the
+    agent, used when the agent is used inside tools/handoffs.
+
+    Agents are generic on the context type. The context is a (mutable) object you create. It is
+    passed to tool functions, handoffs, guardrails, etc.
+
+    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
+    """
+
+    decisions: Annotated[DecisionProvider | None, Field(exclude=True)] = field(
+        default=None, kw_only=True, repr=False, compare=False
+    )
+    """Borrowed provider for typed decisions on this agent and its callbacks."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -475,6 +486,8 @@ class Agent(AgentBase, Generic[TContext]):
                 | ToolsToFinalOutputFunction
             ) = "run_llm_again",
             reset_tool_choice: bool = True,
+            *,
+            decisions: DecisionProvider | None = None,
         ) -> None: ...
 
     def __post_init__(self):
@@ -994,6 +1007,9 @@ class Agent(AgentBase, Generic[TContext]):
                     resume_state._context.usage = context.usage
 
             if run_result is None:
+                from .decisions import _delegate_decisions
+
+                _delegate_decisions(self, context, nested_context)
                 if on_stream is not None:
                     stream_handler = on_stream
                     run_result_streaming = Runner.run_streamed(

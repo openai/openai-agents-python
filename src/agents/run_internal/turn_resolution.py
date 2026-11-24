@@ -485,8 +485,11 @@ async def execute_final_output(
 
         # Isolate even synchronous cancellation from cancellation of the owning run.
         async def decide() -> Literal["continue", "finish"] | ContinueWithFeedback:
-            value = policy(context_wrapper, proposal)
-            return await value if inspect.isawaitable(value) else value
+            from ..decisions import _bind_decisions
+
+            async with _bind_decisions(proposal, public_agent):
+                value = policy(context_wrapper, proposal)
+                return await value if inspect.isawaitable(value) else value
 
         def on_policy_failure(error: BaseException) -> None:
             if isinstance(error, asyncio.CancelledError):
@@ -718,6 +721,7 @@ async def execute_handoffs(
                 raise
             # A failed invocation is not a transfer. Do not run transfer hooks or filters.
             span_handoff.set_error(SpanError(message="Handoff invocation failed", data={}))
+            _detach_data_redacted_error_traceback(error)
             error_output = handoff.failure_error_function(context_wrapper, error)
             if inspect.isawaitable(error_output):
                 error_output = await error_output
@@ -760,6 +764,9 @@ async def execute_handoffs(
             source_agent=public_agent,
             target_agent=new_agent,
         )
+        from ..decisions import _record_transfer
+
+        _record_transfer(context_wrapper, public_agent, new_agent, handoff)
         new_step_items.append(handoff_output)
         if handoff_output_committer is not None:
             _register_tool_call_items(context_wrapper, [handoff_output])

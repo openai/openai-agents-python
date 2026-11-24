@@ -19,6 +19,13 @@ from .agent import (
 from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from .apply_diff import apply_diff
 from .computer import AsyncComputer, Button, Computer, Environment
+from .decisions import (
+    DecisionError,
+    DecisionProvider,
+    DecisionRequest,
+    DecisionResponse,
+    OpenAIDecisions,
+)
 from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
 from .exceptions import (
     AgentsException,
@@ -380,6 +387,11 @@ def enable_verbose_stdout_logging() -> None:
 
 
 __all__ = [
+    "DecisionError",
+    "DecisionProvider",
+    "DecisionRequest",
+    "DecisionResponse",
+    "OpenAIDecisions",
     "Agent",
     "AgentBase",
     "AgentToolStreamEvent",

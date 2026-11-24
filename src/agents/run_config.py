@@ -16,6 +16,7 @@ from ._config_coercion import (
     coerce_dataclass_config,
     coerce_pydantic_config,
 )
+from ._decision_types import _Decider
 from .guardrail import InputGuardrail, OutputGuardrail
 from .handoffs import HandoffHistoryMapper, HandoffInputFilter
 from .items import TResponseInputItem
@@ -93,7 +94,7 @@ ModelSelector = Callable[[ModelSelectionData[Any]], MaybeAwaitable[str | None]]
 
 
 @dataclass
-class CallModelData(Generic[TContext]):
+class CallModelData(_Decider, Generic[TContext]):
     """Data passed to `RunConfig.call_model_input_filter` prior to model call."""
 
     model_data: ModelInputData

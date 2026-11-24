@@ -19,6 +19,7 @@ from ._redaction import (
 )
 from .agent import Agent
 from .agent_tool_state import set_agent_tool_state_scope
+from .decisions import _DecisionRun
 from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -605,6 +606,10 @@ def _prepare_private_input(
     config: RunConfig,
     options: RunOptions[TContext],
 ) -> str | list[TResponseInputItem] | RunState[TContext]:
+    from ._run_state_agent_identity import _decision_bindings
+
+    if not isinstance(input, RunState):
+        _decision_bindings(agent)
     if current_redactor() is None:
         if isinstance(input, RunState) and input._requires_redaction:
             error = UserError("Continuing this run requires RunConfig.redact_text.")
@@ -693,8 +698,12 @@ class AgentRunner:
                         if isinstance(input, RunState) and input._current_agent is not None
                         else starting_agent
                     )
+                    decisions = _DecisionRun(
+                        starting_agent, run_config.tracing_disabled, kwargs.get("context")
+                    )
                     with agent_tool_configuration_run(configuration_agent):
-                        result = await self._run_impl(starting_agent, input, **kwargs)
+                        async with decisions.bind():
+                            result = await self._run_impl(starting_agent, input, **kwargs)
                         require_clean_final_output(
                             result.final_output, result.input, result.new_items
                         )
@@ -777,6 +786,7 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            await run_state._check_pending_specialists(starting_agent, context_wrapper)
             context_wrapper._resolve_function_approval_owners(starting_agent)
             validate_resume_policy(run_state, context_wrapper, run_config)
             await validate_resumed_agent_tools(
@@ -2824,6 +2834,9 @@ class AgentRunner:
             if run_config.tracing_disabled
             else contextlib.nullcontext(),
         ):
+            decisions = _DecisionRun(
+                starting_agent, run_config.tracing_disabled, kwargs.get("context")
+            )
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
             budget = _prepare_budget(
                 run_config, starting_agent, input if isinstance(input, RunState) else None
@@ -3058,6 +3071,10 @@ class AgentRunner:
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
+            async with decisions.bind():
+                await stream()
+
+        async def stream() -> None:
             with (
                 redaction_scope(run_config.redact_text),
                 operation_tracing_scope(
@@ -3069,6 +3086,8 @@ class AgentRunner:
                 else contextlib.nullcontext(),
             ):
                 try:
+                    if run_state is not None and is_resumed_state:
+                        await run_state._check_pending_specialists(starting_agent, context_wrapper)
                     if is_resumed_state and run_state is not None:
                         await validate_resumed_agent_tools(
                             run_state,
