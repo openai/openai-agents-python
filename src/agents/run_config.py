@@ -308,9 +308,11 @@ class ToolExecutionConfig:
     require_native_approval_recovery: bool = field(default=False, kw_only=True)
     """Require recovery support when native policy asks to approve a command or edit.
 
-    This requires Codex's provider-owned workspace and a resumable session. It does
-    not extend recovery to unsupported native tools, network approvals, or edits to
-    the reviewed arguments. Host policy still decides which operations need approval.
+    This requires Codex's provider-owned workspace and a resumable session.
+    Leave tool_choice unset or use "auto". Requiring an SDK tool call disables
+    native approval recovery. Recovery does not cover unsupported native tools,
+    network approvals, or edits to the reviewed arguments. Host policy still
+    decides which operations need approval.
     """
 
     def __post_init__(self) -> None:

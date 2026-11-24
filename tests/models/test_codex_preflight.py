@@ -121,6 +121,70 @@ async def test_runner_rejects_required_native_recovery_before_startup(tmp_path, 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("require_recovery", [False, True])
+async def test_required_sdk_tool_with_resumable_session(
+    tmp_path, threads, streamed, require_recovery
+):
+    started = []
+
+    @function_tool
+    def lookup() -> str:
+        started.append("tool")
+        return "found"
+
+    class Observer(RunHooks):
+        async def on_llm_start(self, *args):
+            started.append("request")
+
+    thread = FakeThread(call={"callId": "lookup", "tool": "lookup", "arguments": {}})
+    threads[0].append(thread)
+    provider = CodexProvider(cwd=tmp_path)
+    execution = ToolExecutionConfig(require_native_approval_recovery=require_recovery)
+    settings = ModelSettings(tool_choice="required")
+    agent = Agent(
+        name="worker",
+        tools=[lookup],
+        model_settings=settings,
+        tool_use_behavior="stop_on_first_tool",
+    )
+    config = RunConfig(model_provider=provider, tool_execution=execution, tracing_disabled=True)
+    session = await ResumableSession.create(MemoryStore())
+    report = provider.get_model(None).preflight(
+        ModelRequest(
+            input="start",
+            tools=[lookup],
+            model_settings=settings,
+            tool_execution=execution,
+            resumable=True,
+        )
+    )
+
+    async def run():
+        if streamed:
+            result = Runner.run_streamed(
+                agent, "start", run_config=config, hooks=Observer(), session=session
+            )
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(
+            agent, "start", run_config=config, hooks=Observer(), session=session
+        )
+
+    if require_recovery:
+        with pytest.raises(UserError, match="tool_choice='required'"):
+            await run()
+        assert report.static_validation == "failed"
+        assert provider._manager is None and not threads[1] and not started
+    else:
+        assert report.static_validation == "passed"
+        assert (await run()).final_output == "found"
+        assert started == ["request", "tool"]
+        assert thread.recover_approvals is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 async def test_sdk_workspace_owns_write_without_preparation_hooks(tmp_path, threads, streamed):
     queue, _ = threads
     effects = []
