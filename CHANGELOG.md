@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.26.0](https://github.com/openai/openai-agents-python/compare/v0.25.0...v0.26.0) (2026-11-24)
+
+
+### Features
+
+* Upgrade the GPT-Live demo to 1.1 ([6c4e4a2](https://github.com/openai/openai-agents-python/commit/6c4e4a29cd08eef454db6980d74da6afc8939d24))
+
+
+### Bug Fixes
+
+* allow SDK 0.25 in the external provider example ([#6068](https://github.com/openai/openai-agents-python/issues/6068)) ([9b17858](https://github.com/openai/openai-agents-python/commit/9b17858afb5b45f48bbf695cc7c8f34778425156))
+* apply the Docker removal CPU limit to path inspection ([14d13f4](https://github.com/openai/openai-agents-python/commit/14d13f468b0da7e6b721379200bd150cea60add1))
+* bound TAR path validation work per component ([abc55bd](https://github.com/openai/openai-agents-python/commit/abc55bd1b3d1b942b5c227545247dad23d104e99))
+* check Realtime output guardrails at turn completion ([dc84a13](https://github.com/openai/openai-agents-python/commit/dc84a13735dd7818847c20e7e023b0fbad2a88de))
+* give per-call MCP metadata priority over discovery defaults ([7f6f5ea](https://github.com/openai/openai-agents-python/commit/7f6f5ea075646ad13651fad96ac30b6e37da230b))
+* honor the global tracing switch in Realtime ([96b2799](https://github.com/openai/openai-agents-python/commit/96b27992a8aaf8cb29244f5e0d90a5b6c7d2373f))
+* limit UnixLocal snapshot link rebasing to regular files ([dd444fb](https://github.com/openai/openai-agents-python/commit/dd444fb313a398a006b99ee0fbecb9ec513b55e5))
+* preserve handoff redaction in Session history ([6f45b21](https://github.com/openai/openai-agents-python/commit/6f45b21d42bceb68dd5db397b95d4df575689d77))
+* protect apply_patch staging during alias moves ([a29070b](https://github.com/openai/openai-agents-python/commit/a29070b207103d389a3626eca5dab88814bba556))
+* require application approval for local images in codex_tool ([#6171](https://github.com/openai/openai-agents-python/issues/6171)) ([2a98dcd](https://github.com/openai/openai-agents-python/commit/2a98dcd0563c35ffd3b3ac3bfc95035a50915522))
+* sandbox memory selection across UTC offsets ([#6066](https://github.com/openai/openai-agents-python/issues/6066)) ([e7ce15a](https://github.com/openai/openai-agents-python/commit/e7ce15a25b336bb3d0840ad16dee597f69a6e6d3))
+* **sandbox:** restrict Docker storage mount privileges ([#6189](https://github.com/openai/openai-agents-python/issues/6189)) ([b40fb80](https://github.com/openai/openai-agents-python/commit/b40fb8097f007de181db9c382da53d8e0b7d6eaf))
+* stop queued function tools after input guardrail rejection ([90300af](https://github.com/openai/openai-agents-python/commit/90300af67e75977dcb017be3ad259232a5dcc1d0))
+* support opt-in JSON validation for Codex tool parameters ([#6067](https://github.com/openai/openai-agents-python/issues/6067)) ([54492d1](https://github.com/openai/openai-agents-python/commit/54492d112b5c3366cc30f35abd60c46fa92140c2))
+
 ## [0.25.0](https://github.com/openai/openai-agents-python/compare/v0.24.0...v0.25.0) (2026-11-17)
 
 
