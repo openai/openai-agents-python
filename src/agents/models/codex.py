@@ -78,8 +78,11 @@ class CodexProvider(ModelProvider):
     Supply the same SDK tool hooks on both workers. The user reviews the prepared
     input. Output preparation runs after execution.
 
-    Without `children`, Core's defaults and local configuration govern delegation.
-    To bound native children, run `codex debug models` with a CLI that matches
+    Native delegation requires `children=CodexChildren(max_delegation_attempts=1)`
+    or another explicit limit on this provider, even if local settings enable it.
+    Omit `children` for ordinary workspace tools or Python `Agent.as_tool` calls.
+
+    To choose a model for native children, run `codex debug models` with a CLI that matches
     the Codex Core revision in the SDK wheel. Use the same workspace,
     credentials, provider and catalog settings. With `jq`, list candidate slugs:
 
@@ -122,9 +125,6 @@ class CodexProvider(ModelProvider):
     workspace approvals are incompatible. Core can still accept structured inputs and read local
     context under the parent's permissions. Core owns child results and joins
     the tree when the request ends. Child IDs cannot resume in another request.
-
-    Without `children`, Core uses its ordinary settings, which can also enable
-    delegation. The SDK adds no roles or limits in that case.
     """
 
     _supports_stored_response_id = False

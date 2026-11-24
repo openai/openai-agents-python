@@ -307,6 +307,68 @@ def outputs(request):
 
 @pytest.mark.asyncio
 @pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "model,overrides",
+    [
+        ("v1", []),
+        ("v1", ["agents.enabled=true", "features.multi_agent=false"]),
+        ("v2", ["agents.enabled=false", "features.multi_agent_v2=true"]),
+    ],
+)
+async def test_native_delegation_requires_a_provider_grant(
+    tmp_path, monkeypatch, model_endpoint, catalog, stream, model, overrides
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, [*catalog, *overrides])
+    # The Code Mode catalog can hide a callable handler from the tool list.
+    spawn = call("spawn_agent", "spawn", message="LEAF")
+    if model == "v2":
+        spawn = call("spawn_agent", "spawn", message="LEAF", task_name="leaf", fork_turns="none")
+        spawn["namespace"] = "collaboration"
+    items.extend([spawn, final_message(), final_message()])
+    agent = Agent(name="manager", model=provider.get_model(model))
+    config = RunConfig(tracing_disabled=True)
+    try:
+        if stream:
+            result = Runner.run_streamed(agent, "draft", run_config=config)
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "draft", run_config=config)
+        assert result.final_output == "done"
+    finally:
+        await provider.aclose()
+    assert len(requests) == 2
+    assert all("LEAF" not in user_input(request) for request in requests)
+    assert "unsupported" in outputs(requests[-1])["spawn"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_python_agent_tool_does_not_require_native_children(
+    tmp_path, monkeypatch, model_endpoint, catalog
+):
+    port, requests, items = model_endpoint
+    provider = codex_fixture(tmp_path, port, monkeypatch, catalog)
+    model = provider.get_model("v2")
+    editor = Agent(name="editor", model=model).as_tool("edit", "Edit a draft")
+    manager = Agent(name="manager", model=model, tools=[editor])
+    edit = call("edit", "edit", input="REVIEW")
+    del edit["namespace"]
+    items.extend([edit, final_message(), final_message()])
+    try:
+        result = await Runner.run(manager, "draft", run_config=RunConfig(tracing_disabled=True))
+        assert result.final_output == "done"
+        assert len(requests) == 3
+        assert "REVIEW" in user_input(requests[1])
+        assert outputs(requests[-1])["edit"] == "done"
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
 @pytest.mark.parametrize(
     "model,extra",
     [

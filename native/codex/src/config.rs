@@ -329,6 +329,11 @@ pub async fn build_services(
         if let Some(effort) = attempt.get("reasoning_effort").filter(|v| !v.is_null()) {
             override_value(&mut overrides, "model_reasoning_effort", effort.clone())?;
         }
+    } else {
+        // Core's V2 feature takes precedence over agents.enabled. Disable both
+        // after caller overrides so no catalog can grant child dispatch.
+        override_value(&mut overrides, "agents.enabled", json!(false))?;
+        override_value(&mut overrides, "features.multi_agent_v2", json!(false))?;
     }
     // These are the provider's defaults, preceding caller overrides.
     overrides.splice(
@@ -961,6 +966,8 @@ pub async fn prepare_config(services: &CoreServices, attempt: &Value) -> Result<
         if config.model.as_deref() != attempt["model"].as_str() {
             return Err("Codex policy changed the native child model.".into());
         }
+    } else if config.agents_enabled || config.features.enabled(Feature::MultiAgentV2) {
+        return Err("Codex policy did not disable native children.".into());
     }
     configure_tools(
         &mut config,
