@@ -14,6 +14,7 @@ from agents import (
     RunConfig,
     RunContextWrapper,
     Runner,
+    RunResultStreaming,
 )
 from agents.models.interface import Model
 from agents.testing import ScriptedModel, assistant_message
@@ -48,6 +49,29 @@ def validate_candidate(
     return "continue"
 
 
+async def _drain_stream(run: RunResultStreaming) -> None:
+    """Discard raw events and join provider cleanup before returning."""
+
+    async def drain() -> None:
+        async for _ in run.stream_events():
+            pass
+
+    # Cancelling the reader itself can let it return before cleanup finishes.
+    reader = asyncio.create_task(drain())
+    try:
+        await asyncio.shield(reader)
+    except asyncio.CancelledError:
+        run.cancel()
+        while not reader.done():
+            try:
+                await asyncio.wait((reader,))
+            except asyncio.CancelledError:
+                pass
+        if not reader.cancelled():
+            reader.exception()  # A secondary error must not replace caller cancellation.
+        raise
+
+
 async def repair(
     model: Model | str | None, *, streamed: bool = False, run_config: RunConfig | None = None
 ) -> tuple[Verdict, Review]:
@@ -59,13 +83,17 @@ async def repair(
         instructions=lambda ctx, agent: ctx.context.feedback,
         hooks=AgentHooks(final_output_policy=validate_candidate),
     )
-    config = replace(run_config or RunConfig(), tracing_disabled=True)
+    config = (
+        {"tracing_disabled": True}
+        if run_config is None
+        else replace(run_config, tracing_disabled=True)
+    )
     if streamed:
         result = Runner.run_streamed(
             agent, "Review the synthetic evidence.", context=context, run_config=config, max_turns=2
         )
-        async for _ in result.stream_events():
-            pass  # Raw events are not approved display.
+        # Discard raw events privately, even if the producer has already started.
+        await _drain_stream(result)
     else:
         result = await Runner.run(
             agent, "Review the synthetic evidence.", context=context, run_config=config, max_turns=2
@@ -85,7 +113,7 @@ async def repair_schema(model: ScriptedModel) -> tuple[Verdict, int]:
             result = await Runner.run(
                 Agent(name="schema reviewer", model=model, output_type=Verdict),
                 "Return JSON with decision approve/reject and positive evidence_count.",
-                run_config=RunConfig(tracing_disabled=True),
+                run_config={"tracing_disabled": True},
                 max_turns=1,
             )
         except ModelBehaviorError:
