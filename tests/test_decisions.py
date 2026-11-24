@@ -3,6 +3,7 @@
 import asyncio
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import httpx2
@@ -76,11 +77,36 @@ class BlockingPeer(Peer):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self.finished = asyncio.Event()
+        self.request_task: asyncio.Task[Any] | None = None
+
+    def expire_deadline(self, monkeypatch, *, before_dispatch):
+        async def wait(tasks, *, timeout=None):
+            if timeout is None:
+                return await asyncio.wait(tasks)
+            assert timeout == 0.01
+            (self.request_task,) = tasks
+            if not before_dispatch:
+                await asyncio.wait_for(self.started.wait(), 3)
+            return set(), set(tasks)
+
+        # Only the Decisions deadline expires here. Keep real task cancellation and joins.
+        clock = SimpleNamespace(**vars(asyncio))
+        clock.wait = wait
+        monkeypatch.setattr("agents.decisions.asyncio", clock)
+
+    def check_timeout(self, *, before_dispatch):
+        assert self.request_task is not None and self.request_task.done()
+        if before_dispatch:
+            assert self.request_task.cancelled()
+            assert not self.started.is_set() and not self.finished.is_set() and not self.requests
+        else:
+            assert self.started.is_set() and self.finished.is_set() and len(self.requests) == 1
 
     async def respond(self, request):
         self.started.set()
         try:
-            await self.release.wait()
+            # Guard a missing cancellation without using elapsed time to trigger the deadline.
+            await asyncio.wait_for(self.release.wait(), 5)
         except asyncio.CancelledError:
             await asyncio.sleep(0)
         self.finished.set()
@@ -320,28 +346,42 @@ async def test_restore_rebuilt_roster_binds_label_and_agent_without_reselection(
 
 
 @pytest.mark.parametrize(
-    "case", ["replaced", "removed", "permission", "unknown", "timeout", "cancel"]
+    "case",
+    [
+        "replaced",
+        "removed",
+        "permission",
+        "unknown",
+        "timeout",
+        "timeout_before_dispatch",
+        "cancel",
+    ],
 )
-async def test_no_transfer_after_revocation_failure_or_cancellation(case):
+async def test_no_transfer_after_revocation_failure_or_cancellation(case, monkeypatch):
     source = source_agent()
     model = ScriptedModel([[assistant_message("unexpected")]])
     targets = {"blue": Agent(name="Blue", model=model), "red": Agent(name="Red")}
     context = {"allowed": True}
     provider = BlockingPeer()
+    before_dispatch = case == "timeout_before_dispatch"
+    timeout = before_dispatch or case == "timeout"
+    if timeout:
+        provider.expire_deadline(monkeypatch, before_dispatch=before_dispatch)
     source.handoffs.append(
         decision_handoff(
             source,
             client=provider.client,
             model="fixture",
+            timeout=0.01 if timeout else 30,
             question="Which?",
             targets=targets,
             is_available=lambda ctx, label: ctx.context["allowed"],
-            timeout=0.01 if case == "timeout" else 30,
         )
     )
     task = asyncio.create_task(run(source, False, context=context))
     try:
-        await asyncio.wait_for(provider.started.wait(), 3)
+        if not timeout:
+            await asyncio.wait_for(provider.started.wait(), 3)
         error: type[BaseException] = ValueError
         if case == "replaced":
             targets["blue"] = targets["blue"].clone()
@@ -352,7 +392,7 @@ async def test_no_transfer_after_revocation_failure_or_cancellation(case):
         elif case == "unknown":
             provider.value = "unlisted_tool"
             error = DecisionError
-        elif case == "timeout":
+        elif timeout:
             error = asyncio.TimeoutError
         else:
             task.cancel()
@@ -361,7 +401,10 @@ async def test_no_transfer_after_revocation_failure_or_cancellation(case):
             provider.release.set()
         with pytest.raises(error):
             await task
-        assert provider.finished.is_set() and len(provider.requests) == 1
+        if timeout:
+            provider.check_timeout(before_dispatch=before_dispatch)
+        else:
+            assert provider.finished.is_set() and len(provider.requests) == 1
         assert isinstance(source.model, ScriptedModel)
         assert not model.calls and len(source.model.calls) == 1
     finally:
@@ -549,24 +592,32 @@ async def test_explicit_recovery_returns_to_caller_without_transferring():
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("approve_first", [False, True])
-@pytest.mark.parametrize("failure", ["cancel", "timeout", "refusal", "invalid"])
-async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_first, failure):
+@pytest.mark.parametrize(
+    "failure", ["cancel", "timeout", "timeout_before_dispatch", "refusal", "invalid"]
+)
+async def test_selection_failure_keeps_completed_tool_receipt(
+    stream, approve_first, failure, monkeypatch
+):
     effects = []
 
-    class Failing(Peer):
+    before_dispatch = failure == "timeout_before_dispatch"
+    timeout = before_dispatch or failure == "timeout"
+
+    class Failing(BlockingPeer):
         async def respond(self, request):
             effects.append("select")
-            if failure == "refusal":
-                self.value = "refusal"
+            if timeout:
                 return await super().respond(request)
-            if failure == "invalid":
-                self.value = "unknown"
-                return await super().respond(request)
-            if failure == "timeout":
-                await asyncio.Event().wait()
-            future = asyncio.get_running_loop().create_future()
-            future.cancel("private details")
-            return await future
+            if failure == "cancel":
+                future = asyncio.get_running_loop().create_future()
+                future.cancel("private details")
+                return await future
+            self.value = "refusal" if failure == "refusal" else "unknown"
+            return await Peer.respond(self, request)
+
+    peer = Failing()
+    if timeout:
+        peer.expire_deadline(monkeypatch, before_dispatch=before_dispatch)
 
     @tool(needs_approval=approve_first)
     def record() -> str:
@@ -589,10 +640,10 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
     source.handoffs.append(
         decision_handoff(
             source,
-            client=Failing().client,
+            client=peer.client,
             model="fixture",
+            timeout=0.01 if timeout else 30,
             question="Which?",
-            timeout=0.01 if failure == "timeout" else 30,
             targets={"blue": Agent(name="Blue", model=specialist), "red": Agent(name="Red")},
         )
     )
@@ -603,9 +654,9 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
             paused = await run(source, stream, session=session)
             value = paused.to_state()
             value.approve(value.get_interruptions()[0])
-        error = {"cancel": RuntimeError, "timeout": asyncio.TimeoutError}.get(
-            failure, DecisionError
-        )
+        error: type[Exception] = RuntimeError if failure == "cancel" else DecisionError
+        if timeout:
+            error = asyncio.TimeoutError
         with pytest.raises(error) as caught:
             await run(source, stream, value, session=session)
         if failure == "cancel":
@@ -621,7 +672,10 @@ async def test_selection_failure_keeps_completed_tool_receipt(stream, approve_fi
         receipts = [i for i in items if i.get("call_id") == "effect"]
         assert [i["type"] for i in receipts] == ["function_call", "function_call_output"]
         assert receipts[-1].get("output") == "recorded"
-        assert effects == ["record", "select"] and not specialist.calls
+        if timeout:
+            peer.check_timeout(before_dispatch=before_dispatch)
+        assert effects == (["record"] if before_dispatch else ["record", "select"])
+        assert not specialist.calls
     finally:
         session.close()
 
