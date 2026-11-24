@@ -55,7 +55,7 @@ from .memory import Session
 from .memory.resumable_session import ResumableSession
 from .models._run_context import ModelToolHooks
 from .result import RunResult, RunResultStreaming
-from .run_budget import _check_resume, _prepare_budget
+from .run_budget import _check_resume, _parent_budget, _prepare_budget
 from .run_config import (
     DEFAULT_MAX_TURNS,
     CallModelData,
@@ -343,7 +343,7 @@ class Runner:
             Only the first agent's input guardrails are run.
 
         Args:
-            control: A fresh input handle for corrections during this run.
+            control: A fresh handle for sending user text to the next scheduled request.
             starting_agent: The starting agent to run.
             input: The initial input to the agent. You can pass a single string for a
                 user message, or a list of input items.
@@ -369,7 +369,6 @@ class Runner:
                 other model providers don't write to the Conversation object,
                 so you'll end up having partial conversations stored.
             session: A session for automatic conversation history management.
-            control: A fresh handle for sending user text to the next scheduled request.
 
         Returns:
             A run result containing all the inputs, guardrail results and the output of
@@ -561,7 +560,7 @@ class Runner:
             Only the first agent's input guardrails are run.
 
         Args:
-            control: A fresh input handle for corrections during this run.
+            control: A fresh handle for sending user text to the next scheduled request.
             starting_agent: The starting agent to run.
             input: The initial input to the agent. You can pass a single string for a
                 user message, or a list of input items.
@@ -580,7 +579,6 @@ class Runner:
                 ``previous_response_id`` is supplied yet.
             conversation_id: The ID of the stored conversation, if any.
             session: A session for automatic conversation history management.
-            control: A fresh handle for sending user text to the next scheduled request.
 
         Returns:
             A result object that contains data about the run, as well as a method to
@@ -748,7 +746,8 @@ class AgentRunner:
         run_state: RunState[TContext] | None = (
             cast(RunState[TContext], input) if is_resumed_state else None
         )
-        budget = _prepare_budget(run_config, starting_agent, run_state)
+        parent_budget = _parent_budget(context)
+        budget = _prepare_budget(run_config, starting_agent, run_state, parent_budget)
         resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
             run_config.reasoning_item_id_policy
             if run_config.reasoning_item_id_policy is not None
@@ -792,7 +791,12 @@ class AgentRunner:
             )
             context_wrapper._resolve_function_approval_owners(starting_agent)
             validate_resume_policy(run_state, context_wrapper, run_config)
-            await _check_resume(run_state, run_config.budget, context_wrapper)
+            await _check_resume(
+                run_state,
+                run_config.budget,
+                context_wrapper,
+                parent_budget,
+            )
             context = context_wrapper.context
 
             reject_unrecoverable_terminal_state(run_state)
@@ -2843,8 +2847,12 @@ class AgentRunner:
             else contextlib.nullcontext(),
         ):
             input = _prepare_private_input(starting_agent, input, run_config, kwargs)
+            parent_budget = _parent_budget(context)
             budget = _prepare_budget(
-                run_config, starting_agent, input if isinstance(input, RunState) else None
+                run_config,
+                starting_agent,
+                input if isinstance(input, RunState) else None,
+                parent_budget,
             )
             # Handle RunState input
             is_resumed_state = isinstance(input, RunState)
@@ -3089,7 +3097,12 @@ class AgentRunner:
             ):
                 try:
                     if is_resumed_state and run_state is not None:
-                        await _check_resume(run_state, run_config.budget, context_wrapper)
+                        await _check_resume(
+                            run_state,
+                            run_config.budget,
+                            context_wrapper,
+                            parent_budget,
+                        )
                     if isinstance(session, ResumableRun):
                         await session.begin(
                             input,

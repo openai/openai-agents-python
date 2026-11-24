@@ -694,7 +694,7 @@ class RunConfig:
     """
 
     budget: RunBudget | None = None
-    """Optional limits on root model calls and observed tokens."""
+    """Optional limits on model calls, reported tokens, SDK tools and delegated work."""
 
     model_selector: ModelSelector | None = None
     """Choose a model by name before each new Runner request, before the input filter.
