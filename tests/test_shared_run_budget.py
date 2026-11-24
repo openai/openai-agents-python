@@ -14,6 +14,7 @@ from agents import (
     RunConfig,
     Runner,
     RunState,
+    ToolExecutionConfig,
     UserError,
 )
 from agents.decorators import tool
@@ -643,11 +644,21 @@ async def test_codex_backed_sdk_child_bounds_outer_requests_and_sdk_handlers(tmp
 
 
 @pytest.mark.asyncio
-async def test_shared_codex_child_rejects_unenforceable_native_delegation(tmp_path):
+@pytest.mark.parametrize("sdk_workspace", [False, True])
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_shared_codex_child_rejects_unenforceable_native_delegation(
+    tmp_path, sdk_workspace, streamed
+):
+    provider = CodexProvider(cwd=tmp_path)
     child = Agent(name="native-child").as_tool(
         "ask",
         "Ask child",
-        run_config=RunConfig(model_provider=CodexProvider(cwd=tmp_path)),
+        run_config=RunConfig(
+            model_provider=provider,
+            tool_execution=ToolExecutionConfig(workspace_execution="sdk")
+            if sdk_workspace
+            else None,
+        ),
         failure_error_function=None,
     )
     root = Agent(
@@ -656,7 +667,12 @@ async def test_shared_codex_child_rejects_unenforceable_native_delegation(tmp_pa
         tools=[child],
     )
     with pytest.raises(UserError, match="controlled native delegation"):
-        await execute(root, RunBudget(max_tool_starts=2, share_with_children=True))
+        await execute(
+            root,
+            RunBudget(max_tool_starts=2, share_with_children=True),
+            streamed=streamed,
+        )
+    assert provider._manager is None
 
 
 @pytest.mark.asyncio

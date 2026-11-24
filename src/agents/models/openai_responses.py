@@ -53,6 +53,13 @@ from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ItemHelpers, ModelResponse, TResponseInputItem
 from ..logger import log_model_action_debug, log_model_action_error, logger
+from ..model_preflight import (
+    ModelPreflight,
+    ModelRequest,
+    static_input_copy,
+    tool_ownership,
+    validate_python_tool_execution,
+)
 from ..model_settings import MCPToolChoice
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetryNormalizedError
 from ..tool import (
@@ -607,6 +614,45 @@ class OpenAIResponsesModel(Model):
 
     def _prompt_owns_model(self, prompt: ResponsePromptParam | None) -> bool:
         return prompt is not None and not self._model_is_explicit
+
+    def preflight(self, request: ModelRequest) -> ModelPreflight:
+        """Run local request converters without credentials, catalogs, or file uploads."""
+        errors: tuple[str, ...] = ()
+        static_input = static_input_copy(request.input)
+        static_tools = not any(isinstance(tool, ComputerTool) for tool in request.tools)
+        try:
+            validate_python_tool_execution(request)
+            if static_tools:
+                effective_model = None if self._prompt_owns_model(request.prompt) else self.model
+                computer_model = Converter.resolve_computer_tool_model(
+                    request_model=effective_model,
+                    tools=request.tools,
+                )
+                Converter.convert_tools(
+                    request.tools,
+                    request.handoffs,
+                    model=computer_model,
+                    allow_opaque_tool_search_surface=request.prompt is not None,
+                    tool_choice=request.model_settings.tool_choice,
+                )
+            if static_input is not None:
+                self._remove_openai_responses_api_incompatible_fields(
+                    ItemHelpers.input_to_new_input_list(static_input)
+                )
+        except UserError as error:
+            errors = (str(error),)
+        return ModelPreflight(
+            adapter=f"{type(self).__module__}.{type(self).__qualname__}",
+            static_validation="failed"
+            if errors
+            else "passed"
+            if static_input is not None and static_tools
+            else "unknown",
+            model_name=self.model,
+            tools=tool_ownership(request.tools),
+            errors=errors,
+            unchecked=("Catalog, files, computer metadata, and host policy remain unchecked.",),
+        )
 
     def _get_request_settings(
         self,

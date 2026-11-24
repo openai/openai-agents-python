@@ -26,6 +26,13 @@ from ..exceptions import ModelBehaviorError, UserError
 from ..handoffs import Handoff
 from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..logger import log_model_action_debug, logger
+from ..model_preflight import (
+    ModelPreflight,
+    ModelRequest,
+    static_input_copy,
+    tool_ownership,
+    validate_python_tool_execution,
+)
 from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 from ..tool import Tool
 from ..tracing._model import chat_model_span
@@ -83,6 +90,53 @@ class OpenAIChatCompletionsModel(Model):
 
     def _tools_require_non_reasoning_mode(self, has_tools: bool) -> bool:
         return has_tools and self.model in {"gpt-6-sol", "gpt-6-luna"}
+
+    def preflight(self, request: ModelRequest) -> ModelPreflight:
+        """Check the Chat adapter's local conversion without contacting its endpoint."""
+        errors: tuple[str, ...] = ()
+        static_input = (
+            None
+            if self.should_replay_reasoning_content is not None
+            else static_input_copy(request.input)
+        )
+        unchecked = ["Catalog, files, replay callbacks, and host policy remain unchecked."]
+        try:
+            validate_python_tool_execution(request)
+            if static_input is not None:
+                self._validate_official_openai_input_content_types(static_input)
+                Converter.items_to_messages(
+                    static_input,
+                    model=self.model,
+                    base_url=str(self._client.base_url),
+                    should_replay_reasoning_content=self.should_replay_reasoning_content,
+                    strict_feature_validation=self._strict_feature_validation,
+                )
+            Converter.convert_tool_choice(request.model_settings.tool_choice)
+            for tool in request.tools:
+                Converter.tool_to_openai(tool)
+            for handoff in request.handoffs:
+                Converter.convert_handoff_tool(handoff)
+            if request.prompt or request.previous_response_id or request.conversation_id:
+                message = (
+                    "Chat Completions does not support Responses state or reusable prompt IDs."
+                )
+                if self._strict_feature_validation:
+                    raise UserError(message)
+                unchecked.append(message + " Legacy mode ignores them.")
+        except UserError as error:
+            errors = (str(error),)
+        return ModelPreflight(
+            adapter=f"{type(self).__module__}.{type(self).__qualname__}",
+            static_validation="failed"
+            if errors
+            else "passed"
+            if static_input is not None
+            else "unknown",
+            model_name=self.model,
+            tools=tool_ownership(request.tools),
+            errors=errors,
+            unchecked=tuple(unchecked),
+        )
 
     def _get_request_settings(
         self,

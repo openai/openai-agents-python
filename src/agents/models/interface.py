@@ -13,6 +13,7 @@ from ..items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from ..tool import Tool
 
 if TYPE_CHECKING:
+    from ..model_preflight import ModelPreflight, ModelRequest
     from ..model_settings import ModelSettings
     from ..retry import ModelRetryAdvice, ModelRetryAdviceRequest
 
@@ -43,6 +44,28 @@ class Model(abc.ABC):
     may be omitted by the runtime without re-executing the invocation. Tool outputs must retain the
     call ID for correlation.
     """
+
+    def preflight(self, request: ModelRequest) -> ModelPreflight:
+        """Check known request constraints without sampling, discovery, or network access.
+
+        Third-party adapters may override this method. Unknown compatibility is not
+        an endorsement. SDK tool ownership describes dispatch, not executor privileges.
+        """
+        from ..model_preflight import ModelPreflight, tool_ownership
+
+        errors: tuple[str, ...] = ()
+        if request.tool_execution and request.tool_execution.require_native_approval_recovery:
+            errors = ("This adapter cannot guarantee native approval recovery.",)
+        if request.tool_execution and request.tool_execution.workspace_execution == "sdk":
+            errors += ("This adapter has not verified SDK-only workspace execution.",)
+        return ModelPreflight(
+            adapter=f"{type(self).__module__}.{type(self).__qualname__}",
+            static_validation="failed" if errors else "unknown",
+            model_name=getattr(self, "model", None),
+            tools=tool_ownership(request.tools),
+            errors=errors,
+            unchecked=("This adapter does not supply static request validation.",),
+        )
 
     def get_default_model_settings(self) -> ModelSettings | None:
         """Return defaults for this model, or None to retain the agent's implicit defaults.
