@@ -3,7 +3,7 @@ from typing import Any, Generic, Literal, TypeAlias
 
 from typing_extensions import TypeVar
 
-from .agent import Agent, AgentBase, SettledStep
+from .agent import Agent, AgentBase, ProposedFinalOutput
 from .items import ModelResponse, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import NativeTool, Tool
@@ -122,8 +122,8 @@ class RunHooksBase(Generic[TContext, TAgent]):
         pass
 
 
-_StepPolicy: TypeAlias = Callable[
-    [RunContextWrapper[TContext], SettledStep[TContext]],
+_FinalOutputPolicy: TypeAlias = Callable[
+    [RunContextWrapper[TContext], ProposedFinalOutput[TContext]],
     MaybeAwaitable[Literal["continue", "finish"]],
 ]
 
@@ -135,14 +135,25 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     Subclass and override the methods you need.
     """
 
-    step_policy: _StepPolicy[TContext] | None = None
+    final_output_policy: _FinalOutputPolicy[TContext] | None = None
     """Optional sync or async decision before end hooks and final output guardrails.
 
-    The Runner calls `step_policy(context, step)` once for a text or parsed structured
-    answer, or a final function result selected by `tool_use_behavior`. Pending approvals
-    and handoffs take precedence. Empty text is a candidate. If there is no message
-    or final function result, the Runner continues. This policy excludes error-handler
-    outputs, Realtime and internal provider steps.
+    The Runner calls `final_output_policy(context, proposal)` once per proposed
+    final output. The value is text (including empty text), a parsed structured
+    answer or a final function result selected by `tool_use_behavior`. Ordinary
+    tool turns, handoffs and pending approvals do not invoke the policy.
+    Error-handler outputs, Realtime and internal provider steps are also excluded.
+
+    For a text answer, require a nonempty reply:
+
+    ```python
+    from agents import AgentHooks
+
+    def require_answer(context, proposal):
+        return "finish" if proposal.output.strip() else "continue"
+
+    hooks = AgentHooks(final_output_policy=require_answer)
+    ```
 
     Return `"finish"` to use normal finalization, the default without a policy. Return
     `"continue"` for another turn with this agent, subject to `max_turns`. To guide that
@@ -153,11 +164,11 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     Policy errors propagate. Invalid decisions raise `UserError`.
     """
 
-    def __init__(self, *, step_policy: _StepPolicy[TContext] | None = None) -> None:
-        if step_policy is not None:
-            if not callable(step_policy):
-                raise TypeError("Agent step_policy must be callable or None")
-            self.step_policy = step_policy
+    def __init__(self, *, final_output_policy: _FinalOutputPolicy[TContext] | None = None) -> None:
+        if final_output_policy is not None:
+            if not callable(final_output_policy):
+                raise TypeError("Agent final_output_policy must be callable or None")
+            self.final_output_policy = final_output_policy
 
     async def on_start(self, context: AgentHookContext[TContext], agent: TAgent) -> None:
         """Called before the agent is invoked. Called each time the running agent is changed to this

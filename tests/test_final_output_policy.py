@@ -14,12 +14,12 @@ from agents import (
     ModelBehaviorError,
     ModelRefusalError,
     OutputGuardrailTripwireTriggered,
+    ProposedFinalOutput,
     RunConfig,
     RunContextWrapper,
     RunHooks,
     Runner,
     RunState,
-    SettledStep,
     SQLiteSession,
     UserError,
 )
@@ -72,7 +72,7 @@ async def test_require_two_dependent_specialists(streamed):
         return ctx.context["area"]
 
     async def require_area(
-        ctx: RunContextWrapper[dict[str, str]], step: SettledStep[dict[str, str]]
+        ctx: RunContextWrapper[dict[str, str]], step: ProposedFinalOutput[dict[str, str]]
     ) -> Literal["continue", "finish"]:
         assert step.agent is agent
         decisions.append((step.turn, step.kind, step.output))
@@ -95,7 +95,7 @@ async def test_require_two_dependent_specialists(streamed):
         tools=[measure, calculate],
         instructions=lambda ctx, agent: ctx.context.get("next", "Find the area"),
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=require_area),
+        hooks=AgentHooks(final_output_policy=require_area),
     )
     hooks = EndHooks()
     session = SQLiteSession("square")
@@ -162,7 +162,7 @@ async def test_approval_resume_decides_once_with_ordered_siblings(streamed):
         model=model,
         tools=[gated, ready],
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     hooks = EndHooks()
     paused = await run(streamed, agent, hooks=hooks)
@@ -203,7 +203,7 @@ async def test_parsed_candidates_still_require_output_guardrails(streamed):
         name="count",
         model=model,
         output_type=Answer,
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
         output_guardrails=[block],
     )
     with pytest.raises(OutputGuardrailTripwireTriggered):
@@ -254,7 +254,7 @@ async def test_blocked_continue_never_reaches_next_turn_or_session(streamed, kin
         tools=[note],
         tool_use_behavior="stop_on_first_tool",
         output_type=Answer if kind == "structured" else None,
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     hooks = EndHooks()
     session = SQLiteSession("blocked")
@@ -317,7 +317,7 @@ async def test_handoff_and_nonterminal_tools_precede_candidate_policy(streamed):
             [[get_function_tool_call("lookup", "{}", "b")], [get_text_message("done")]]
         ),
         tools=[lookup],
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     source = Agent(
         name="source",
@@ -327,7 +327,7 @@ async def test_handoff_and_nonterminal_tools_precede_candidate_policy(streamed):
         tools=[lookup],
         handoffs=[target],
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     result = await run(streamed, source)
     assert result.last_agent is target
@@ -354,7 +354,7 @@ async def test_empty_text_can_continue_only_within_turn_limit(streamed):
                 [empty],
             ]
         ),
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     hooks = EndHooks()
     with pytest.raises(MaxTurnsExceeded):
@@ -370,10 +370,12 @@ async def test_invalid_candidate_or_decision_cannot_finish(streamed):
         return None
 
     model = ScriptedModel([[get_text_message("invalid")], [get_text_message("draft")]])
-    agent = Agent(name="a", model=model, output_type=Answer, hooks=AgentHooks(step_policy=invalid))
+    agent = Agent(
+        name="a", model=model, output_type=Answer, hooks=AgentHooks(final_output_policy=invalid)
+    )
     with pytest.raises(ModelBehaviorError):
         await run(streamed, agent, hooks=hooks)
-    with pytest.raises(UserError, match="step_policy"):
+    with pytest.raises(UserError, match="final_output_policy"):
         await run(streamed, agent.clone(output_type=None), hooks=hooks)
     assert hooks.outputs == []
 
@@ -395,7 +397,7 @@ async def test_cancel_discards_late_finish_and_joins_policy(streamed):
     agent = Agent(
         name="a",
         model=ScriptedModel([[get_text_message("draft")]]),
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     if streamed:
         result = Runner.run_streamed(agent, "start", hooks=hooks)
@@ -436,7 +438,7 @@ async def test_policy_failure_after_approval_preserves_tool_effect(streamed, err
         tools=[record],
         model=ScriptedModel([[get_function_tool_call("record", "{}", "r")]]),
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=fail),
+        hooks=AgentHooks(final_output_policy=fail),
     )
     paused = await run(streamed, agent)
     state = paused.to_state()
@@ -460,7 +462,7 @@ async def test_empty_refusal_is_never_a_text_candidate(streamed):
     agent = Agent(
         name="worker",
         model=ScriptedModel([[get_refusal_message("")]]),
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
     )
     with pytest.raises(ModelRefusalError):
         await run(streamed, agent)
@@ -488,7 +490,7 @@ async def test_policy_local_cancellation_keeps_completed_tool_in_session(streame
         tools=[record],
         model=ScriptedModel([[get_function_tool_call("record", "{}", "r")]]),
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=cancel),
+        hooks=AgentHooks(final_output_policy=cancel),
     )
     session = SQLiteSession("effects")
     try:
@@ -531,7 +533,7 @@ async def test_redacted_tool_candidate_continues_after_approval(streamed):
         tools=[lookup],
         model=model,
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
         output_guardrails=[check],
     )
     config = RunConfig(redact_text=lambda text: text.replace(secret, "[hidden]"))
@@ -567,7 +569,9 @@ async def test_protected_continuation_redacts_guardrail_error(streamed):
         raise UserError(secret) from ValueError(secret)
 
     model = ScriptedModel([[get_text_message("draft")]])
-    agent = Agent(name="worker", model=model, hooks=AgentHooks(step_policy=lambda *_: "continue"))
+    agent = Agent(
+        name="worker", model=model, hooks=AgentHooks(final_output_policy=lambda *_: "continue")
+    )
     config = RunConfig(
         redact_text=lambda text: text.replace(secret, "[hidden]"), output_guardrails=[fail]
     )
@@ -606,7 +610,7 @@ async def test_failed_policy_withholds_guarded_tool_output_but_records_effect(
         tools=[record],
         model=model,
         tool_use_behavior="stop_on_first_tool",
-        hooks=AgentHooks(step_policy=fail),
+        hooks=AgentHooks(final_output_policy=fail),
         output_guardrails=[check],
     )
     hooks = EndHooks()
@@ -651,7 +655,7 @@ async def test_omitted_refusal_reply_is_distinct_from_continued_answer(streamed)
         return "continue"
 
     model = ScriptedModel([[get_text_message("half")], [get_refusal_message("")]])
-    agent = Agent(name="worker", model=model, hooks=AgentHooks(step_policy=decide))
+    agent = Agent(name="worker", model=model, hooks=AgentHooks(final_output_policy=decide))
     with pytest.raises(UserError, match="redact_text"):
         await run(
             streamed,
@@ -696,7 +700,7 @@ async def test_continued_reply_is_clean_at_each_callback_boundary(streamed, stag
         name="worker",
         model=model,
         output_type=Reply,
-        hooks=AgentHooks(step_policy=decide),
+        hooks=AgentHooks(final_output_policy=decide),
         output_guardrails=[check],
     )
     with pytest.raises(UserError, match="redact_text"):

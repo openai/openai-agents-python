@@ -62,7 +62,7 @@ from .._tool_invocation import (
     tool_invocation_identity_and_scope,
     tool_output_identity,
 )
-from ..agent import Agent, SettledStep, ToolsToFinalOutputResult
+from ..agent import Agent, ProposedFinalOutput, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
     agent_tool_resume_checkpoint_owns_approval,
@@ -300,7 +300,7 @@ async def _maybe_finalize_from_tool_results(
         guarded_tool=_should_defer_interrupted_session_items(public_agent, run_config),
         items=(
             (*model_items, *(r.run_item for r in function_results if r.run_item is not None))
-            if public_agent.hooks is not None and public_agent.hooks.step_policy is not None
+            if public_agent.hooks is not None and public_agent.hooks.final_output_policy is not None
             else None
         ),
         hooks=hooks,
@@ -470,9 +470,9 @@ async def execute_final_output(
     on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Resolve model candidates before running terminal hooks. Handler outputs bypass policy."""
-    policy = public_agent.hooks.step_policy if public_agent.hooks is not None else None
+    policy = public_agent.hooks.final_output_policy if public_agent.hooks is not None else None
     if policy is not None and kind is not None:
-        step = SettledStep(
+        proposal = ProposedFinalOutput(
             agent=public_agent,
             turn=current_turn,
             kind=kind,
@@ -484,7 +484,7 @@ async def execute_final_output(
 
         # Isolate even synchronous cancellation from cancellation of the owning run.
         async def decide() -> Literal["continue", "finish"]:
-            value = policy(context_wrapper, step)
+            value = policy(context_wrapper, proposal)
             return await value if inspect.isawaitable(value) else value
 
         def on_policy_failure(error: BaseException) -> None:
@@ -502,7 +502,7 @@ async def execute_final_output(
                     final_output, original_input, pre_step_items, new_step_items
                 )
             if decision not in ("continue", "finish"):
-                raise UserError('Agent step_policy must return "continue" or "finish"')
+                raise UserError('Agent final_output_policy must return "continue" or "finish"')
         except (Exception, asyncio.CancelledError) as exc:
             if not guarded_tool:
                 raise
@@ -1327,7 +1327,8 @@ async def execute_tools_and_side_effects(
             )
             if not has_tool_activity_without_message:
                 has_policy = (
-                    public_agent.hooks is not None and public_agent.hooks.step_policy is not None
+                    public_agent.hooks is not None
+                    and public_agent.hooks.final_output_policy is not None
                 )
                 # The extraction helpers collapse both empty and missing content to None.
                 parts = message_items[-1].raw_item.content if has_policy and message_items else ()

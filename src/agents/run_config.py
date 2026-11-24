@@ -249,9 +249,7 @@ class ToolExecutionConfig:
     approval. Codex calls it from its native pre-tool event, before its own permission checks.
     Responses executes hosted tools such as web search inside the API, outside this callback.
 
-    Caution: If the hook relay fails to deliver a decision, Codex may execute the native tool
-    with its original arguments. This can happen if this callback raises and the relay cannot
-    report the error.
+    Codex blocks a native tool call if a synchronous pre-tool hook fails or times out.
 
     Raw provider stream events and provider-managed history may contain the original proposal.
     """
