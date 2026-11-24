@@ -3,7 +3,7 @@ from typing import Any, Generic, Literal, TypeAlias
 
 from typing_extensions import TypeVar
 
-from .agent import Agent, AgentBase, ProposedFinalOutput
+from .agent import Agent, AgentBase, ContinueWithFeedback, ProposedFinalOutput
 from .items import ModelResponse, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import NativeTool, Tool
@@ -124,7 +124,7 @@ class RunHooksBase(Generic[TContext, TAgent]):
 
 _FinalOutputPolicy: TypeAlias = Callable[
     [RunContextWrapper[TContext], ProposedFinalOutput[TContext]],
-    MaybeAwaitable[Literal["continue", "finish"]],
+    MaybeAwaitable[Literal["continue", "finish"] | ContinueWithFeedback],
 ]
 
 
@@ -147,10 +147,12 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     For a text answer, require a nonempty reply:
 
     ```python
-    from agents import AgentHooks
+    from agents import AgentHooks, ContinueWithFeedback
 
     def require_answer(context, proposal):
-        return "finish" if proposal.output.strip() else "continue"
+        if not proposal.output.strip():
+            return ContinueWithFeedback("Please include a written answer.")
+        return "finish"
 
     hooks = AgentHooks(final_output_policy=require_answer)
     ```
@@ -162,6 +164,15 @@ class AgentHooksBase(Generic[TContext, TAgent]):
     continuation. Allowed items remain provisional in session history and subsequent
     model input. These checks cannot retract earlier stream events or tool data.
     Policy errors propagate. Invalid decisions raise `UserError`.
+
+    Return `ContinueWithFeedback(message)` to continue with a nonblank, trusted
+    correction. The Runner adds it as a user message on the next model turn
+    only, including retries. Text redaction checks apply before and after the
+    input filter, which may edit or remove it. Initial input guardrails do not
+    run again. The Runner keeps the message out of SDK history and saved state.
+    Hooks, traces and providers may retain the request, and the model may echo
+    it. Use SDK-managed history without server conversation or response IDs.
+    Responses compaction requires explicit input mode.
     """
 
     def __init__(self, *, final_output_policy: _FinalOutputPolicy[TContext] | None = None) -> None:

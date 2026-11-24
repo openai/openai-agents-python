@@ -1144,6 +1144,7 @@ class AgentRunner:
                 raise
 
             try:
+                pending_feedback: str | None = None
                 while True:
                     validate_output_guardrails_with_server_managed_conversation(
                         current_agent,
@@ -1620,6 +1621,7 @@ class AgentRunner:
                                 if run_state is not None:
                                     run_state._terminal_unrecoverable = False
                                 if turn_result.next_step.continue_after_guardrails:
+                                    pending_feedback = turn_result.feedback
                                     run_state._current_step = NextStepRunAgain()
                                     continue
                                 if session is None:
@@ -1708,6 +1710,7 @@ class AgentRunner:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
                     current_turn += 1
+                    feedback, pending_feedback = pending_feedback, None
                     if max_turns is not None and current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
                             current_span,
@@ -1916,6 +1919,7 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 preserve_tool_task_cancellation(
                                     run_single_turn(
+                                        feedback=feedback,
                                         current_turn=current_turn,
                                         bindings=current_bindings,
                                         original_input=original_input,
@@ -2025,6 +2029,7 @@ class AgentRunner:
                                 turn_result = await model_task
                         else:
                             turn_result = await run_single_turn(
+                                feedback=feedback,
                                 current_turn=current_turn,
                                 bindings=current_bindings,
                                 original_input=original_input,
@@ -2361,6 +2366,7 @@ class AgentRunner:
                                 run_state._terminal_unrecoverable = False
 
                             if turn_result.next_step.continue_after_guardrails:
+                                pending_feedback = turn_result.feedback
                                 if run_state is not None:
                                     run_state._current_step = NextStepRunAgain()
                                 continue
