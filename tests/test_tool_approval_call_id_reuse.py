@@ -882,6 +882,28 @@ async def test_non_approval_completed_replay_does_not_execute_again(
 
 
 @pytest.mark.asyncio
+async def test_reordered_nested_arguments_replay_without_repeating_the_tool() -> None:
+    executed: list[dict[str, int]] = []
+
+    @function_tool(strict_mode=False)
+    async def record(value: dict[str, int]) -> str:
+        executed.append(value)
+        return "saved"
+
+    model = ScriptedModel(
+        steps=[
+            [get_function_tool_call("record", '{"value":{"b":2,"a":1}}', call_id="call_0")],
+            [get_function_tool_call("record", '{"value":{"a":1,"b":2}}', call_id="call_0")],
+            [get_text_message("done")],
+        ]
+    )
+    result = await Runner.run(Agent(name="agent", model=model, tools=[record]), "record")
+
+    assert result.final_output == "done"
+    assert executed == [{"a": 1, "b": 2}]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
 async def test_non_approval_changed_completed_call_id_fails_before_execution(
     mode: Literal["non_streamed", "streamed"],

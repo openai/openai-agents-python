@@ -106,7 +106,8 @@ def _normalize_arguments(value: Any) -> Any:
     if not isinstance(value, str):
         return _normalize_value(value)
     try:
-        parsed = json.loads(
+        # Decoded JSON already contains native values, and _fingerprint sorts object keys.
+        return json.loads(
             value,
             parse_constant=lambda constant: (_ for _ in ()).throw(
                 ValueError(f"Invalid JSON constant: {constant}")
@@ -114,7 +115,6 @@ def _normalize_arguments(value: Any) -> Any:
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         return value
-    return _normalize_value(parsed)
 
 
 def _unwrap_hosted_mcp_approval(raw_item: Any) -> Mapping[str, Any] | None:
