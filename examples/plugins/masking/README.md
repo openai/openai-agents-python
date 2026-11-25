@@ -1,5 +1,7 @@
 # Mask known values in SDK function tool results
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 Use `masking` to replace exact strings in a named tool's text result before the next model turn. Supply the policy from trusted application code. Add the plugin to each agent running the tool, including handoff targets.
 
 **Only rely on this filter for successful Python `str` results.** In the preview SDK, dictionaries and lists have been bypassing the hook. The next model turn has been receiving their contents even after conversion to text.

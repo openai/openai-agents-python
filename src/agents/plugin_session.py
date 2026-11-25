@@ -1,4 +1,4 @@
-"""Local commands for trusted application input."""
+"""Experimental local commands for trusted application input."""
 
 from __future__ import annotations
 

@@ -11,7 +11,11 @@ import examples.run_examples as run_examples
 
 def test_standalone_partner_verifier_is_outside_example_discovery() -> None:
     modules = {item.module for item in run_examples.discover_examples(["plugins/"])}
+    assert "examples.plugins.verify_durable" not in modules
     assert "examples.plugins.verify_partner_routes" not in modules
+    assert not any(name.startswith("examples.plugins.preview.") for name in modules)
+    assert not any(name.startswith("examples.plugins.contract.") for name in modules)
+    assert "examples.plugins.a2a.tests.test_durable" not in modules
     assert "examples.plugins.ticket.agents_ticket_desk.__main__" not in modules
     assert "examples.plugins.verify_routes" in modules
 

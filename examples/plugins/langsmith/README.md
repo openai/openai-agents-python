@@ -1,5 +1,7 @@
 # LangSmith outcome traces
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 One LangSmith trace per Runner submission on the starting agent. Status and duration only. No global trace processor or model and tool spans.
 
 ## Offline demo

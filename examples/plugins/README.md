@@ -1,15 +1,39 @@
 # Plugins for the Agents SDK
 
-Install the SDK from this branch in a fresh virtual environment. The packages below use the same `Plugin` type and the ordinary `Runner`. Each package is independently installable. An application chooses each plugin explicitly on each agent. Only install packages you trust. A plugin runs Python code with the permissions of the application.
+A plugin groups tools, instructions or callbacks under one name. An ordinary Python package can export it. Enable plugins on each agent that needs them and keep using `Runner`. For example, an app can combine a partner's [A2A client](a2a/README.md) with its own [permissions policy](permissions/README.md).
 
-For a first package, see [Write and install a plugin](AUTHORING.md). The guide includes an offline test, a hook reference, and an approval example.
+| What you need | Start with |
+| --- | --- |
+| One function and its approval rule | [A function tool](../../docs/tools.md) with `needs_approval` |
+| Tools offered by an existing MCP server | [An MCP server connection](../../docs/mcp.md) |
+| Another agent to take over the conversation | [A handoff](../../docs/handoffs.md) |
+| Tools and guidance that travel together, or a policy that applies across packages | [A named plugin](AUTHORING.md) |
+
+Only install packages you trust. They run with the application's Python permissions. The app owns credentials, grants, spending and storage. Each specialist opts in separately.
+
+## Install the preview
+
+Use Python 3.10 or later in a fresh environment. Get **one** trusted `0.25.0+plugins.preview.1` wheel from the maintainer. The Python wheel needs no Codex installation. The Linux x86-64 wheel also supports the opt-in Codex provider, with Python as the default. Both use the same plugin packages. This is an unpublished branch preview. Installing a stock SDK or running `pip install .` in the SDK checkout does not install this version.
+
+Maintainers can [build the preview wheels](preview/README.md). Run these commands from the checkout root in one shell.
+
+```sh
+workdir=$(mktemp -d)
+python -m venv "$workdir/venv"
+. "$workdir/venv/bin/activate"
+python -m pip install hatchling==1.33.0
+python examples/plugins/preview/build.py --out-dir "$workdir/wheels"
+python -m pip install "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.1-py3-none-any.whl
+```
+
+For a first package, see [Write and install a plugin](AUTHORING.md). To test your own installed wheel outside this checkout, copy the [partner test kit](contract/README.md).
 
 ## Start with A2A
 
 From the repository root, run the local specialist example with a scripted model and an Agent2Agent (A2A) service on loopback.
 
 ```sh
-python -m pip install '.[a2a]' './examples/plugins/a2a[example]'
+python -m pip install './examples/plugins/a2a[example]'
 python -m agents_specialist.example
 ```
 
@@ -17,7 +41,7 @@ The first approved call returns `pending`. A second approved call reads the task
 
 | Package | Public entry point | What the example exercises |
 | --- | --- | --- |
-| [A2A](a2a/README.md) | `agents_specialist.specialist` | One owner, one question, an approved send and a separate task lookup |
+| [A2A](a2a/README.md) | `agents_specialist.specialist` | Approved delegation, a separate task lookup and optional recovery after a lost reply |
 | [LangSmith](langsmith/README.md) | `agents_langsmith.langsmith` | One metadata-only trace per submission, including errors and pauses |
 | [Postman](postman/README.md) | `agents_postman.postman` | An allowlist of collection requests and bounded HTTP status checks |
 | [Browser automation](browser/README.md) | `agents_browser.browser` | Named actions and an optional offline Playwright adapter |
@@ -35,7 +59,7 @@ These are reference implementations. The application supplies credentials, desti
 
 ## Write a plugin
 
-A single named bundle can contribute a tool and instructions. There is no setup subclass or mandatory registration server. This Python example uses a scripted model and needs no API key.
+A single named bundle can contribute a tool and its instructions. There is no setup subclass or mandatory registration server. This Python example uses a scripted model and needs no API key.
 
 ```python
 import asyncio
@@ -52,7 +76,11 @@ def opening_hours() -> str:
     return "Weekdays, 9 to 5"
 
 
-hours = Plugin(name="office-hours", tools=[opening_hours])
+hours = Plugin(
+    name="office-hours",
+    tools=[opening_hours],
+    instructions="Use opening_hours for questions about desk hours.",
+)
 
 
 async def main() -> None:
@@ -100,24 +128,19 @@ finally:
     await provider.aclose()
 ```
 
-Plain released v0 wheels lack the preview plugin API. Use a plugin-enabled SDK for these examples. Native Codex also needs a matching binding. The verified opt-in route uses a plugin-enabled alpha.2 Python SDK with its original native binding. The ordinary Python path works without that binding. The branch's A2A client is an optional SDK extension. A compatible application-supplied client also works with the specialist factory.
+The A2A example can use the SDK's optional client or a partner's own compatible implementation. The Codex provider runs SDK function tools through the same approval path. Native and hosted tools have separate controls.
 
-## Check the first five together
+## Test the installed packages
 
-Install the five packages alongside a plugin-enabled SDK. From the repository root, in the selected SDK environment
-
-```sh
-python -m pip install ./examples/plugins/a2a ./examples/plugins/langsmith ./examples/plugins/postman ./examples/plugins/browser ./examples/plugins/permissions
-python -I examples/plugins/verify_routes.py
-```
-
-In a separate environment with a compatible opt-in Codex build and the same packages
+From the SDK root, use the same shell and wheel as in [Install the preview](#install-the-preview). Each command creates a temporary environment, builds and installs all eight example packages, and tests them against local fixtures. No model key, vendor account or paid inference is needed. Installing dependencies may require a package index.
 
 ```sh
-python -I examples/plugins/verify_routes.py --codex
+bash examples/plugins/check_installed.sh "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.1-py3-none-any.whl
 ```
 
-The trial drives the real Runner against a local Responses server and checks the effects of each tool. It uses local substitutes for the vendor clients. Individual package examples exercise the optional adapters. No live vendor accounts or remote model required.
+For the combined Linux wheel, pass its path and add `--codex`. This runs the same checks in Python and then in Codex. The local model server verifies which provider made the request. A missing binding fails the Codex check.
+
+The [A2A recovery check](verify_durable.py) drops a reply after the receiver accepts the question. A new agent restores an approved lookup and retrieves the verdict from the original task. If the application revokes access before restore, there is no lookup. The [A2A package test](a2a/tests/test_durable.py) separately checks a real process exit and a dropped loopback connection.
 
 ## Resume a reviewed call
 

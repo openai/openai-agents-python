@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-masking"
-version = "0.1.0"
+version = "0.1.1"
 description = "Literal masking for SDK function tool text results"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["openai-agents"]
+dependencies = ["openai-agents==0.25.0+plugins.preview.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["agents_masking"]

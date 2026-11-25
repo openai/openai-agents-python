@@ -710,6 +710,10 @@ class _FailureHandlingFunctionToolInvoker:
         prepare = getattr(self._invoke_tool_impl, "__agents_prepare_arguments__", None)
         return prepare(input, tool_name) if prepare is not None else None
 
+    def can_inspect_arguments(self) -> bool:
+        model = getattr(self._invoke_tool_impl, "__agents_params_model__", None)
+        return model is not None and can_prepare_without_user_code(model)
+
     async def __call__(self, ctx: ToolContext[Any], input: str) -> Any:
         try:
             return await self._invoke_tool_impl(ctx, input)
@@ -2959,6 +2963,7 @@ def function_tool(
                 )
 
         cast(Any, _on_invoke_tool_impl).__agents_prepare_arguments__ = _prepare_for_approval
+        cast(Any, _on_invoke_tool_impl).__agents_params_model__ = schema.params_pydantic_model
         setattr(
             _on_invoke_tool_impl,
             _FUNCTION_TOOL_WRAPPED_CALLABLE_MARKER,

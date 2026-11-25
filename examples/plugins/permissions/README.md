@@ -1,5 +1,7 @@
 # Permissions for SDK function tools
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 An application policy for every SDK function on one agent, including tools from other plugins. By default, refusal. The app has been looking up grants for the signed-in user and sharing only the decision with `permissions()`.
 
 ## Offline example
@@ -9,7 +11,7 @@ Requirements — Python 3.10 or later and a local `openai-agents` build with `ag
 Installation and execution from this directory, in the SDK's Python environment
 
 ```sh
-python -m pip install --no-deps .
+python -m pip install .
 python -m agents_permissions.example
 ```
 

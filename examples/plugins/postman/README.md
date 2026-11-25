@@ -1,5 +1,7 @@
 # Status checks from a Postman collection
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 Two agent tools for a local [Postman Collection v2.1](https://schema.postman.com/collection/json/v2.1.0/draft-07/docs/index.html) export.
 
 | Tool | Model input | Result |
@@ -12,7 +14,7 @@ Two agent tools for a local [Postman Collection v2.1](https://schema.postman.com
 Prerequisites — Python 3.10 or later, an Agents SDK build with `agents.plugins`, and `httpx2>=2.12.0`. From this directory, in the same environment as the SDK
 
 ```sh
-python -m pip install --no-deps .
+python -m pip install .
 python -m agents_postman
 ```
 

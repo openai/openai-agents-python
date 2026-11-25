@@ -1,8 +1,9 @@
 import asyncio
-from typing import Any
+from datetime import date
+from typing import Annotated, Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 
 from agents import Agent, RunConfig, RunHooks, Runner, ToolExecutionConfig, function_tool
 from agents.exceptions import UserError
@@ -15,6 +16,59 @@ from .mcp.helpers import FakeMCPServer
 
 def scripted() -> ScriptedModel:
     return ScriptedModel([[function_call("action", {}, call_id="a")], [assistant_message("done")]])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["run", "stream"])
+async def test_date_tool_with_global_policy_fails_before_model_request(stream: bool) -> None:
+    effects: list[date] = []
+
+    @function_tool
+    def book(day: date) -> str:
+        effects.append(day)
+        return "booked"
+
+    model = ScriptedModel(
+        [[function_call("book", {"day": "2026-05-01"}, call_id="a")], [assistant_message("ok")]]
+    )
+    gate = Plugin(name="gate", hooks=PluginHooks(check_tool=lambda _: RequireApproval()))
+    agent = Agent("calendar", model=model, tools=[book], plugins=[gate])
+    with pytest.raises(UserError, match="gate.*book.*JSON"):
+        if stream:
+            async for _ in Runner.run_streamed(agent, "book").stream_events():
+                pass
+        else:
+            await Runner.run(agent, "book")
+    assert not model.calls and not effects
+
+    result = await Runner.run(agent.clone(plugins=[]), "book")
+    assert result.final_output == "ok" and effects == [date(2026, 5, 1)]
+
+
+@pytest.mark.asyncio
+async def test_policy_preflight_skips_withheld_tools_and_never_runs_validators() -> None:
+    effects: list[str] = []
+
+    def validate(value: str) -> str:
+        effects.append(value)
+        return value
+
+    @function_tool
+    def post(value: Annotated[str, BeforeValidator(validate)]) -> str:
+        return value
+
+    async def withhold(_context: Any, _declaration: Any) -> None:
+        return None
+
+    model = ScriptedModel([[assistant_message("ok")]])
+    gate = Plugin(name="gate", tools=[post], hooks=PluginHooks(check_own_tool=lambda _: None))
+    agent = Agent("app", model=model, plugins=[gate])
+    config = RunConfig(tool_execution=ToolExecutionConfig(prepare_tool_declaration=withhold))
+    assert (await Runner.run(agent, "hi", run_config=config)).final_output == "ok"
+    assert not model.calls[0].tools
+    with pytest.raises(UserError, match="gate.*post.*JSON"):
+        await Runner.run(agent, "hi")
+    assert len(model.calls) == 1 and not effects
 
 
 @pytest.mark.asyncio

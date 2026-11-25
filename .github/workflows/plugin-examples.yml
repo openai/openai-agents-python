@@ -1,0 +1,79 @@
+name: Plugin preview
+
+on:
+  push:
+    branches: [feat/plugins]
+  pull_request:
+    paths:
+      - "src/agents/**"
+      - "examples/plugins/**"
+      - "pyproject.toml"
+      - ".github/workflows/plugin-examples.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      native: ${{ steps.artifact.outputs.available }}
+    steps:
+      - name: Check availability of the matching base build
+        id: artifact
+        if: github.repository == 'openai/openai-agents-python'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(curl -sS -o "$RUNNER_TEMP/artifact.json" -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/14963418367")
+          case "$status" in
+            200) available=$(jq '.expired == false' "$RUNNER_TEMP/artifact.json") ;;
+            404) available=false ;;
+            *) echo "Artifact lookup failed with HTTP $status" >&2; exit 1 ;;
+          esac
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+          if [[ $available != true ]]; then
+            echo "::warning::Skipping Codex. The matching base artifact is unavailable. Follow examples/plugins/preview/README.md to test with an archived copy."
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - name: Test the Python wheels in a clean environment
+        run: |
+          python -m pip install hatchling==1.33.0
+          python examples/plugins/preview/build.py --out-dir "$RUNNER_TEMP/preview"
+          bash examples/plugins/check_installed.sh "$RUNNER_TEMP/preview/"*.whl
+
+  codex:
+    needs: python
+    if: needs.python.outputs.native == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45484940731
+          name: codex-wheel-manylinux_2_28_x86_64
+          path: ${{ runner.temp }}/base
+      - name: Verify the original binding and exercise both providers
+        run: |
+          python -m pip install hatchling==1.33.0
+          python examples/plugins/preview/build.py --out-dir "$RUNNER_TEMP/pure"
+          python examples/plugins/preview/build.py --out-dir "$RUNNER_TEMP/native" --codex-wheel "$RUNNER_TEMP/base/"*.whl
+          python examples/plugins/preview/verify_wheels.py "$RUNNER_TEMP/pure/"*.whl "$RUNNER_TEMP/native/"*.whl "$RUNNER_TEMP/base/"*.whl
+          bash examples/plugins/check_installed.sh "$RUNNER_TEMP/native/"*.whl --codex

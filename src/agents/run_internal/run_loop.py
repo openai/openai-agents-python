@@ -2650,6 +2650,10 @@ async def run_single_turn_streamed(
     all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
         all_tools, bindings, context_wrapper, run_config
     )
+    if public_agent.plugins:
+        from .plugin_tools import validate_policy_tools
+
+        validate_policy_tools(public_agent, all_tools)
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [
@@ -3112,6 +3116,10 @@ async def run_single_turn(
     all_tools, model_tools, prepared_tools, omitted = await prepare_declarations(
         all_tools, bindings, context_wrapper, run_config
     )
+    if public_agent.plugins:
+        from .plugin_tools import validate_policy_tools
+
+        validate_policy_tools(public_agent, all_tools)
     if agent_span is not None:
         agent_span.span_data.handoffs = [handoff.agent_name for handoff in handoffs]
         agent_span.span_data.tools = [

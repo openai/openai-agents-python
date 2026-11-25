@@ -14,7 +14,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .._redaction import redact_payload, require_clean
-from .._tool_identity import get_function_tool_lookup_key_for_tool, get_tool_call_namespace
+from .._tool_identity import (
+    get_function_tool_lookup_key_for_tool,
+    get_function_tool_qualified_name,
+    get_tool_call_namespace,
+)
 from ..exceptions import UserError
 from ..plugins import Deny, ReplaceArguments, RequireApproval, ToolCall, ToolResult
 from ..tool import FunctionTool, _FailureHandlingFunctionToolInvoker
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
     from ..plugins import Plugin
     from ..run_config import RunConfig, ToolCallHookContext, ToolExecutionConfig
     from ..run_context import RunContextWrapper
+    from ..tool import Tool
     from ..tool_context import ToolContext
     from .agent_bindings import AgentBindings
     from .run_steps import ProcessedResponse
@@ -129,8 +134,36 @@ def _checks(
             yield plugin.name, hooks.check_own_tool
 
 
-def has_editors(agent: Agent[Any]) -> bool:
-    return any(p.hooks is not None and p.hooks.prepare_tool is not None for p in agent.plugins)
+def _editor(agent: Agent[Any]) -> str | None:
+    return next(
+        (p.name for p in agent.plugins if p.hooks is not None and p.hooks.prepare_tool is not None),
+        None,
+    )
+
+
+def validate_policy_tools(agent: Agent[Any], tools: Sequence[Tool]) -> None:
+    """Check admitted tools before sampling. The actual arguments still need a decision."""
+    editor = _editor(agent)
+    for tool in tools:
+        if not isinstance(tool, FunctionTool):
+            continue
+        check = next(_checks(agent.plugins, tool), None)
+        policy = check[0] if check is not None else editor
+        if policy is None:
+            continue
+        invoker = tool.on_invoke_tool
+        if (
+            isinstance(invoker, _FailureHandlingFunctionToolInvoker)
+            and invoker.can_inspect_arguments()
+        ):
+            continue
+        name = get_function_tool_qualified_name(tool)
+        require_clean([policy, name])
+        raise UserError(
+            f"Plugin {policy!r} cannot inspect the arguments of tool {name!r}. "
+            "Use a decorated function with plain JSON parameters. "
+            "For example, accept a date as a string and parse it inside the tool."
+        )
 
 
 def prepare_settings(
@@ -138,7 +171,7 @@ def prepare_settings(
 ) -> ToolExecutionConfig | None:
     from ..run_config import ToolExecutionConfig
 
-    editors = has_editors(agent)
+    editors = _editor(agent) is not None
     previous = settings.prepare_tool_input if settings else None
     if editors or previous is not None:
         for run in processed.functions:
@@ -227,7 +260,7 @@ async def decide(
         raise UserError("The function call has no plugin binding.")
 
     checks = tuple(_checks(record.plugins, tool))
-    controlled = bool(checks) or has_editors(agent)
+    controlled = bool(checks) or _editor(agent) is not None
     enabled = tool.is_enabled
 
     def verify() -> None:

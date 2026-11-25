@@ -1,5 +1,7 @@
 # Ticket Desk
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 A support-ticket plugin for the OpenAI Agents SDK preview. One tool, `close_ticket(ticket_id: str)`, with per-call approval and an application-supplied client.
 
 ## Try a synthetic ticket offline
@@ -10,7 +12,7 @@ In that environment, from this package directory
 
 ```sh
 python -c "from agents.plugins import Plugin"
-python -m pip install --no-deps .
+python -m pip install .
 python -I -m agents_ticket_desk
 ```
 

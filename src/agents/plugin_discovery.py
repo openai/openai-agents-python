@@ -1,4 +1,4 @@
-"""Optional discovery for trusted installed Python plugins. No implicit activation."""
+"""Experimental discovery for trusted installed Python plugins. No implicit activation."""
 
 from __future__ import annotations
 

@@ -1,5 +1,7 @@
 # App-approved browser reads
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 One SDK function, `browser_read(action)`, for a set of browser tasks chosen by the app. In the [offline example](src/agents_browser/example.py), a scripted model has been choosing `hours`. Chromium has been opening a collapsed FAQ panel and reading the newly visible paragraph. No API keys, model requests or website access.
 
 ## Local run

@@ -1,5 +1,7 @@
 # Knowledge search
 
+Use the [v0 plugin preview wheel](../README.md#install-the-preview) in the same environment as this package.
+
 Give an agent read access to documents available to the signed-in user. Supply a search client through the local run context. Keep document access checks in your service and apply them to every request, including requests with search operators. Treat the query as untrusted.
 
 ## Try it offline
@@ -8,7 +10,7 @@ Use Python 3.10 or later and an environment with a plugin-enabled `openai-agents
 
 ```sh
 python -c "from agents.plugins import Plugin"
-python -m pip install --no-deps .
+python -m pip install .
 python -m unittest discover -s tests
 ```
 

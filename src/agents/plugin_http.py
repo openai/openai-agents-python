@@ -1,4 +1,4 @@
-"""Per-attempt callbacks for an application-approved Responses HTTP client."""
+"""Experimental per-attempt callbacks for an application-approved Responses HTTP client."""
 
 from __future__ import annotations
 

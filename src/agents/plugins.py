@@ -1,4 +1,8 @@
-"""Named contributions to an Agent. Loading a package alone never activates it."""
+"""Named bundles of tools, instructions and hooks for an agent.
+
+Import Plugin and PluginHooks from this module. Select plugins explicitly with
+`Agent(plugins=[...])` and use the ordinary Runner. Only install plugins you trust.
+"""
 
 from __future__ import annotations
 
@@ -102,16 +106,38 @@ _Handler: TypeAlias = Callable[[_E], _R | Awaitable[_R]]
 
 @dataclass(frozen=True, kw_only=True)
 class PluginHooks:
+    """Optional callbacks for a plugin. Each callback can be sync or async.
+
+    The v0 preview supports four hooks.
+
+    * `check_own_tool` checks this plugin's function tools.
+    * `check_tool` checks function tools across the agent, including other plugins.
+    * `filter_result` can replace successful function tool text before output guardrails.
+    * `on_run_end` observes the starting agent's final status for one submission.
+
+    A check returns `Deny`, `RequireApproval` or `None`. Execution requires all
+    applicable checks to allow the call. Checks can run again before execution.
+    Checked tools must use decorated functions with arguments the SDK can validate
+    as unchanged JSON without running application validators.
+
+    All other hooks are experimental and opt-in.
+    """
+
     filter_input: _Handler[ModelInputData, ModelInputData] | None = None
-    """Prune user messages or replace instructions before the app's model input filter."""
+    """Experimental. Prune user messages or replace instructions before the app's input filter."""
 
     prepare_tool: _Handler[ToolCall, ReplaceArguments | None] | None = None
+    """Experimental. Edit arguments before checks. The same argument restrictions apply."""
     check_tool: _Handler[ToolCall, Deny | RequireApproval | None] | None = None
     filter_result: _Handler[ToolResult, str | None] | None = None
     on_tool_progress: _Handler[ToolProgress, None] | None = None
+    """Experimental. Observe tool progress messages."""
     on_preview: _Handler[ApprovedText, None] | None = None
+    """Experimental. Observe approved text previews."""
     on_stream_completed: _Handler[RunCompleted, None] | None = None
+    """Experimental. Observe stream completion."""
     on_event: _Handler[AgentEvent, None] | None = None
+    """Experimental. Observe agent, model, tool and handoff events."""
     check_own_tool: _Handler[ToolCall, Deny | RequireApproval | None] | None = None
     """Check only this plugin's function tools. Agent-wide checks still apply."""
     on_run_end: _Handler[RunOutcome, None] | None = None
@@ -120,7 +146,15 @@ class PluginHooks:
 
 @dataclass(frozen=True, kw_only=True)
 class Plugin(Generic[TContext]):
-    """Reusable tools, guidance, hooks and optional local commands for one agent."""
+    """A named bundle selected on an agent with `Agent(plugins=[plugin])`.
+
+    Use `name` and optionally `tools`, `instructions` and `hooks` for the v0 preview.
+    Tools are SDK function tools. The Runner appends plugin instructions to the
+    agent's instructions in selection order. See `PluginHooks` for supported callbacks.
+
+    Local `commands`, `http` callbacks and installed-package discovery are experimental.
+    Importing or discovering a plugin never selects it.
+    """
 
     name: str
     tools: Sequence[FunctionTool] = ()
@@ -131,7 +165,9 @@ class Plugin(Generic[TContext]):
     commands: Mapping[str, Callable[[TContext, str], str | Awaitable[str]]] = field(
         default_factory=dict
     )
+    """Experimental. Local commands for trusted application input."""
     http: HTTPHooks | None = None
+    """Experimental. Callbacks for an application-approved Responses HTTP client."""
 
     def __post_init__(self) -> None:
         if not all(

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -15,15 +16,7 @@ from . import specialist
 QUESTION = "Check readiness of release R42."
 
 
-def release_agent(url: str, user: str, grants: dict[tuple[str, str, str], int]) -> Agent[None]:
-    scope = (user, url, QUESTION)
-    selected_revision = grants[scope]
-
-    def token() -> str:
-        if grants.get(scope) != selected_revision:
-            raise PermissionError("Grant changed.")
-        return "synthetic-token"
-
+def local_client(url: str, token: Callable[[], str]) -> A2AClient:
     card = {
         "name": "Local release reviewer",
         "description": "Readiness checks",
@@ -36,7 +29,19 @@ def release_agent(url: str, user: str, grants: dict[tuple[str, str, str], int]) 
             {"url": url, "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
         ],
     }
-    client = A2AClient(rpc_url=url, card_json=json.dumps(card).encode(), rpc_token_provider=token)
+    return A2AClient(rpc_url=url, card_json=json.dumps(card).encode(), rpc_token_provider=token)
+
+
+def release_agent(url: str, user: str, grants: dict[tuple[str, str, str], int]) -> Agent[None]:
+    scope = (user, url, QUESTION)
+    selected_revision = grants[scope]
+
+    def token() -> str:
+        if grants.get(scope) != selected_revision:
+            raise PermissionError("Grant changed.")
+        return "synthetic-token"
+
+    client = local_client(url, token)
     check = specialist(
         client, question=QUESTION, artifact_id="readiness", verdicts=("ready", "blocked")
     )

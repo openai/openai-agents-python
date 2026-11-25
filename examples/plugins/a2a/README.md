@@ -1,18 +1,13 @@
-# Asking an Agent2Agent specialist for a verdict
+# Ask an Agent2Agent specialist for a verdict
 
-In this example, a release manager has been asking a specialist one question over Agent2Agent (A2A) 1.0. The app has been choosing the user, destination, question, and allowed replies. The manager has been requesting separate approval to submit the question and to read the result.
+Use `specialist` to send one app-selected question over Agent2Agent (A2A) 1.0. Approve the send and each status check separately. For recovery after a lost reply or restart, use `DurableCall` with a specialist that supports receipt lookup.
 
-## Local example
+## Try the local example
 
-**Prerequisites**
-
-- Python 3.10 or later in a virtual environment.
-- An SDK checkout with both `agents.plugins` and `agents.extensions.a2a.A2AClient`.
-
-Commands from the repository root
+[Install the pinned SDK preview](../README.md#install-the-preview) in a Python 3.10+ virtual environment. Then run these commands from the repository root.
 
 ```sh
-python -m pip install '.[a2a]' './examples/plugins/a2a[example]'
+python -m pip install './examples/plugins/a2a[example]'
 python -m agents_specialist.example
 ```
 
@@ -23,46 +18,73 @@ ask_specialist -> pending
 refresh_specialist -> ready
 ```
 
-The [example](src/agents_specialist/example.py) has been using the SDK client and a local JSON-RPC service with a simulated model, grant, and approvals. No API keys or inference charges.
+See the [loopback example](src/agents_specialist/example.py) for the SDK client, scripted model, and simulated approvals. No API key required.
 
-## Using your own specialist
-
-Factory for a release manager with an app-supplied client
+## Select the question and allowed replies
 
 ```python
 from agents import Agent
 from agents_specialist import specialist
 
 
-def release_manager(client):
+def release_manager(client, *, durable=None):
     check = specialist(
         client,
         question="Check readiness of release R42.",
         artifact_id="readiness",
         verdicts=("ready", "blocked"),
+        durable=durable,
     )
     return Agent(name="Release manager", plugins=[check])
 ```
 
-The app has been supplying the exact text for the peer, the expected artifact ID, and the permitted text values. No model arguments for either tool.
+Expect no model arguments for either tool and only a status or verdict in the output.
 
 | Condition | Tool result |
 | --- | --- |
 | Submitted or working task | `pending` |
-| Completed task with one matching artifact and one allowed text part | The matching verdict |
-| Other replies, including direct messages, failed tasks, and unexpected text | `unknown` |
-| Client error, repeated send, or refresh without a pending task ID | `unknown` |
+| Completed task with exactly one artifact, the expected ID, and one allowed text part | The matching verdict |
+| Other reply, error, repeated send, or no matching task | `unknown` |
 
-The plugin has been keeping task and context IDs in memory for approved `GetTask` reads. It has been returning only the verdict or status to the manager. No automatic polling, retry, or deployment authority.
+Without `durable`, use the same plugin instance to refresh a pending task. In this mode, expect no recovery after a lost first reply or a process restart. The only copy of the task and context IDs on the manager's side is in memory.
 
-## Application requirements
+## Recover after a lost reply or restart
 
-- One agent and plugin instance per authenticated user and question, on one event loop. No sharing of agents, approvals, or run state across users or grants.
-- An app-approved HTTPS endpoint and local Agent Card bytes. A trusted client with the [`Client` interface](src/agents_specialist/__init__.py) on SDK previews without the built-in adapter. The same URL, card, and response checks as `A2AClient`, including task and context ID checks on reads.
-- A real decision on each interruption, with the operation, trusted recipient label, and exact question visible to the user. No permanent approval or automatic approval for a live service.
-- A grant check at token issuance for every RPC, scoped to the user, peer, and operation. A fresh grant revision on any policy change, including reinstatement. Permission checks at the receiving service, including ownership of the task on reads.
-- Confirmation of the outcome from the receiving service before another send attempt.
+Use the factory above with a private SQLite file and a trusted receipt lookup. Choose an operation ID unique across all owners in that file. Keep the ID in trusted application storage, independent of model tool call IDs and saved approvals.
 
-## Uncertain delivery
+```python
+from pathlib import Path
 
-The plugin has been reserving its one send attempt before waiting for a reply. After a timeout or local cancellation, the specialist may have been working on the request. No remote cancellation, durable receipt, or recovery after a lost first reply or process restart.
+from agents_specialist import DurableCall
+
+
+def restore_manager(client, owner, operation_id, private_dir, lookup_receipt):
+    call = DurableCall(
+        owner=owner,
+        operation_id=operation_id,
+        db_path=Path(private_dir).resolve() / "specialist.db",
+        lookup_receipt=lookup_receipt,
+    )
+    return release_manager(client, durable=call)
+```
+
+1. On the specialist, commit the task and its immutable receipt together. Bind the authenticated owner, exact RPC URL, and incoming message ID to the question digest, task ID, and context ID. Compute the digest with `hashlib.sha256(question.encode()).hexdigest()`.
+2. Supply `async def lookup_receipt(owner, endpoint, message_id)`. Check current access and read the specialist's record over a trusted channel. Return `agents_specialist.Receipt(owner, endpoint, message_id, digest, task_id, context_id)` from that record, or `None` for a missing receipt. This lookup is application-specific. Even a successful send requires a matching receipt.
+3. Use `restore_manager` for the first send and after a restart. Preserve the same file, owner, operation ID, endpoint, and question. Request fresh approval for `refresh_specialist` to verify the receipt and call `GetTask`. A missing or mismatched receipt yields `unknown` without another send.
+
+Only the worker that commits a new reservation can send. The reservation contains the operation ID, owner, endpoint, question digest, and random message ID. It excludes the question text and credentials. Protect the file and its backups. Digests can reveal predictable questions.
+
+**An unknown outcome does not mean the send failed.** A crash between reservation and send can leave the question unsent. A crash after delivery can leave the specialist working. Never delete a reservation or choose a new ID to retry without checking with the specialist first. Losing the file or restoring an older copy can permit another send. There is no exactly-once delivery guarantee.
+
+Run the [recovery tests](tests/test_durable.py) from the repository root. In the restart test, the specialist commits the task and closes the connection. The sender exits with an `unknown` result. A new manager reads `ready` without a second `SendMessage`.
+
+```sh
+python -m unittest discover -s examples/plugins/a2a/tests -v
+```
+
+## Before connecting a live specialist
+
+- Create a separate client, plugin, and agent for each signed-in user and question. Before restoring a saved approval, check the owner, operation, destination, question, and current grant against trusted application records. Never reuse an approval for a different request.
+- Use an approved HTTPS URL without credentials and local Agent Card bytes. Supply `A2AClient` or a trusted [client](src/agents_specialist/__init__.py) with the same checks on the URL, card, and responses. Verify the task and context IDs on reads. Use a fixed `rpc_url` for durable calls.
+- Show the reviewer the operation, trusted recipient, and exact question. Ask for a new decision at each interruption.
+- Recheck the user's grant before issuing each RPC token and at each receipt lookup. Use a fresh revision after any grant change, including reinstatement. Enforce access and task ownership at the specialist.

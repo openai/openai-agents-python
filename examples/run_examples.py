@@ -50,7 +50,12 @@ COMMON_PATH_HINTS = (
 )
 
 DISCOVERY_EXCLUDE = {
-    # The partner verifier runs as a standalone script with separately installed wheels.
+    # These build and test entry points need separately installed wheels or CLI arguments.
+    "examples/plugins/a2a/tests/test_durable.py",
+    "examples/plugins/contract/test_ticket.py",
+    "examples/plugins/preview/build.py",
+    "examples/plugins/preview/verify_wheels.py",
+    "examples/plugins/verify_durable.py",
     "examples/plugins/verify_partner_routes.py",
     "examples/run_examples.py",
     "examples/sandbox/tutorials/data/dataroom/setup.py",
