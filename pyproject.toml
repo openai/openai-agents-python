@@ -109,7 +109,7 @@ dev = [
   "mkdocstrings[python]>=0.28.0",
   "mkdocs-static-i18n",
   "coverage>=7.6.12",
-  "playwright==1.63.0",
+  "playwright==1.65.2",
   "inline-snapshot>=0.20.7",
   "pynput",
   "types-pynput",
