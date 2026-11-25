@@ -99,7 +99,10 @@ def _has_output_payload(item: Any) -> bool:
 
 def _is_tracked_object(items: Sequence[Any], candidate: Any) -> bool:
     """Return True when the exact object instance is already tracked."""
-    return any(item is candidate for item in items)
+    for item in items:
+        if item is candidate:
+            return True
+    return False
 
 
 def _track_object_once(items: list[Any], candidate: Any) -> None:
@@ -399,7 +402,7 @@ class OpenAIServerConversationTracker:
         delivered_source_ids: set[int] = set()
         initial_batch = not self.sent_items
         delivered_by_content: set[str] = set()
-        for item in items:
+        for index, item in enumerate(items):
             if item is None:
                 continue
             source_item, input_id = self._delivery_source(item)
@@ -409,7 +412,8 @@ class OpenAIServerConversationTracker:
             delivered_source_ids.add(source_id)
             if initial_batch:
                 self.sent_items.append(source_item)
-            else:
+            elif index >= len(self.sent_items) or self.sent_items[index] is not source_item:
+                # Repeated delivery in the same order needs no history scan.
                 _track_object_once(self.sent_items, source_item)
             fp = _fingerprint_for_tracker(source_item)
             if fp:

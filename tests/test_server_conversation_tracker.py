@@ -1179,3 +1179,20 @@ def test_prepare_input_dedupes_same_delivered_tool_output_object() -> None:
         generated_items=cast(list[Any], generated_items),
     )
     assert all(not (isinstance(item, dict) and item.get("call_id") == "call_X") for item in second)
+
+
+def test_repeated_delivery_tracks_aligned_and_reordered_items_by_identity() -> None:
+    tracker = OpenAIServerConversationTracker(conversation_id="conv_test")
+    first: TResponseInputItem = {"role": "user", "content": "equal"}
+    second: TResponseInputItem = {"role": "user", "content": "equal"}
+    added: TResponseInputItem = {"role": "user", "content": "equal"}
+
+    tracker.mark_input_as_sent([first, second])
+    tracker.mark_input_as_sent([first, second])
+    tracker.mark_input_as_sent([added, second, first, second])
+    assert [id(item) for item in tracker.sent_items] == [id(first), id(second), id(added)]
+
+    tracker.rewind_input([first])
+    tracker.mark_input_as_sent([second, first])
+    assert [id(item) for item in tracker.sent_items] == [id(second), id(added), id(first)]
+    assert tracker.remaining_initial_input is None
