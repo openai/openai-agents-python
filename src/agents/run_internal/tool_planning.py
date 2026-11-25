@@ -1011,6 +1011,8 @@ async def _execute_tool_plan(
     list[RunItem],
 ]:
     """Execute tool runs captured in a ToolExecutionPlan."""
+    from .guardrails import input_guardrail_dispatch_is_preserved
+
     public_agent = bindings.public_agent
     isolate_function_tool_failures = len(plan.function_runs) > 1 or (
         parallel
@@ -1077,14 +1079,99 @@ async def _execute_tool_plan(
             if isinstance(error, asyncio.CancelledError):
                 _mark_tool_local_cancellation(error)
 
-        (
-            (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
-            computer_results,
-            custom_tool_results,
-            shell_results,
-            apply_patch_results,
-            local_shell_results,
-        ) = await gather_with_cancel(
+        preserve_dispatch = input_guardrail_dispatch_is_preserved()
+        native_categories: list[tuple[int, Awaitable[list[RunItem]]]] = []
+        if plan.computer_actions or preserve_dispatch:
+            native_categories.append(
+                (
+                    0,
+                    run_native_category(
+                        partial(
+                            execute_computer_actions,
+                            public_agent=public_agent,
+                            actions=plan.computer_actions,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            config=run_config,
+                            tool_output_committer=tool_output_committer,
+                            sibling_category_failure=native_category_failure,
+                        )
+                    ),
+                )
+            )
+        if plan.custom_tool_calls or preserve_dispatch:
+            native_categories.append(
+                (
+                    1,
+                    run_native_category(
+                        partial(
+                            execute_custom_tool_calls,
+                            public_agent=public_agent,
+                            calls=plan.custom_tool_calls,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            config=run_config,
+                            tool_output_committer=tool_output_committer,
+                            sibling_category_failure=native_category_failure,
+                        )
+                    ),
+                )
+            )
+        if plan.shell_calls or preserve_dispatch:
+            native_categories.append(
+                (
+                    2,
+                    run_native_category(
+                        partial(
+                            execute_shell_calls,
+                            public_agent=public_agent,
+                            calls=plan.shell_calls,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            config=run_config,
+                            tool_output_committer=tool_output_committer,
+                            sibling_category_failure=native_category_failure,
+                        )
+                    ),
+                )
+            )
+        if plan.apply_patch_calls or preserve_dispatch:
+            native_categories.append(
+                (
+                    3,
+                    run_native_category(
+                        partial(
+                            execute_apply_patch_calls,
+                            public_agent=public_agent,
+                            calls=plan.apply_patch_calls,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            config=run_config,
+                            tool_output_committer=tool_output_committer,
+                            sibling_category_failure=native_category_failure,
+                        )
+                    ),
+                )
+            )
+        if plan.local_shell_calls or preserve_dispatch:
+            native_categories.append(
+                (
+                    4,
+                    run_native_category(
+                        partial(
+                            execute_local_shell_calls,
+                            public_agent=public_agent,
+                            calls=plan.local_shell_calls,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            config=run_config,
+                            tool_output_committer=tool_output_committer,
+                            sibling_category_failure=native_category_failure,
+                        )
+                    ),
+                )
+            )
+        category_results = await gather_with_cancel(
             execute_function_tool_calls(
                 bindings=bindings,
                 tool_runs=plan.function_runs,
@@ -1098,71 +1185,26 @@ async def _execute_tool_plan(
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             ),
-            run_native_category(
-                partial(
-                    execute_computer_actions,
-                    public_agent=public_agent,
-                    actions=plan.computer_actions,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    tool_output_committer=tool_output_committer,
-                    sibling_category_failure=native_category_failure,
-                )
-            ),
-            run_native_category(
-                partial(
-                    execute_custom_tool_calls,
-                    public_agent=public_agent,
-                    calls=plan.custom_tool_calls,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    tool_output_committer=tool_output_committer,
-                    sibling_category_failure=native_category_failure,
-                )
-            ),
-            run_native_category(
-                partial(
-                    execute_shell_calls,
-                    public_agent=public_agent,
-                    calls=plan.shell_calls,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    tool_output_committer=tool_output_committer,
-                    sibling_category_failure=native_category_failure,
-                )
-            ),
-            run_native_category(
-                partial(
-                    execute_apply_patch_calls,
-                    public_agent=public_agent,
-                    calls=plan.apply_patch_calls,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    tool_output_committer=tool_output_committer,
-                    sibling_category_failure=native_category_failure,
-                )
-            ),
-            run_native_category(
-                partial(
-                    execute_local_shell_calls,
-                    public_agent=public_agent,
-                    calls=plan.local_shell_calls,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    config=run_config,
-                    tool_output_committer=tool_output_committer,
-                    sibling_category_failure=native_category_failure,
-                )
-            ),
+            *(coroutine for _, coroutine in native_categories),
             on_child_failure=on_category_failure,
             cancelled_children=cancelled_native_tasks,
             # Preserve both the finalization wait and its cancellation-cleanup window.
             cancelled_children_timeout=2 * tool_execution._FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
         )
+        function_results, tool_input_guardrail_results, tool_output_guardrail_results = cast(
+            tuple[list[Any], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]],
+            category_results[0],
+        )
+        native_results: list[list[RunItem]] = [[], [], [], [], []]
+        for (index, _), result in zip(native_categories, category_results[1:], strict=True):
+            native_results[index] = cast(list[RunItem], result)
+        (
+            computer_results,
+            custom_tool_results,
+            shell_results,
+            apply_patch_results,
+            local_shell_results,
+        ) = native_results
     else:
         (
             function_results,

@@ -418,3 +418,96 @@ async def test_invoke_function_tool_ignores_annotated_string_metadata_when_match
     assert captured_context is not None
     assert not isinstance(captured_context, ToolContext)
     assert captured_context.tool_input == {"city": "Tokyo"}
+
+
+@pytest.mark.asyncio
+async def test_runner_uses_replaced_invoker_context_contract() -> None:
+    from agents import RunConfig, Runner
+    from agents.decorators import tool
+    from agents.testing import ScriptedModel, assistant_message, function_call
+
+    seen: list[tuple[str, str]] = []
+
+    @tool
+    async def lookup(ctx: ToolContext[str]) -> str:
+        seen.append((ctx.tool_call_id, ctx.context))
+        return ctx.context
+
+    model = ScriptedModel(
+        [
+            [function_call("lookup", "{}", call_id="first")],
+            [assistant_message("done")],
+            [function_call("lookup", "{}", call_id="second")],
+            [assistant_message("done")],
+        ]
+    )
+    agent = Agent(name="agent", model=model, tools=[lookup])
+    config = RunConfig(tracing_disabled=True)
+    first = await Runner.run(agent, "start", context="first context", run_config=config)
+    assert first.final_output == "done"
+
+    async def replacement(ctx: RunContextWrapper[str], _arguments: str) -> str:
+        assert type(ctx) is RunContextWrapper
+        seen.append(("replacement", ctx.context))
+        return ctx.context
+
+    lookup.on_invoke_tool = replacement
+    second = await Runner.run(agent, "start", context="second context", run_config=config)
+    assert second.final_output == "done"
+    assert seen == [("first", "first context"), ("replacement", "second context")]
+    outputs = [
+        item for item in second.to_input_list() if item.get("type") == "function_call_output"
+    ]
+    assert outputs[0]["call_id"] == "second"
+    assert outputs[0]["output"] == "second context"
+    model.assert_complete()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", ["default", "signature", "annotations", "wrapped", "partial"])
+async def test_sdk_invoker_preserves_context_reflection_overrides(metadata: str) -> None:
+    import functools
+    import inspect
+
+    from agents.tool import with_function_tool_failure_error_handler
+
+    captured: list[RunContextWrapper[str]] = []
+
+    async def invoke(ctx: RunContextWrapper[str], _input: str) -> str:
+        captured.append(ctx)
+        return ctx.context
+
+    function_tool = FunctionTool(
+        name="lookup",
+        description="Look up context.",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=with_function_tool_failure_error_handler(invoke, lambda *_args: None),
+    )
+    invoker = cast(Any, function_tool.on_invoke_tool)
+    if metadata == "signature":
+        invoker.__signature__ = inspect.signature(invoke)
+    elif metadata == "annotations":
+        invoker.__annotations__ = {"ctx": RunContextWrapper[str]}
+    elif metadata == "wrapped":
+        invoker.__wrapped__ = invoke
+    elif metadata == "partial":
+        function_tool.on_invoke_tool = functools.partial(invoke)
+
+    context = ToolContext(
+        context="value",
+        tool_name="lookup",
+        tool_call_id="lookup-1",
+        tool_arguments="{}",
+        tool_input={"city": "Tokyo"},
+    )
+    assert (
+        await invoke_function_tool(function_tool=function_tool, context=context, arguments="{}")
+        == "value"
+    )
+    assert captured[0].context == "value"
+    assert captured[0].tool_input == {"city": "Tokyo"}
+    if metadata == "default":
+        assert captured[0] is context
+    else:
+        assert type(captured[0]) is RunContextWrapper
+        assert captured[0].usage is context.usage

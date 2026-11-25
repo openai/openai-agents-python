@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, AgentHooks, RunConfig, RunHooks, Runner, UserError
+from agents import Agent, AgentHooks, FunctionTool, RunConfig, RunHooks, Runner, UserError
 from agents.decorators import tool
 from agents.run_context import RunContextWrapper
 from agents.testing import ScriptedModel
@@ -675,3 +675,95 @@ async def test_handoff_target_is_registered_before_transition_awaits(
     assert effects == []
     assert target.tools == [privileged]
     await _run(target, _final_model(), "later", streamed)
+
+
+class _NoEqualityFunctionTool(FunctionTool):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("Tool configuration must compare identity, not equality.")
+
+    def __ne__(self, other: object) -> bool:
+        raise AssertionError("Tool configuration must compare identity, not equality.")
+
+
+def _no_equality_tool() -> FunctionTool:
+    async def invoke(context: RunContextWrapper[Any], arguments: str) -> str:
+        return "synthetic effect"
+
+    return _NoEqualityFunctionTool(
+        name="synthetic",
+        description="Synthetic tool for configuration ownership checks.",
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        on_invoke_tool=invoke,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("nonempty", [False, True])
+async def test_stable_overlapping_tools_do_not_call_custom_equality(
+    streamed: bool, nonempty: bool
+) -> None:
+    both_started = asyncio.Event()
+    started = 0
+    provided = [_no_equality_tool()] if nonempty else []
+    agent = Agent(name="shared", tools=provided)
+    original_tools = agent.tools
+
+    class Hooks(RunHooks):
+        async def on_agent_start(self, context, current_agent) -> None:
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+
+    first_model, second_model = _final_model(), _final_model()
+    await asyncio.wait_for(
+        asyncio.gather(
+            _run(agent, first_model, "first", streamed, Hooks()),
+            _run(agent, second_model, "second", streamed, Hooks()),
+        ),
+        10,
+    )
+    assert agent.tools is original_tools
+    for model in (first_model, second_model):
+        assert len(model.calls[0].tools) == len(provided)
+        assert all(
+            before is after for before, after in zip(model.calls[0].tools, provided, strict=True)
+        )
+        model.assert_complete()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("nonempty", [False, True])
+async def test_overlapping_tool_replacements_preserve_identity_conflicts(
+    streamed: bool, nonempty: bool
+) -> None:
+    first_started = asyncio.Event()
+    second_finished = asyncio.Event()
+    agent = Agent(name="shared", tools=[_no_equality_tool()] if nonempty else [])
+    first_model, second_model = _final_model(), _final_model()
+
+    class Hooks(RunHooks):
+        async def on_agent_start(self, context, current_agent) -> None:
+            if context.context == "first":
+                first_started.set()
+                await second_finished.wait()
+            elif nonempty:
+                current_agent.tools[:] = [_no_equality_tool()]
+            else:
+                current_agent.tools = []
+
+    first = asyncio.create_task(_run(agent, first_model, "first", streamed, Hooks()))
+    await asyncio.wait_for(first_started.wait(), 10)
+
+    async def second() -> None:
+        try:
+            await _run(agent, second_model, "second", streamed, Hooks())
+        finally:
+            second_finished.set()
+
+    outcomes = await asyncio.wait_for(asyncio.gather(first, second(), return_exceptions=True), 10)
+    assert all(isinstance(outcome, UserError) for outcome in outcomes)
+    assert not first_model.calls and not second_model.calls

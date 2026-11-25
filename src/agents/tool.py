@@ -2229,6 +2229,16 @@ def _get_function_tool_invoke_context(
     metadata such as agents or run config into incompatible serializers. When the wrapper
     explicitly declares `RunContextWrapper`, preserve only the base context state.
     """
+    # SDK-owned invokers declare ToolContext unless callers override reflection metadata.
+    invoker = function_tool.on_invoke_tool
+    if (
+        type(invoker) is _FailureHandlingFunctionToolInvoker
+        and getattr(invoker, "__signature__", None) is None
+        and getattr(invoker, "__annotations__", None) is None
+        and getattr(invoker, "__wrapped__", None) is None
+    ):
+        return context
+
     try:
         parameters = tuple(inspect.signature(function_tool.on_invoke_tool).parameters.values())
     except (TypeError, ValueError):

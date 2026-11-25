@@ -1,4 +1,6 @@
-from typing import Any, Generic
+from collections.abc import Awaitable, Callable
+from types import FunctionType, MethodType
+from typing import Any, Generic, cast
 
 from typing_extensions import TypeVar
 
@@ -6,6 +8,8 @@ from .agent import Agent, AgentBase
 from .items import ModelResponse, TResponseInputItem
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .tool import Tool
+from .util import _coro
+from .util._asyncio_tasks import gather_with_cancel
 
 TAgent = TypeVar("TAgent", bound=AgentBase, default=AgentBase)
 
@@ -231,3 +235,45 @@ RunHooks = RunHooksBase[TContext, Agent]
 
 AgentHooks = AgentHooksBase[TContext, Agent]
 """Agent hooks for `Agent`s."""
+
+
+_DEFAULT_HOOK_CALLBACKS = frozenset(
+    callback
+    for base in (RunHooksBase, AgentHooksBase)
+    for name, callback in vars(base).items()
+    if name.startswith("on_")
+)
+
+
+_SKIP_HOOK = object()
+
+
+def _hook_awaitable(callback: Callable[..., Awaitable[Any]], *args: Any) -> object:
+    """Invoke a hook factory before resolving the next hook reference."""
+    from .run_internal.guardrails import input_guardrail_dispatch_is_preserved
+
+    if (
+        not input_guardrail_dispatch_is_preserved()
+        and type(callback) is MethodType
+        and type(callback.__func__) is FunctionType
+        and callback.__func__ in _DEFAULT_HOOK_CALLBACKS
+    ):
+        return _SKIP_HOOK
+    return callback(*args)
+
+
+async def _run_hook_callbacks(*callbacks: object) -> None:
+    """Gather real hook awaitables while retaining their task and cancellation boundaries."""
+    from .run_internal.guardrails import input_guardrail_dispatch_is_preserved
+
+    if input_guardrail_dispatch_is_preserved():
+        awaitables = [
+            _coro.noop_coroutine() if callback is _SKIP_HOOK else cast(Awaitable[Any], callback)
+            for callback in callbacks
+        ]
+    else:
+        awaitables = [
+            cast(Awaitable[Any], callback) for callback in callbacks if callback is not _SKIP_HOOK
+        ]
+    if awaitables:
+        await gather_with_cancel(*awaitables)

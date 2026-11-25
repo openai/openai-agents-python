@@ -25,6 +25,7 @@ from ._mount_security import (
     redact_mount_error_data,
     validate_manifest_mount_credential_boundaries,
 )
+from ._run_state import copy_sandbox_resume_state
 from .capabilities import Capability
 from .entries import BaseEntry, Dir, Mount, resolve_workspace_path
 from .manifest import Manifest
@@ -229,11 +230,7 @@ class SandboxRuntimeSessionManager(Generic[TContext]):
         return resources.session
 
     def serialize_resume_state(self) -> dict[str, object] | None:
-        existing_payload = (
-            copy.deepcopy(self._run_state._sandbox)
-            if self._run_state is not None and isinstance(self._run_state._sandbox, dict)
-            else None
-        )
+        existing_payload = copy_sandbox_resume_state(self._run_state)
         if self._sandbox_config is None:
             return existing_payload
         if self._sandbox_config.session is not None:

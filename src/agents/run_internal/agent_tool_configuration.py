@@ -39,9 +39,12 @@ def _observe_tools(active: list[_ToolResolution], tools: tuple[Tool, ...]) -> No
     if len(active) > 1 and any(
         resolution.tools_assigned
         or len(resolution.initial_tools) != len(tools)
-        or any(
-            before is not after
-            for before, after in zip(resolution.initial_tools, tools, strict=False)
+        or (
+            resolution.initial_tools is not tools
+            and any(
+                before is not after
+                for before, after in zip(resolution.initial_tools, tools, strict=False)
+            )
         )
         for resolution in active
     ):

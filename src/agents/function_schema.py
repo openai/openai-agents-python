@@ -8,8 +8,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
-# griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
-from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, create_model
 from pydantic.fields import FieldInfo
 
@@ -260,6 +258,9 @@ def generate_func_documentation(
     doc = inspect.getdoc(func)
     if not doc:
         return FuncDocumentation(name=name, description=None, param_descriptions=None)
+
+    # Griffe is only needed when the function has documentation to parse.
+    from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
 
     # Resolve the style against the original docstring before any normalization.
     resolved_style = style or _detect_docstring_style(doc)

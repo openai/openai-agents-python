@@ -65,6 +65,7 @@ from ..items import (
     ToolApprovalItem,
     ToolCallOutputItem,
 )
+from ..lifecycle import _SKIP_HOOK, _hook_awaitable, _run_hook_callbacks
 from ..logger import log_tool_action_error as _log_tool_action_error, logger
 from ..model_settings import ModelSettings
 from ..run_config import RunConfig, ToolErrorFormatterArgs
@@ -100,7 +101,7 @@ from ..tool_guardrails import (
     ToolOutputGuardrailResult,
 )
 from ..tracing import Span, SpanError, function_span, get_current_trace
-from ..util import _coro, _error_tracing
+from ..util import _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
 from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
@@ -2073,13 +2074,15 @@ class _FunctionToolBatchExecutor:
                 self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
                 return rejected_message
 
-            await gather_with_cancel(
-                self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
-                (
-                    agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
+            await _run_hook_callbacks(
+                _hook_awaitable(
+                    self.hooks.on_tool_start, tool_context, self.public_agent, func_tool
                 ),
+                _hook_awaitable(
+                    agent_hooks.on_tool_start, tool_context, self.public_agent, func_tool
+                )
+                if agent_hooks is not None
+                else _SKIP_HOOK,
             )
 
         raise_if_input_guardrail_rejected()
@@ -2218,13 +2221,15 @@ class _FunctionToolBatchExecutor:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
             if output_item is not None:
                 output_item.custom_data = custom_data
-        await gather_with_cancel(
-            self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),
-            (
-                agent_hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result)
-                if agent_hooks is not None
-                else _coro.noop_coroutine()
+        await _run_hook_callbacks(
+            _hook_awaitable(
+                self.hooks.on_tool_end, tool_context, self.public_agent, func_tool, final_result
             ),
+            _hook_awaitable(
+                agent_hooks.on_tool_end, tool_context, self.public_agent, func_tool, final_result
+            )
+            if agent_hooks is not None
+            else _SKIP_HOOK,
         )
         return final_result
 

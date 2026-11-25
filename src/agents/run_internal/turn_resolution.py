@@ -99,7 +99,7 @@ from ..items import (
     coerce_tool_search_call_raw_item,
     coerce_tool_search_output_raw_item,
 )
-from ..lifecycle import RunHooks
+from ..lifecycle import _SKIP_HOOK, RunHooks, _hook_awaitable, _run_hook_callbacks
 from ..logger import log_tool_action_error, logger
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -363,11 +363,11 @@ async def run_final_output_hooks(
     )
     context_wrapper._share_tool_state_with(agent_hook_context)
 
-    await gather_with_cancel(
-        hooks.on_agent_end(agent_hook_context, agent, final_output),
-        agent.hooks.on_end(agent_hook_context, agent, final_output)
+    await _run_hook_callbacks(
+        _hook_awaitable(hooks.on_agent_end, agent_hook_context, agent, final_output),
+        _hook_awaitable(agent.hooks.on_end, agent_hook_context, agent, final_output)
         if agent.hooks is not None
-        else _coro.noop_coroutine(),
+        else _SKIP_HOOK,
     )
 
 
@@ -1441,13 +1441,13 @@ async def resolve_interrupted_turn(
         and not current_step.llm_end_hooks_started
     ):
         current_step.llm_end_hooks_started = True
-        await gather_with_cancel(
-            (
-                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        await _run_hook_callbacks(
+            _hook_awaitable(
+                public_agent.hooks.on_llm_end, context_wrapper, public_agent, new_response
+            )
+            if public_agent.hooks is not None
+            else _SKIP_HOOK,
+            _hook_awaitable(hooks.on_llm_end, context_wrapper, public_agent, new_response),
         )
 
     if (

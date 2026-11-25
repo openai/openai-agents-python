@@ -97,12 +97,17 @@ async def maybe_filter_model_input(
 
 async def get_handoffs(agent: Agent[Any], context_wrapper: RunContextWrapper[Any]) -> list[Handoff]:
     """Return enabled handoffs for the agent."""
+    from .guardrails import input_guardrail_dispatch_is_preserved
+
     handoffs = []
     for handoff_item in agent.handoffs:
         if isinstance(handoff_item, Handoff):
             handoffs.append(handoff_item)
         elif isinstance(handoff_item, Agent):
             handoffs.append(handoff(handoff_item))
+
+    if not handoffs and not input_guardrail_dispatch_is_preserved():
+        return []
 
     async def check_handoff_enabled(handoff_obj: Handoff) -> bool:
         attr = handoff_obj.is_enabled
@@ -185,4 +190,31 @@ def get_model_settings(
         return settings
     return model._get_request_settings(
         settings, prompt=prompt, has_tools=has_tools, implicit_fields=implicit_fields
+    )
+
+
+_DEFAULT_SYSTEM_PROMPT_GETTER = Agent.get_system_prompt
+_DEFAULT_PROMPT_GETTER = Agent.get_prompt
+
+
+async def resolve_agent_prompts(
+    agent: Agent[TContext], context_wrapper: RunContextWrapper[TContext]
+) -> tuple[str | None, ResponsePromptParam | None]:
+    """Return static prompts directly and isolate dynamic prompt callbacks in tasks."""
+    from .guardrails import input_guardrail_dispatch_is_preserved
+
+    if (
+        not input_guardrail_dispatch_is_preserved()
+        and type(agent) is Agent
+        and Agent.get_system_prompt is _DEFAULT_SYSTEM_PROMPT_GETTER
+        and Agent.get_prompt is _DEFAULT_PROMPT_GETTER
+        and "get_system_prompt" not in agent.__dict__
+        and "get_prompt" not in agent.__dict__
+    ):
+        instructions = agent.instructions
+        prompt = agent.prompt
+        if (instructions is None or isinstance(instructions, str)) and prompt is None:
+            return instructions, None
+    return await gather_with_cancel(
+        agent.get_system_prompt(context_wrapper), agent.get_prompt(context_wrapper)
     )
