@@ -354,3 +354,36 @@ print(
     assert payload["shutdown_registration_count"] == 1
     assert payload["exporter_initialized"] is False
     assert payload["processor_initialized"] is False
+
+
+def test_first_local_tool_run_does_not_load_mcp() -> None:
+    payload = _run_python(
+        """
+import json
+import sys
+
+from agents import Agent, RunConfig, Runner
+from agents.decorators import tool
+from agents.testing import ScriptedModel, assistant_message, function_call
+
+@tool
+async def increment(value: int) -> int:
+    return value + 1
+
+model = ScriptedModel([
+    [function_call("increment", {"value": 1}, call_id="call_1")],
+    [assistant_message("done")],
+])
+agent = Agent(name="local", model=model, tools=[increment])
+result = Runner.run_sync(agent, "start", run_config=RunConfig(tracing_disabled=True))
+model.assert_complete()
+
+print(json.dumps({
+    "answer": result.final_output,
+    "tool_output": model.calls[1].input[-1]["output"],
+    "mcp_loaded": "mcp" in sys.modules,
+}))
+"""
+    )
+
+    assert payload == {"answer": "done", "tool_output": "2", "mcp_loaded": False}

@@ -35,14 +35,6 @@ from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
 from ..util._custom_data import maybe_extract_custom_data
 from ..util._types import MaybeAwaitable
-from ._compat import (
-    MCPError,
-    image_mime_type,
-    mcp_error_message,
-    result_is_error,
-    result_structured_content,
-    tool_input_schema,
-)
 from ._logging import get_mcp_server_log_message, get_mcp_server_log_name
 
 if TYPE_CHECKING:
@@ -535,6 +527,8 @@ class MCPUtil:
         policies. If the server uses a callable approval policy, approvals default
         to required to avoid bypassing dynamic checks.
         """
+        from ._compat import tool_input_schema
+
         tool_public_name = tool_name_override or tool.name
         static_meta = cls._extract_static_meta(tool)
         defaults = _DiscoveredToolMeta(static_meta) if static_meta is not None else None
@@ -654,6 +648,8 @@ class MCPUtil:
         if extractor is None:
             return None
 
+        from ._compat import result_is_error, result_structured_content
+
         extractor_context = MCPToolCustomDataContext(
             run_context=context,
             server_name=server.name,
@@ -707,6 +703,14 @@ class MCPUtil:
         tool_display_name: str | None = None,
     ) -> ToolOutput:
         """Invoke an MCP tool and return the result as ToolOutput."""
+        from ._compat import (
+            MCPError,
+            image_mime_type,
+            mcp_error_message,
+            result_is_error,
+            result_structured_content,
+        )
+
         tool_name_for_display = tool_display_name or tool.name
         json_decode_error: Exception | None = None
         try:

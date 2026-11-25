@@ -10,6 +10,7 @@ import math
 from collections import deque
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cache
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast, get_args
 from uuid import uuid4
 
@@ -340,7 +341,6 @@ _TOOL_CALL_OUTPUT_UNION_ADAPTER: TypeAdapter[
     FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput
 ] = TypeAdapter(FunctionCallOutput | ComputerCallOutput | LocalShellCallOutput)
 _MCP_APPROVAL_RESPONSE_ADAPTER: TypeAdapter[McpApprovalResponse] = TypeAdapter(McpApprovalResponse)
-_HANDOFF_OUTPUT_ADAPTER: TypeAdapter[TResponseInputItem] = TypeAdapter(TResponseInputItem)
 _LOCAL_SHELL_CALL_ADAPTER: TypeAdapter[LocalShellCall] = TypeAdapter(LocalShellCall)
 _TOOL_APPROVAL_MODEL_TYPES: tuple[type[BaseModel], ...] = tuple(
     raw_item_type
@@ -356,6 +356,12 @@ _PYDANTIC_PUBLIC_COPY_INSTANCE_ATTRIBUTES = frozenset(
 )
 _MISSING_CONTEXT_SENTINEL = object()
 _ALLOWED_MISSING_MESSAGE_FIELDS = frozenset({"status"})
+
+
+@cache
+def _response_input_adapter() -> TypeAdapter[TResponseInputItem]:
+    """Build the large input union only when restoring a handoff or compaction item."""
+    return TypeAdapter(TResponseInputItem)
 
 
 def _deserialize_tool_origin(data: Any) -> ToolOrigin | None:
@@ -5376,7 +5382,7 @@ def _deserialize_items(
                 # as a TResponseInputItem (which is a union type)
                 # If validation fails, use the raw dict as-is (for test compatibility)
                 try:
-                    raw_item_handoff_output = _HANDOFF_OUTPUT_ADAPTER.validate_python(
+                    raw_item_handoff_output = _response_input_adapter().validate_python(
                         normalized_raw_item
                     )
                 except ValidationError:
@@ -5395,7 +5401,7 @@ def _deserialize_items(
 
             elif item_type == "compaction_item":
                 try:
-                    raw_item_compaction = _HANDOFF_OUTPUT_ADAPTER.validate_python(
+                    raw_item_compaction = _response_input_adapter().validate_python(
                         normalized_raw_item
                     )
                 except ValidationError:
