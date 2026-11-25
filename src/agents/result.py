@@ -807,12 +807,11 @@ class RunResultStreaming(RunResultBase):
         self.__dict__["current_agent"] = None
 
     async def _run_sandbox_cleanup(self) -> None:
-        sandbox_cleanup = self._sandbox_cleanup
-        if sandbox_cleanup is None:
-            return
-
         task = self._sandbox_cleanup_task
         if task is None:
+            sandbox_cleanup = self._sandbox_cleanup
+            if sandbox_cleanup is None:
+                return
 
             async def _cleanup_once() -> None:
                 try:
@@ -826,12 +825,14 @@ class RunResultStreaming(RunResultBase):
 
             task = asyncio.create_task(_cleanup_once())
             self._sandbox_cleanup_task = task
+            # The task now owns the callback, which can hold the entire result.
+            self._sandbox_cleanup = None
 
         await task
 
     def ensure_sandbox_cleanup_on_completion(self) -> None:
         if (
-            self._sandbox_cleanup is None
+            (self._sandbox_cleanup is None and self._sandbox_cleanup_task is None)
             or self.run_loop_task is None
             or self._sandbox_cleanup_callback_registered
         ):

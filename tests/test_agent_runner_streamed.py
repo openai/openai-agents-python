@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 import logging
+import sys
+import weakref
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -39,6 +42,7 @@ from agents import (
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
+    RunResultStreaming,
     SQLiteSession,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
@@ -143,6 +147,34 @@ def _ws_terminal_response_frame(event_type: str, response_id: str, sequence_numb
             "sequence_number": sequence_number,
         }
     )
+
+
+@pytest.mark.skipif(
+    sys.implementation.name != "cpython", reason="Checks immediate reference release"
+)
+@pytest.mark.asyncio
+async def test_finished_stream_releases_result_without_cyclic_gc() -> None:
+    model = ScriptedModel()
+    model.enqueue([get_text_message("done")])
+    agent = Agent(name="test", model=model)
+
+    async def consume() -> weakref.ReferenceType[RunResultStreaming]:
+        result = Runner.run_streamed(agent, input="hello")
+        async for _ in result.stream_events():
+            pass
+        assert result.final_output == "done"
+        return weakref.ref(result)
+
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        result_ref = await consume()
+        # Let any already scheduled task completion callbacks run.
+        await asyncio.sleep(0)
+        assert result_ref() is None
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 @pytest.mark.asyncio
