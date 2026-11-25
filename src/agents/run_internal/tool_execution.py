@@ -2201,15 +2201,18 @@ class _FunctionToolBatchExecutor:
             self.output_items_by_tool_run[id(task_state.tool_run)] = output_item
             if self.tool_output_committer is not None:
                 self.tool_output_committer(output_item)
-        extracted_custom_data = await maybe_extract_custom_data(
-            func_tool.custom_data_extractor,
-            FunctionToolCustomDataContext(
-                tool_context=tool_context,
-                tool=func_tool,
-                output=final_result,
-                raw_item=copy.deepcopy(raw_output_item),
-            ),
-        )
+        extractor = func_tool.custom_data_extractor
+        extracted_custom_data = None
+        if extractor is not None:
+            extracted_custom_data = await maybe_extract_custom_data(
+                extractor,
+                FunctionToolCustomDataContext(
+                    tool_context=tool_context,
+                    tool=func_tool,
+                    output=final_result,
+                    raw_item=copy.deepcopy(raw_output_item),
+                ),
+            )
         custom_data = merge_custom_data(tool_context._custom_data, extracted_custom_data)
         if custom_data:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data

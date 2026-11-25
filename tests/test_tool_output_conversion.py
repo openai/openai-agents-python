@@ -404,3 +404,26 @@ def test_tool_call_output_item_empty_tuple_not_converted() -> None:
     assert payload["call_id"] == call.call_id
     assert isinstance(payload["output"], str)
     assert payload["output"] == "()"
+
+
+def test_text_dictionary_list_preserves_order_and_detaches_returned_blocks() -> None:
+    parts = [{"type": "text", "text": ""}, {"text": "été", "type": "text"}]
+    payload = ItemHelpers.tool_call_output_item(_make_tool_call(), parts)
+    parts[1]["text"] = "changed"
+    assert payload["output"] == [
+        {"type": "input_text", "text": ""},
+        {"type": "input_text", "text": "été"},
+    ]
+
+
+def test_text_dictionary_list_still_coerces_or_rejects_non_string_values() -> None:
+    first = {"type": "text", "text": "first"}
+    payload = ItemHelpers.tool_call_output_item(
+        _make_tool_call(), [first, {"type": "text", "text": b"second"}]
+    )
+    assert payload["output"] == [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
+    invalid = [first, {"type": "text", "text": None}]
+    assert ItemHelpers.tool_call_output_item(_make_tool_call(), invalid)["output"] == str(invalid)
