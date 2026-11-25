@@ -354,3 +354,48 @@ print(
     assert payload["shutdown_registration_count"] == 1
     assert payload["exporter_initialized"] is False
     assert payload["processor_initialized"] is False
+
+
+def test_plain_tools_and_agents_do_not_import_mcp() -> None:
+    payload = _run_python(
+        """
+import asyncio
+import importlib.abc
+import json
+import sys
+
+class BlockUnusedDependencies(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname.split('.', 1)[0] == 'mcp':
+            raise ModuleNotFoundError(fullname, name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockUnusedDependencies())
+from agents import Agent, RunContextWrapper, function_tool
+
+@function_tool
+async def plain(x: int) -> int:
+    return x
+
+class EmptyServer:
+    name = 'empty'
+    listings = 0
+
+    async def list_tools(self, *args, **kwargs):
+        self.listings += 1
+        return []
+
+async def main():
+    context = RunContextWrapper(context=None)
+    assert await Agent(name='plain', tools=[plain]).get_mcp_tools(context) == []
+    server = EmptyServer()
+    result = await Agent(name='local', mcp_servers=[server]).get_mcp_tools(context)
+    assert server.listings == 1
+    print(json.dumps({
+        'tools': result, 'mcp': 'mcp' in sys.modules,
+    }))
+
+asyncio.run(main())
+"""
+    )
+    assert payload == {"tools": [], "mcp": False}
