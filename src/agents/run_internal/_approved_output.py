@@ -10,6 +10,7 @@ from uuid import uuid4
 from ..items import TResponseStreamEvent
 from ..memory.session import await_session_mutation
 from ..stream_events import ApprovedText, RunCompleted
+from .plugin_events import notify_stream
 
 if TYPE_CHECKING:
     from ..models.interface import Model
@@ -161,6 +162,16 @@ class ApprovedOutput:
 
         pending = ""
         deltas = self.deltas
+
+        def preview_retired() -> bool:
+            return (
+                revoked()
+                or expired()
+                or self.error is not None
+                or self.deltas is not deltas
+                or result.current_turn != self.turn
+            )
+
         try:
             while True:
                 if self.error:
@@ -201,13 +212,7 @@ class ApprovedOutput:
                             )
                         elif preview.done() and not preview.cancelled():
                             preview.exception()
-                if (
-                    revoked()
-                    or expired()
-                    or self.error
-                    or self.deltas is not deltas
-                    or result.current_turn != self.turn
-                ):
+                if preview_retired():
                     continue
                 if prefix is None:
                     continue
@@ -216,7 +221,7 @@ class ApprovedOutput:
                 if prefix:
                     self.size -= len(prefix.encode("utf-8"))
                     pending = pending[len(prefix) :]
-                    yield ApprovedText(
+                    event = ApprovedText(
                         self.submission_id,
                         self.session_id,
                         self.turn,
@@ -225,12 +230,20 @@ class ApprovedOutput:
                         self.content_index,
                         prefix,
                     )
+                    await notify_stream(result, event, preview_retired)
+                    if not preview_retired():
+                        yield event
 
             if self.accepted:
                 await result._await_model_provider_cleanup()
                 result._check_errors()
                 if not revoked():
-                    yield RunCompleted(self.submission_id, self.session_id)
+                    receipt = RunCompleted(self.submission_id, self.session_id)
+                    # The owning reader checks the drain before publishing.
+                    if result._display_driver is None:
+                        await notify_stream(result, receipt, revoked)
+                    if not revoked():
+                        yield receipt
         finally:
             self.approve = None
             self.retire()

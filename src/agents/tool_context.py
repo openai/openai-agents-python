@@ -119,10 +119,20 @@ class ToolContext(RunContextWrapper[TContext], _Decider):
             self.run_config = _coerce_run_config(run_config)
         else:
             self.run_config = None
+        self._report_progress: Callable[[str], Awaitable[None]] | None = None
         # Internal adapter hook used to attach SDK-only custom data to the emitted output item.
         self._edit_text: Callable[[tuple[str, ...]], Awaitable[tuple[str, ...]]] | None = None
         self._custom_data: dict[str, Any] | None = None
         self._function_tool_arguments: PreparedFunctionArguments | None = None
+
+    async def report_progress(self, message: str) -> None:
+        """Send up to 4096 characters to this agent's active plugin observers.
+
+        Concurrent updates for this call may be coalesced. No delivery outside
+        the invocation or without an observer. Never included in model input.
+        """
+        if self._report_progress is not None:
+            await self._report_progress(message)
 
     @property
     def qualified_tool_name(self) -> str:
@@ -175,6 +185,10 @@ class ToolContext(RunContextWrapper[TContext], _Decider):
                 "Cannot apply approval because the same tool invocation identity belongs to both "
                 "the current run and a nested agent-tool run."
             )
+        if getattr(target.agent, "plugins", ()) or (
+            state._context is not None and state._context._plugin_selections
+        ):
+            target = approval_item
         if approve:
             state.approve(target, always_approve=always)
         else:

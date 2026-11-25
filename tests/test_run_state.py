@@ -520,15 +520,14 @@ class TestRunState:
 
         json_data["$schemaVersion"] = "0.1"
         supported_versions = ", ".join(sorted(SUPPORTED_SCHEMA_VERSIONS))
-        with pytest.raises(
-            Exception,
-            match=(
-                "Run state schema version is not supported. "
-                f"Supported versions are: {supported_versions}. "
-                f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
-            ),
-        ):
+        with pytest.raises(UserError) as exc:
             await RunState.from_string(agent, json.dumps(json_data))
+        assert str(exc.value) == (
+            "Run state schema version is not supported. "
+            f"Supported versions are: {supported_versions}. "
+            f"New snapshots use {CURRENT_SCHEMA_VERSION} or "
+            f"{CURRENT_SCHEMA_VERSION}+plugins.1 with plugins."
+        )
 
     def test_approve_updates_context_approvals_correctly(self):
         """Test that approve() correctly updates context approvals."""
@@ -9046,6 +9045,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.24",
                 "1.25",
                 CURRENT_SCHEMA_VERSION,
+                f"{CURRENT_SCHEMA_VERSION}+plugins.1",
             }
         )
 

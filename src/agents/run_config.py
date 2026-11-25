@@ -37,8 +37,11 @@ from .tracing import TracingConfig
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from .agent import Agent
     from .mcp import MCPServer
+    from .plugins import ToolCall, _Value
     from .run_context import RunContextWrapper
     from .sandbox.manifest import Manifest
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
@@ -742,6 +745,32 @@ class SandboxRunConfig:
             )
 
 
+if TYPE_CHECKING:
+    _PolicyContext = Callable[
+        [Agent[Any], str, ToolCall, Any], MaybeAwaitable[Mapping[str, _Value]]
+    ]
+else:
+    # Config coercion resolves annotations at runtime, where Agent is a type-only import.
+    _PolicyContext = Callable[..., Any]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Steering:
+    """Queue up to 16 explicit user messages in one client-managed streamed run."""
+
+    mode: Literal["one_at_a_time", "all"] = "one_at_a_time"
+    """Admit one message or the waiting batch, in order, before the next turn."""
+
+    continue_after_final: bool = False
+    """Allow more calls after plain text answers within the same finite turn limit."""
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("one_at_a_time", "all"):
+            raise ValueError("Unknown steering mode.")
+        if type(self.continue_after_final) is not bool:
+            raise TypeError("continue_after_final must be a boolean.")
+
+
 @dataclass
 class RunConfig:
     """Configures settings for the entire agent run."""
@@ -950,6 +979,15 @@ class RunConfig:
     to the whole request, including any internal Codex calls.
     """
 
+    policy_context: _PolicyContext | None = field(default=None, kw_only=True, repr=False)
+    """Supply JSON data for one check from the public agent, policy name, call and app context."""
+
+    plugin_revision: str | None = field(default=None, kw_only=True, repr=False)
+    """Trusted deployment revision for restoring plugin approvals across processes."""
+
+    steering: Steering | None = field(default=None, kw_only=True)
+    """Opt in to queued steering. The default allows one pending text and no extra call."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -984,9 +1022,15 @@ class RunConfig:
             redact_text: Callable[[str], str] | None = None,
             budget: RunBudget | dict[str, Any] | None = None,
             model_selector: ModelSelector | None = None,
+            *,
+            policy_context: _PolicyContext | None = None,
+            plugin_revision: str | None = None,
+            steering: Steering | None = None,
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        if self.steering is not None and not isinstance(self.steering, Steering):
+            raise TypeError("steering must be a Steering instance or None")
         if self.budget is not None:
             self.budget = coerce_dataclass_config(
                 self.budget, RunBudget, parameter_name="run_config.budget"
@@ -1088,6 +1132,7 @@ __all__ = [
     "ModelSelectionData",
     "ModelSelector",
     "RunConfig",
+    "Steering",
     "RunOptions",
     "SandboxArchiveLimits",
     "SandboxConcurrencyLimits",

@@ -18,7 +18,11 @@ from typing_extensions import NotRequired, TypedDict
 
 from . import _debug
 from ._decision_types import DecisionProvider, _Decider
-from ._tool_identity import get_tool_approval_item_call_id
+from ._tool_identity import (
+    FunctionToolLookupKey,
+    get_function_tool_lookup_key_for_tool,
+    get_tool_approval_item_call_id,
+)
 from .agent_output import AgentOutputSchemaBase
 from .agent_tool_input import (
     AgentAsToolInput,
@@ -74,6 +78,7 @@ if TYPE_CHECKING:
     from .lifecycle import AgentHooks, RunHooks
     from .mcp import MCPServer
     from .memory.session import Session
+    from .plugins import Plugin
     from .result import RunResult, RunResultStreaming
     from .run import RunConfig
     from .run_state import RunState
@@ -254,7 +259,8 @@ class AgentBase(Generic[TContext]):
     async def _get_mcp_tool_reserved_names(
         self, run_context: RunContextWrapper[TContext]
     ) -> set[str]:
-        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
+        tools = self._tools_with_plugins() if isinstance(self, Agent) else self.tools
+        reserved_tool_names = {tool.name for tool in tools if isinstance(tool, FunctionTool)}
 
         snapshot = _mcp_handoff_snapshot.get()
         if snapshot is not None and snapshot[0] is self:
@@ -325,6 +331,8 @@ class AgentBase(Generic[TContext]):
         register_agent_tool_configuration(get_public_agent(self))
         tools = snapshot_agent_tools(self)
         mcp_tools = await self.get_mcp_tools(run_context)
+        if isinstance(self, Agent) and self.plugins:
+            tools = tuple(self._tools_with_plugins(tools, mcp_tools))
 
         async def _check_tool_enabled(tool: Tool) -> bool:
             if not isinstance(tool, FunctionTool):
@@ -455,6 +463,9 @@ class Agent(_AgentFields[TContext], _Decider):
     )
     """Borrowed provider for typed decisions on this agent and its callbacks."""
 
+    plugins: Sequence[Plugin[TContext]] = field(default=(), kw_only=True, repr=False)
+    """Named bundles of function tools, instructions and callbacks, in selection order."""
+
     if TYPE_CHECKING:
 
         def __init__(
@@ -488,6 +499,7 @@ class Agent(_AgentFields[TContext], _Decider):
             reset_tool_choice: bool = True,
             *,
             decisions: DecisionProvider | None = None,
+            plugins: Sequence[Plugin[TContext]] = (),
         ) -> None: ...
 
     def __post_init__(self):
@@ -610,6 +622,61 @@ class Agent(_AgentFields[TContext], _Decider):
                 f"Agent reset_tool_choice must be a boolean, "
                 f"got {type(self.reset_tool_choice).__name__}"
             )
+
+        self.plugins = tuple(self.plugins)
+        if self.plugins:
+            self._tools_with_plugins()
+
+    def _tools_with_plugins(
+        self,
+        configured: Sequence[Tool] | None = None,
+        discovered: Sequence[Tool] = (),
+    ) -> list[Tool]:
+        """Merge local tools by identity and reject ambiguous plugin routes."""
+        tools = self.tools if configured is None else list(configured)
+        if not self.plugins:
+            return tools
+
+        from .plugins import Plugin
+
+        owners: dict[FunctionToolLookupKey, str] = {}
+
+        def reserve(key: FunctionToolLookupKey, owner: str) -> None:
+            if key in owners:
+                raise UserError(f"Tool {key!r} belongs to both {owners[key]} and {owner}.")
+            owners[key] = owner
+
+        for source, entries in (("agent", tools), ("MCP", discovered)):
+            for tool in entries:
+                key = get_function_tool_lookup_key_for_tool(tool)
+                if key is not None:
+                    reserve(key, source)
+        for handoff in self.handoffs:
+            name = (
+                handoff.tool_name
+                if isinstance(handoff, Handoff)
+                else Handoff.default_tool_name(handoff)
+            )
+            reserve(("bare", name), "handoff")
+
+        merged = list(tools)
+        names: set[str] = set()
+        for plugin in self.plugins:
+            if not isinstance(plugin, Plugin):
+                raise TypeError("Agent.plugins must contain Plugin instances.")
+            if plugin.name in names:
+                raise UserError(f"Duplicate plugin name {plugin.name!r} on agent {self.name!r}.")
+            names.add(plugin.name)
+            owner = f"plugin {plugin.name!r}"
+            for contribution in plugin.tools:
+                if not isinstance(contribution, FunctionTool):
+                    raise TypeError(f"Expected a FunctionTool in {owner}.")
+                key = get_function_tool_lookup_key_for_tool(contribution)
+                if key is None:
+                    raise UserError(f"Missing tool name in {owner}.")
+                reserve(key, owner)
+                merged.append(contribution)
+        return merged
 
     def clone(self, **kwargs: Any) -> Agent[TContext]:
         """Make a copy of the agent, with the given arguments changed.
@@ -1228,6 +1295,31 @@ class Agent(_AgentFields[TContext], _Decider):
         return run_agent_tool
 
     async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
+        """Resolve the agent's instructions, then each plugin's guidance in order."""
+        base = await self._agent_instructions(run_context)
+        if not self.plugins:
+            return base
+        from ._public_agent import get_public_agent
+
+        parts = [base] if base else []
+        for plugin in self.plugins:
+            instructions = plugin.instructions
+            if instructions is None:
+                continue
+            text = (
+                instructions(run_context, get_public_agent(self))
+                if callable(instructions)
+                else instructions
+            )
+            if inspect.isawaitable(text):
+                text = await text
+            if not isinstance(text, str):
+                raise TypeError(f"Instructions for plugin {plugin.name!r} must return a string.")
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts) if parts else base
+
+    async def _agent_instructions(self, run_context: RunContextWrapper[TContext]) -> str | None:
         if isinstance(self.instructions, str):
             return self.instructions
         elif callable(self.instructions):

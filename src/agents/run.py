@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing_extensions import Unpack
 
 from . import _debug
+from ._plugin_state import new_plugin_context, validate_plugin_resume
 from ._redaction import (
     current_redactor,
     redact_items,
@@ -140,6 +141,7 @@ from .run_internal.model_provider_lifecycle import (
     _normalize_run_config_for_runner,
 )
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
+from .run_internal.plugin_cancellation import may_run_plugins, run_guarded
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.resumable_session import ResumableRun, prepare_run_session
 from .run_internal.run_grouping import resolve_run_grouping_id
@@ -662,6 +664,25 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        from .run_internal.plugin_outcome import failure_status, submission
+
+        observer = submission(starting_agent)
+        if observer is None:
+            return await self._run_submission(starting_agent, input, **kwargs)
+        try:
+            result = await self._run_submission(starting_agent, input, **kwargs)
+        except BaseException as error:
+            await observer.finish(failure_status(error))
+            raise
+        await observer.finish("paused" if result.interruptions else "completed")
+        return result
+
+    async def _run_submission(
+        self,
+        starting_agent: Agent[TContext],
+        input: str | list[TResponseInputItem] | RunState[TContext],
+        **kwargs: Unpack[RunOptions[TContext]],
+    ) -> RunResult:
         session = prepare_run_session(kwargs.get("session"), input)
         kwargs["session"] = session
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
@@ -703,7 +724,11 @@ class AgentRunner:
                     )
                     with agent_tool_configuration_run(configuration_agent):
                         async with decisions.bind():
-                            result = await self._run_impl(starting_agent, input, **kwargs)
+                            work = self._run_impl(starting_agent, input, **kwargs)
+                            if may_run_plugins(configuration_agent):
+                                result = await run_guarded(work)
+                            else:
+                                result = await work
                         require_clean_final_output(
                             result.final_output, result.input, result.new_items
                         )
@@ -782,6 +807,7 @@ class AgentRunner:
             original_user_input = copy_input_items(run_state._original_input)
             prepared_input = normalize_resumed_input(original_user_input)
 
+            validate_plugin_resume(run_state, starting_agent, run_config.plugin_revision)
             context_wrapper = resolve_resumed_context(
                 run_state=run_state,
                 context=context,
@@ -824,6 +850,9 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
+            context_wrapper = new_plugin_context(
+                starting_agent, context_wrapper, run_config.plugin_revision
+            )
             if isinstance(session, ResumableRun):
                 await session.begin(
                     input,
@@ -2890,6 +2919,7 @@ class AgentRunner:
                 )
                 run_state._original_input = copy_input_items(input_for_result)
                 # Use context from RunState if not provided, otherwise override it.
+                validate_plugin_resume(run_state, starting_agent, run_config.plugin_revision)
                 context_wrapper = resolve_resumed_context(
                     run_state=run_state,
                     context=context,
@@ -2911,6 +2941,9 @@ class AgentRunner:
                     auto_previous_response_id=auto_previous_response_id,
                 )
                 context_wrapper = ensure_context_wrapper(context)._for_new_root(budget)
+                context_wrapper = new_plugin_context(
+                    starting_agent, context_wrapper, run_config.plugin_revision
+                )
                 context_wrapper._resolve_function_approval_owners(starting_agent)
                 set_agent_tool_state_scope(context_wrapper, uuid4().hex)
                 # input_for_state is the same as input_for_result here
@@ -3068,6 +3101,10 @@ class AgentRunner:
 
         if isinstance(session, ResumableRun):
             session.configure_stream(streamed_result)
+
+        from .run_internal.plugin_outcome import submission
+
+        streamed_result._plugin_submission = submission(starting_agent)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:

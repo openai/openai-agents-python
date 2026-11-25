@@ -38,6 +38,14 @@ from openai.types.responses.response_output_item import (
 from pydantic import BaseModel, StringConstraints, TypeAdapter, ValidationError
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
+from ._plugin_state import (
+    new_plugin_context,
+    require_plugin_revision,
+    restore_plugin_calls,
+    save_plugin_state,
+    validate_plugin_decision,
+    validate_plugin_resume,
+)
 from ._redaction import (
     current_redactor,
     hook_payload_diagnostics,
@@ -259,14 +267,24 @@ def _default_run_state_validation_error(
     return error_type(message)
 
 
+class _PluginCheckpointError(UserError):
+    """Keep a plugin refusal from being swallowed during best-effort nested resume."""
+
+
+_PLUGIN_MISMATCH = (
+    "Plugin checkpoint mismatch. Supply the original selection, revision and context."
+)
+
+
 # RunState schema policy.
 # 1. Keep schema versions shipped in releases readable.
 # 2. Unreleased schema versions may be renumbered or squashed before release when their
 #    intermediate snapshots are intentionally unsupported.
-# 3. to_json() always emits CURRENT_SCHEMA_VERSION.
+# 3. Plugin checkpoints use a separate label so other readers cannot ignore the binding.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
 CURRENT_SCHEMA_VERSION = "1.26"
+_PLUGIN_SCHEMA_VERSION = f"{CURRENT_SCHEMA_VERSION}+plugins.1"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -336,6 +354,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
     "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
     "1.26": "Requires an exact text editor when resuming selected tool calls.",
+    _PLUGIN_SCHEMA_VERSION: "Binds calls to the reviewed plugins, revision and tool owner.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1100,7 +1119,7 @@ class RunState(Generic[TContext, TAgent]):
             bindings = (
                 [
                     tool
-                    for tool in agent.tools
+                    for tool in agent._tools_with_plugins()
                     if isinstance(tool, FunctionTool)
                     and key in get_function_tool_lookup_keys(tool)
                     and await _function_tool_enabled(tool, context, agent)
@@ -1281,6 +1300,9 @@ class RunState(Generic[TContext, TAgent]):
                         raw_item=copied_raw_item,
                     )
                 )
+                token = getattr(item, "_plugin_proposal", None)
+                if token is not None:
+                    interruptions[-1].__dict__["_plugin_proposal"] = token
         except Exception as error:
             _detach_source_exception_traceback(error)
             copy_error = UserError(
@@ -1377,6 +1399,7 @@ class RunState(Generic[TContext, TAgent]):
         expected = native_approval_checkpoint(current.raw_item) if current else None
         if native_approval_checkpoint(proposal.raw_item) != expected:
             raise UserError("Native approval does not match the current pending call.")
+        validate_plugin_decision(self._context, proposal, current)
         return current or proposal
 
     def _find_nested_approval_state(
@@ -1549,10 +1572,13 @@ class RunState(Generic[TContext, TAgent]):
         nested_approval = self._find_nested_approval_state(approval_item)
         if nested_approval is not None:
             nested_state, nested_item = nested_approval
+            if nested_state._context is not None and nested_state._context._plugin_selections:
+                nested_item = approval_item
             nested_state.approve(nested_item, always_approve=always_approve)
             return
+        current_item = self._decision_item(approval_item)
         self._context.approve_tool(
-            self._decision_item(approval_item),
+            current_item,
             always_approve=always_approve,
         )
 
@@ -1575,14 +1601,17 @@ class RunState(Generic[TContext, TAgent]):
         nested_approval = self._find_nested_approval_state(approval_item)
         if nested_approval is not None:
             nested_state, nested_item = nested_approval
+            if nested_state._context is not None and nested_state._context._plugin_selections:
+                nested_item = approval_item
             nested_state.reject(
                 nested_item,
                 always_reject=always_reject,
                 rejection_message=rejection_message,
             )
             return
+        current_item = self._decision_item(approval_item)
         self._context.reject_tool(
-            self._decision_item(approval_item),
+            current_item,
             always_reject=always_reject,
             rejection_message=rejection_message,
         )
@@ -1855,7 +1884,7 @@ class RunState(Generic[TContext, TAgent]):
                 omitted=False,
             )
 
-        raw_context_payload = self._context.context
+        raw_context_payload = None if self._context._plugin_selections else self._context.context
         if raw_context_payload is None:
             return None, _build_context_meta(
                 raw_context_payload,
@@ -2105,6 +2134,9 @@ class RunState(Generic[TContext, TAgent]):
         This method is used to serialize the run state to a dictionary that can be used to
         resume the run later.
 
+        Plugin checkpoints require RunConfig.plugin_revision and omit the application
+        context even when a context serializer is supplied.
+
         Args:
             context_serializer: Optional function to serialize non-mapping context values.
             strict_context: When True, require mapping contexts or a context_serializer.
@@ -2118,6 +2150,18 @@ class RunState(Generic[TContext, TAgent]):
                 cannot be distinguished without hook instance attributes. Use unique agent
                 names before starting a persistable run in that case.
         """
+        require_plugin_revision(self._context)
+        return self._checked_snapshot(context_serializer, strict_context, include_tracing_api_key)
+
+    def _checked_snapshot(
+        self,
+        context_serializer: ContextSerializer | None = None,
+        strict_context: bool = False,
+        include_tracing_api_key: bool = False,
+        *,
+        for_resume: bool = False,
+    ) -> dict[str, Any]:
+        """Check the entire payload, even for a revisionless in-memory continuation."""
         policy = self._redact_text
         if policy is None:
             policy = current_redactor()
@@ -2131,7 +2175,10 @@ class RunState(Generic[TContext, TAgent]):
                 redact_by_default=False,
             ):
                 snapshot = self._serialize_snapshot(
-                    context_serializer, strict_context, include_tracing_api_key
+                    context_serializer,
+                    strict_context,
+                    include_tracing_api_key,
+                    for_resume=for_resume,
                 )
             require_clean(snapshot)
             if policy is not None:
@@ -2146,6 +2193,8 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None,
         strict_context: bool,
         include_tracing_api_key: bool,
+        *,
+        for_resume: bool = False,
     ) -> dict[str, Any]:
         if self._current_agent is None:
             raise UserError("Cannot serialize RunState: No current agent")
@@ -2160,6 +2209,7 @@ class RunState(Generic[TContext, TAgent]):
                 "Use unique agent names before starting a persistable run."
             )
 
+        plugin_state = save_plugin_state(self, for_resume=for_resume)
         approvals_dict = self._serialize_approvals()
         tool_invocations = self._serialize_tool_invocations()
         hosted_mcp_approvals = self._serialize_hosted_mcp_approvals()
@@ -2209,7 +2259,7 @@ class RunState(Generic[TContext, TAgent]):
             )
         generated_items = self._merge_generated_items_with_processed()
 
-        result = {
+        result: dict[str, Any] = {
             "$schemaVersion": CURRENT_SCHEMA_VERSION,
             "current_turn": self._current_turn,
             "current_agent": current_agent_entry,
@@ -2250,6 +2300,10 @@ class RunState(Generic[TContext, TAgent]):
             "generated_session_item_indexes": self._generated_session_item_indexes(generated_items),
         }
 
+        if plugin_state is not None:
+            result["$schemaVersion"] = _PLUGIN_SCHEMA_VERSION
+            result["plugin_state"] = plugin_state
+
         current_response_generated_item_ownership = self._current_response_generated_item_ownership(
             generated_items
         )
@@ -2275,6 +2329,7 @@ class RunState(Generic[TContext, TAgent]):
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
+                for_resume=for_resume,
             )
             if self._last_processed_response is not None
             else None
@@ -2314,6 +2369,7 @@ class RunState(Generic[TContext, TAgent]):
         context_serializer: ContextSerializer | None = None,
         strict_context: bool = False,
         include_tracing_api_key: bool = False,
+        for_resume: bool = False,
     ) -> dict[str, Any]:
         """Serialize a ProcessedResponse to JSON format.
 
@@ -2333,6 +2389,7 @@ class RunState(Generic[TContext, TAgent]):
             context_serializer=context_serializer,
             strict_context=strict_context,
             include_tracing_api_key=include_tracing_api_key,
+            for_resume=for_resume,
         )
 
         interruptions_data = [
@@ -2587,6 +2644,7 @@ class RunState(Generic[TContext, TAgent]):
         context_override: ContextOverride | None = None,
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
+        plugin_revision: str | None = None,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON string.
 
@@ -2616,6 +2674,9 @@ class RunState(Generic[TContext, TAgent]):
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
+            plugin_revision: Trusted application revision matching the saved plugin selection.
+                Supplying a revision requires a plugin checkpoint. Use the same trusted
+                revision when resuming. Plugin runs with context require a fresh context_override.
             context_override: Optional context mapping or RunContextWrapper to use instead of the
                 serialized context.
             context_deserializer: Optional function to rebuild non-mapping context values.
@@ -2648,6 +2709,7 @@ class RunState(Generic[TContext, TAgent]):
             initial_agent = cast(Any, None)
             context_override = None
             context_deserializer = None
+            plugin_revision = None
             _raise_data_redacted_error(parse_error)
 
         safe_error: BaseException | None = None
@@ -2658,6 +2720,7 @@ class RunState(Generic[TContext, TAgent]):
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                plugin_revision=plugin_revision,
             )
         except BaseException as error:
             trusted_error_message = _known_run_state_error_message(error)
@@ -2670,6 +2733,7 @@ class RunState(Generic[TContext, TAgent]):
         initial_agent = cast(Any, None)
         context_override = None
         context_deserializer = None
+        plugin_revision = None
         assert safe_error is not None
         _raise_data_redacted_error(safe_error)
 
@@ -2681,6 +2745,7 @@ class RunState(Generic[TContext, TAgent]):
         context_override: ContextOverride | None = None,
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
+        plugin_revision: str | None = None,
     ) -> RunState[Any, Agent[Any]]:
         """Deserializes a run state from a JSON dictionary.
 
@@ -2710,6 +2775,9 @@ class RunState(Generic[TContext, TAgent]):
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_json: The JSON dictionary to deserialize.
+            plugin_revision: Trusted application revision matching the saved plugin selection.
+                Supplying a revision requires a plugin checkpoint. Use the same trusted
+                revision when resuming. Plugin runs with context require a fresh context_override.
             context_override: Optional context mapping or RunContextWrapper to use instead of the
                 serialized context.
             context_deserializer: Optional function to rebuild non-mapping context values.
@@ -2771,6 +2839,7 @@ class RunState(Generic[TContext, TAgent]):
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                plugin_revision=plugin_revision,
                 required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
@@ -2782,6 +2851,8 @@ class RunState(Generic[TContext, TAgent]):
                 error = validation_error_factory(
                     "Invalid RunBudget checkpoint or schema version.", UserError
                 )
+            if type(error) is _PluginCheckpointError:
+                error = validation_error_factory(_PLUGIN_MISMATCH, UserError)
             trusted_error_message = _trusted_run_state_validation_message(
                 error,
                 trusted_validation_errors,
@@ -2796,6 +2867,7 @@ class RunState(Generic[TContext, TAgent]):
         initial_agent = cast(Any, None)
         context_override = None
         context_deserializer = None
+        plugin_revision = None
         assert restore_error is not None
         _raise_data_redacted_error(restore_error)
 
@@ -2820,6 +2892,10 @@ def _validate_pending_approvals(
     nested: bool = False,
 ) -> tuple[bool, bool]:
     """Check pending approvals and propagate budget and editor requirements to ancestors."""
+    if nested:
+        version = state.get("$schemaVersion")
+        if "plugin_state" in state or (isinstance(version, str) and "+plugins." in version):
+            raise _PluginCheckpointError(_PLUGIN_MISMATCH)
     context = state.get("context")
     requires_budget = isinstance(context, dict) and "budget" in context
     invocations = context.get("tool_invocations") if isinstance(context, dict) else None
@@ -3284,6 +3360,7 @@ def _serialize_pending_nested_agent_tool_runs(
     context_serializer: ContextSerializer | None = None,
     strict_context: bool = False,
     include_tracing_api_key: bool = False,
+    for_resume: bool = False,
 ) -> None:
     """Attach serialized nested run state for pending agent-as-tool interruptions."""
     if not function_entries or not function_runs:
@@ -3311,7 +3388,7 @@ def _serialize_pending_nested_agent_tool_runs(
         try:
             nested_state = to_state()
         except Exception:
-            if strict_context:
+            if strict_context or for_resume:
                 raise
             logger.warning(
                 "Failed to capture nested agent run state for tool call %s.",
@@ -3325,14 +3402,31 @@ def _serialize_pending_nested_agent_tool_runs(
             # Defensive guard against accidental self-referential serialization loops.
             continue
 
+        if not for_resume and (
+            (nested_state._context and nested_state._context._plugin_selections)
+            or (parent_state._context and parent_state._context._plugin_selections)
+        ):
+            error = _PluginCheckpointError("Resume nested plugin approvals in memory.")
+            _mark_error_data_redacted(error)
+            raise error
+
         try:
+            if for_resume:
+                # A pending delegate still owns its in-memory approval. Inspect its
+                # full transcript without creating a portable checkpoint for it.
+                entry["agent_run_state"] = nested_state._checked_snapshot(
+                    context_serializer, strict_context, include_tracing_api_key, for_resume=True
+                )
+                continue
             entry["agent_run_state"] = nested_state.to_json(
                 context_serializer=context_serializer,
                 strict_context=strict_context,
                 include_tracing_api_key=include_tracing_api_key,
             )
+        except _PluginCheckpointError:
+            raise
         except Exception:
-            if strict_context:
+            if strict_context or for_resume:
                 raise
             logger.warning(
                 "Failed to serialize nested agent run state for tool call %s.",
@@ -3538,6 +3632,8 @@ async def _restore_pending_nested_agent_tool_runs(
         nested_root_agent = function_action.action.function_tool._agent_instance
         if not isinstance(nested_root_agent, Agent):
             nested_root_agent = current_agent
+        if nested_root_agent.plugins:
+            raise _PluginCheckpointError(_PLUGIN_MISMATCH)
 
         specialist = _has_pending_specialist(nested_state_data)
         try:
@@ -3555,7 +3651,7 @@ async def _restore_pending_nested_agent_tool_runs(
                 required_children=required_children,
                 validation_error_factory=validation_error_factory,
             )
-        except _BudgetCheckpointError:
+        except (_BudgetCheckpointError, _PluginCheckpointError):
             raise
         except Exception:
             if strict_context or specialist:
@@ -4568,9 +4664,12 @@ def _validate_run_state_schema_version(
         raise validation_error_factory(
             "Run state schema version is not supported. "
             f"Supported versions are: {supported_versions}. "
-            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}.",
+            f"New snapshots use {CURRENT_SCHEMA_VERSION} or {_PLUGIN_SCHEMA_VERSION} with plugins.",
             UserError,
         )
+    # Apply the same feature checks to both writers. Keep the wire label for plugin validation.
+    if schema_version == _PLUGIN_SCHEMA_VERSION:
+        schema_version = CURRENT_SCHEMA_VERSION
     if "requires_redaction" in state_json and (
         tuple(int(part) for part in schema_version.split(".")) < (1, 24)
         or state_json["requires_redaction"] is not True
@@ -4587,6 +4686,7 @@ async def _build_run_state_from_json(
     strict_context: bool = False,
     validation_error_factory: RunStateValidationErrorFactory = _default_run_state_validation_error,
     required_children: set[int] | None = None,
+    plugin_revision: str | None = None,
 ) -> RunState[Any, Agent[Any]]:
     """Shared helper to rebuild RunState from JSON payload.
 
@@ -4666,6 +4766,18 @@ async def _build_run_state_from_json(
     if current_agent is None:
         raise validation_error_factory("Run state agent not found in agent map", UserError)
 
+    try:
+        plugin_calls = restore_plugin_calls(
+            initial_agent,
+            current_agent,
+            state_json,
+            plugin_revision,
+            context_override is not None,
+            state_json["$schemaVersion"] == _PLUGIN_SCHEMA_VERSION,
+        )
+    except UserError:
+        raise _PluginCheckpointError(_PLUGIN_MISMATCH) from None
+
     context_data = state_json["context"]
     budget = _BudgetState.restore(context_data["budget"]) if "budget" in context_data else None
     usage = deserialize_usage(context_data.get("usage", {}))
@@ -4731,6 +4843,9 @@ async def _build_run_state_from_json(
             UserError,
         )
     context = context._for_new_root(budget)
+    context = new_plugin_context(current_agent, context, plugin_revision)
+    if current_agent.plugins:
+        context._plugin_calls = plugin_calls
     context.usage = usage
     context._restored_unbound_approval_call_ids = set()
     context._allow_legacy_approval_binding_reconstruction = (schema_major, schema_minor) < (1, 15)
@@ -5289,6 +5404,12 @@ async def _build_run_state_from_json(
         validation_error_factory=validation_error_factory,
     )
 
+    validate_plugin_resume(state, initial_agent, plugin_revision)
+    if plugin_calls:
+        from ._plugin_state import issue_plugin_proposal
+
+        for interruption in getattr(state._current_step, "interruptions", ()):
+            issue_plugin_proposal(context, interruption)
     return state
 
 
@@ -5316,7 +5437,7 @@ def _validate_completed_tool_invocations(
     apply_patch_tools = [
         tool
         for agent in _iter_agent_graph(starting_agent)
-        for tool in agent.tools
+        for tool in agent._tools_with_plugins()
         if isinstance(tool, ApplyPatchTool)
     ]
     legacy_native_tool_names: dict[str, set[str]] = {}
@@ -5329,7 +5450,7 @@ def _validate_completed_tool_invocations(
             (ApplyPatchTool, "apply_patch_call"),
         )
         for agent in _iter_agent_graph(starting_agent):
-            for tool in agent.tools:
+            for tool in agent._tools_with_plugins():
                 for tool_type, invocation_type in native_tool_types:
                     if isinstance(tool, tool_type):
                         legacy_native_tool_names.setdefault(invocation_type, set()).add(tool.name)
@@ -6062,13 +6183,14 @@ def _clone_original_input(original_input: str | list[Any]) -> str | list[Any]:
 
 _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
     {
+        _PLUGIN_MISMATCH,
         "Run state JSON must be an object",
         "Run state is missing schema version",
         "Run state schema version has an invalid type",
         (
             "Run state schema version is not supported. "
             f"Supported versions are: {', '.join(sorted(SUPPORTED_SCHEMA_VERSIONS))}. "
-            f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
+            f"New snapshots use {CURRENT_SCHEMA_VERSION} or {_PLUGIN_SCHEMA_VERSION} with plugins."
         ),
         "Run state agent not found in agent map",
         "Decision specialist unavailable. Check the roster and context_override.",

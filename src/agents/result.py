@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
-from ._redaction import current_redactor, protected_error, redaction_scope
+from ._redaction import current_redactor, protected_error, redact_items, redaction_scope
 from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
@@ -21,11 +21,14 @@ from .exceptions import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
     RunErrorDetails,
+    UserError,
     _await_data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _mark_error_data_redacted,
     _raise_data_redacted_error,
     _should_drain_stream_events_before_raising,
+    _sync_data_redacted_error_boundary,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
 from .items import (
@@ -47,6 +50,7 @@ from .run_internal.items import (
     resolve_nested_history_owned_item_indexes,
     run_items_to_input_items,
 )
+from .run_internal.plugin_events import notify_stream
 from .run_internal.run_steps import (
     NextStepInterruption,
     ProcessedResponse,
@@ -67,6 +71,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from .memory.resumable_session import _ResumableSessionBinding
+    from .run_config import Steering
+    from .run_internal.plugin_outcome import Submission
     from .sandbox.session.base_sandbox_session import BaseSandboxSession
 
 T = TypeVar("T")
@@ -804,6 +810,13 @@ class RunResultStreaming(RunResultBase):
     def __post_init__(self, _run_impl_task: asyncio.Task[Any] | None) -> None:
         self._approved_output: ApprovedOutput | None = None
         self._stream_started = False
+        self._can_steer = False
+        self._steering_options: Steering | None = None
+        self._steering: list[tuple[str, asyncio.Future[bool]]] = []
+        self._steering_reserved = 0
+        self._plugin_warnings: set[str] | None = None
+        self._progress_submission_id: str | None = None
+        self._plugin_submission: Submission | None = None
         self._display_driver: asyncio.Task[None] | None = None
         self._current_agent_ref = weakref.ref(self.current_agent)
         # Store the original input at creation time (it will be set via input field)
@@ -973,6 +986,115 @@ class RunResultStreaming(RunResultBase):
             _detach_data_redacted_error_traceback(error)
         return error
 
+    @_sync_data_redacted_error_boundary
+    def steer(self, text: str) -> asyncio.Future[bool]:
+        """Stage explicit user text for the same agent during an active stream.
+
+        By default, one message can wait for an already scheduled turn.
+        RunConfig.steering enables a bounded queue and optional continuation.
+        A waiting message is local to this stream and is never checkpointed.
+
+        Keep reading the stream before awaiting the receipt. True means the SDK
+        admitted the input into local history. Filters and provider errors can
+        still prevent delivery. False means the run left this agent or stopped
+        before admission. An uncertain session write raises UserError on the
+        receipt. A started write must settle even on cancellation. Cancelling
+        the receipt only stops observation.
+        """
+
+        def invalid(message: str) -> UserError:
+            error = UserError(message)
+            if self._redact_text is not None:
+                _mark_error_data_redacted(error)
+            return error
+
+        task = self.run_loop_task
+        if (
+            not self._can_steer
+            or self.is_complete
+            or self._cancel_mode != "none"
+            or task is None
+            or task.done()
+        ):
+            raise invalid("Steering requires an active turn in a fresh, client-managed stream.")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not task.get_loop():
+            raise invalid("Submit steering on the stream's event loop.")
+        if not isinstance(text, str) or not text.strip():
+            raise invalid("Steering requires nonempty user text.")
+        if self._redact_text is not None:
+            with redaction_scope(self._redact_text):
+                text = redact_items(text)
+        if self._steering_options is None and self._steering:
+            raise invalid("The stream already has a pending steering message.")
+        if len(self._steering) >= 16:
+            raise invalid("The steering queue is full.")
+        receipt: asyncio.Future[bool] = task.get_loop().create_future()
+        self._steering.append((text, receipt))
+        return receipt
+
+    def withdraw(self, receipt: asyncio.Future[bool]) -> bool:
+        """Remove a waiting steer on the stream's loop. Admission already underway wins."""
+        for i in range(self._steering_reserved, len(self._steering)):
+            if self._steering[i][1] is receipt:
+                if asyncio.get_running_loop() is not receipt.get_loop():
+                    raise UserError("Withdraw steering on the stream's event loop.")
+                del self._steering[i]
+                if not receipt.done():
+                    receipt.set_result(False)
+                return True
+        return False
+
+    def _reserve_steering_after_final(self) -> bool:
+        options = self._steering_options
+        if (
+            not self._steering
+            or options is None
+            or not options.continue_after_final
+            or self._cancel_mode != "none"
+            or self.max_turns is None
+            or self.current_turn >= self.max_turns
+        ):
+            return False
+        budget = self.context_wrapper._budget
+        if budget is not None:
+            from .run_budget import RunBudgetError
+
+            try:
+                budget.check()
+            except RunBudgetError:
+                return False
+        # Only the checked user input can justify this additional turn. Until its
+        # admission succeeds, no checkpoint may restart without that input.
+        self._reserve_steering()
+        self._state._terminal_unrecoverable = True
+        return True
+
+    def _reserve_steering(self) -> int:
+        if not self._steering_reserved and self._steering:
+            options = self._steering_options
+            together = options is not None and options.mode == "all"
+            self._steering_reserved = len(self._steering) if together else 1
+        return self._steering_reserved
+
+    def _finish_steering(self, admitted: bool | None, count: int | None = None) -> None:
+        for _, receipt in self._steering[:count]:
+            if receipt.done():
+                continue
+            if admitted is None:
+                receipt.set_exception(
+                    UserError("Unconfirmed steering write. Check session history.")
+                )
+                # The stream reports the original failure even without a receipt reader.
+                receipt.exception()
+            else:
+                receipt.set_result(admitted)
+        del self._steering[:count]
+        self._steering_reserved = 0
+
     def cancel(self, mode: Literal["immediate", "after_turn"] = "immediate") -> None:
         """Cancel the streaming run.
 
@@ -999,7 +1121,9 @@ class RunResultStreaming(RunResultBase):
         Note: After calling cancel(), you should continue consuming stream_events()
         to allow the cancellation to complete properly.
         """
-        # Store the cancel mode for the background task to check
+        # A later graceful request cannot re-enable work after an immediate stop.
+        if self._cancel_mode == "immediate" and mode == "after_turn":
+            return
         self._cancel_mode = mode
         if self._approved_output is not None:
             self._approved_output.interrupt_preview()
@@ -1086,6 +1210,7 @@ class RunResultStreaming(RunResultBase):
             raise RuntimeError("Subscribe once before the streaming run starts.")
         reader = ApprovedOutput(approve_preview)
         self._approved_output = reader
+        self._progress_submission_id = reader.submission_id
 
         def finished(_task: object) -> None:
             if self._approved_output is not None:
@@ -1157,10 +1282,14 @@ class RunResultStreaming(RunResultBase):
             joined = True
             if result._cancel_mode != "none":
                 receipt = None
+            run_ref = weakref.ref(result)
             del result  # Do not retain run data on a redacted exception traceback.
             await _await_data_redacted_error_boundary(lambda: driver)
-            if receipt is not None:
-                yield receipt
+            active = run_ref()
+            if receipt is not None and active is not None:
+                await notify_stream(active, receipt, lambda: active._cancel_mode != "none")
+                if active._cancel_mode == "none":
+                    yield receipt
 
         events = display(self)
         try:
@@ -1246,85 +1375,102 @@ class RunResultStreaming(RunResultBase):
         register_current_consumer()
         skip_cleanup_wait = False
         try:
-            while True:
-                register_current_consumer()
-                self._check_errors()
-                should_drain_queued_events = isinstance(
-                    self._stored_exception, MaxTurnsExceeded
-                ) or (
-                    self._stored_exception is not None
-                    and _should_drain_stream_events_before_raising(self._stored_exception)
-                )
-                if self._stored_exception is not None and (
-                    not should_drain_queued_events or self._event_queue.empty()
-                ):
-                    logger.debug("Breaking due to stored exception")
-                    self.is_complete = True
-                    break
-
-                if self.is_complete and self._event_queue.empty():
-                    break
-
-                try:
-                    self._waiting_on_event_queue = True
-                    item = await self._event_queue.get()
-                except asyncio.CancelledError:
-                    # An agent tool must settle its nested run before returning to the manager.
-                    skip_cleanup_wait = self.agent_tool_invocation is None
-                    if skip_cleanup_wait or self._cancel_mode != "immediate":
-                        self.cancel()
-                    raise
-                finally:
-                    self._waiting_on_event_queue = False
-
-                if isinstance(item, QueueCompleteSentinel):
-                    # Await input guardrails if they are still running, so late
-                    # exceptions are captured.
-                    await self._await_task_safely(self._input_guardrails_task)
-
-                    self._event_queue.task_done()
-
-                    # Check for errors, in case the queue was completed
-                    # due to an exception
-                    self._check_errors()
-                    break
-
-                item_acknowledgement_pending = True
-                try:
-                    yield item
-                finally:
-                    acknowledge_item()
-        finally:
-            if registered_consumer_task is not None:
-                registered_consumer_task.remove_done_callback(consumer_task_done)
-            unregister_consumer()
             try:
-                try:
-                    if skip_cleanup_wait:
-                        # Top-level consumers can stop without waiting for long-running tasks.
-                        self._cleanup_tasks()
-                    else:
-                        # Ensure main execution completes before cleanup to avoid race conditions
-                        # with session operations.
-                        await self._await_task_safely(self.run_loop_task)
-                        # Re-check for exceptions now that the run loop has fully settled.
-                        # _await_task_safely leaves errors to _check_errors(); without this call,
-                        # a run-loop failure racing past the sentinel would be silently lost.
-                        self._check_errors()
-                        # Safely terminate background tasks after main execution has finished.
-                        self._cleanup_tasks()
-                finally:
-                    if not skip_cleanup_wait:
-                        await self._await_model_provider_cleanup()
-                        await self._run_sandbox_cleanup()
-            finally:
-                # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
-                # completion sentinels before we clear the queues for observability.
-                await asyncio.sleep(0)
+                while True:
+                    register_current_consumer()
+                    self._check_errors()
+                    should_drain_queued_events = isinstance(
+                        self._stored_exception, MaxTurnsExceeded
+                    ) or (
+                        self._stored_exception is not None
+                        and _should_drain_stream_events_before_raising(self._stored_exception)
+                    )
+                    if self._stored_exception is not None and (
+                        not should_drain_queued_events or self._event_queue.empty()
+                    ):
+                        logger.debug("Breaking due to stored exception")
+                        self.is_complete = True
+                        break
 
-                # Drain queues so callers observing internal state see them empty after completion.
-                self._drain_event_queue()
-                self._drain_input_guardrail_queue()
+                    if self.is_complete and self._event_queue.empty():
+                        break
+
+                    try:
+                        self._waiting_on_event_queue = True
+                        item = await self._event_queue.get()
+                    except asyncio.CancelledError:
+                        # An agent tool must settle its nested run before returning to the manager.
+                        skip_cleanup_wait = self.agent_tool_invocation is None
+                        if skip_cleanup_wait or self._cancel_mode != "immediate":
+                            self.cancel()
+                        raise
+                    finally:
+                        self._waiting_on_event_queue = False
+
+                    if isinstance(item, QueueCompleteSentinel):
+                        # Await input guardrails if they are still running, so late
+                        # exceptions are captured.
+                        await self._await_task_safely(self._input_guardrails_task)
+
+                        self._event_queue.task_done()
+
+                        # Check for errors, in case the queue was completed
+                        # due to an exception
+                        self._check_errors()
+                        break
+
+                    item_acknowledgement_pending = True
+                    try:
+                        yield item
+                    finally:
+                        acknowledge_item()
+            finally:
+                if registered_consumer_task is not None:
+                    registered_consumer_task.remove_done_callback(consumer_task_done)
+                unregister_consumer()
+                try:
+                    try:
+                        if skip_cleanup_wait:
+                            # Top-level consumers can stop without waiting for long-running tasks.
+                            self._cleanup_tasks()
+                        else:
+                            # Let the run loop finish session writes before cleanup.
+                            await self._await_task_safely(self.run_loop_task)
+                            # Re-check for exceptions now that the run loop has fully settled.
+                            # Check again for failures arriving after the sentinel.
+                            self._check_errors()
+                            # Safely terminate background tasks after main execution has finished.
+                            self._cleanup_tasks()
+                    finally:
+                        if not skip_cleanup_wait:
+                            await self._await_model_provider_cleanup()
+                            await self._run_sandbox_cleanup()
+                finally:
+                    # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
+                    # completion sentinels before we clear the queues for observability.
+                    await asyncio.sleep(0)
+
+                    # Leave both queues empty after completion.
+                    self._drain_event_queue()
+                    self._drain_input_guardrail_queue()
+
+        except BaseException as error:
+            if self._plugin_submission is not None:
+                from .run_internal.plugin_outcome import failure_status
+
+                await self._plugin_submission.finish(failure_status(error))
+            raise
+        if self._plugin_submission is not None:
+            if self._stored_exception is not None:
+                await self._plugin_submission.finish("failed")
+            elif self._cancel_mode != "none" or (
+                self.run_loop_task is not None and self.run_loop_task.cancelled()
+            ):
+                await self._plugin_submission.finish("cancelled")
+            else:
+                await self._plugin_submission.finish(
+                    "paused" if self.interruptions else "completed"
+                )
 
         stored_exception = self._stored_exception
         if stored_exception is not None:

@@ -21,7 +21,8 @@ SOURCES = json.loads((FIXTURE_ROOT / "sources.json").read_text(encoding="utf-8")
 
 
 def test_installed_distribution_supports_the_historical_fixture_corpus() -> None:
-    assert frozenset(SOURCES["versions"]) | {CURRENT_SCHEMA_VERSION} == SUPPORTED_SCHEMA_VERSIONS
+    writers = {CURRENT_SCHEMA_VERSION, f"{CURRENT_SCHEMA_VERSION}+plugins.1"}
+    assert frozenset(SOURCES["versions"]) | writers == SUPPORTED_SCHEMA_VERSIONS
 
 
 @pytest.mark.parametrize(

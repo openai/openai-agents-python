@@ -121,6 +121,7 @@ from .items import (
     function_rejection_item,
     function_tool_error_output,
 )
+from .plugin_events import agent_events, progress_scope
 from .run_steps import ToolRunFunction
 from .tool_hooks import transform_tool_output
 from .tool_text import invoke_selected_tool, select_text_editor
@@ -583,7 +584,9 @@ async def resolve_enabled_function_tools(
 ) -> list[FunctionTool]:
     """Resolve enabled function tools without triggering MCP tool discovery."""
 
-    function_tools = [tool for tool in agent.tools if isinstance(tool, FunctionTool)]
+    function_tools = [
+        tool for tool in agent._tools_with_plugins() if isinstance(tool, FunctionTool)
+    ]
     if not function_tools:
         return []
 
@@ -1624,7 +1627,9 @@ class _FunctionToolBatchExecutor:
         )
         enabled_function_tool_ids = {id(tool) for tool in self.available_function_tools}
         configured_function_tool_ids = {
-            id(tool) for tool in self.execution_agent.tools if isinstance(tool, FunctionTool)
+            id(tool)
+            for tool in self.execution_agent._tools_with_plugins()
+            if isinstance(tool, FunctionTool)
         }
         for tool_run in self.tool_runs:
             function_tool = tool_run.function_tool
@@ -1940,11 +1945,38 @@ class _FunctionToolBatchExecutor:
             tool_lookup_key=tool_lookup_key,
             current_invocation=current_approval_item,
         )
+        needs_vote = False
+        if self.public_agent.plugins or (
+            self.context_wrapper._plugin_selections
+            and tool_call.call_id in self.context_wrapper._plugin_calls
+        ):
+            from ..plugins import Deny, RequireApproval
+            from .plugin_tools import decide
+
+            vote = await decide(
+                self.public_agent, self.context_wrapper, self.config, func_tool, raw_tool_call
+            )
+            if isinstance(vote, Deny):
+                return FunctionToolResult(
+                    tool=func_tool,
+                    output="Tool call refused.",
+                    run_item=function_rejection_item(
+                        self.public_agent,
+                        tool_call,
+                        rejection_message="Tool call refused.",
+                        output_json_schema=func_tool.output_json_schema,
+                        scope_id=self.tool_state_scope_id,
+                        tool_origin=get_function_tool_origin(func_tool),
+                    ),
+                )
+            needs_vote = isinstance(vote, RequireApproval)
+            if needs_vote and approval_status is True:
+                approval_status = None
         if approval_evaluation is not None:
             approval_evaluation.check_invocation(func_tool, tool_call.arguments)
             if approval_status is not False:
                 tool_context._function_tool_arguments = approval_evaluation.prepared
-        if approval_status is None:
+        if approval_status is None and not needs_vote:
             evaluation = approval_evaluation or await function_needs_approval(
                 func_tool, self.context_wrapper, tool_call
             )
@@ -1986,6 +2018,8 @@ class _FunctionToolBatchExecutor:
                     tool_lookup_key=tool_lookup_key,
                     current_invocation=current_approval_item,
                 )
+                if needs_vote and approval_status is True:
+                    approval_status = None
                 if approval_status is None and rejected_message is not None:
                     return FunctionToolResult(
                         tool=func_tool,
@@ -2001,6 +2035,10 @@ class _FunctionToolBatchExecutor:
                     )
 
         if approval_status is None:
+            if self.context_wrapper._plugin_selections:
+                from .._plugin_state import issue_plugin_proposal
+
+                issue_plugin_proposal(self.context_wrapper, current_approval_item)
             return FunctionToolResult(
                 tool=func_tool,
                 output=None,
@@ -2090,6 +2128,7 @@ class _FunctionToolBatchExecutor:
         span.start(mark_as_current=True)
         if not is_nested_continuation:
             await gather_with_cancel(
+                *agent_events(tool_context, self.public_agent, "tool_start", tool=func_tool),
                 self.hooks.on_tool_start(tool_context, self.public_agent, func_tool),
                 (
                     agent_hooks.on_tool_start(tool_context, self.public_agent, func_tool)
@@ -2140,6 +2179,25 @@ class _FunctionToolBatchExecutor:
         record = self.context_wrapper._tool_invocations.get(tool_call.call_id)
         if record is not None and record.declaration is not None:
             await record.declaration.check(self.context_wrapper, self.config)
+        if self.public_agent.plugins or (
+            self.context_wrapper._plugin_selections
+            and tool_call.call_id in self.context_wrapper._plugin_calls
+        ):
+            from .plugin_tools import decide
+
+            blocked = await decide(
+                self.public_agent,
+                self.context_wrapper,
+                self.config,
+                func_tool,
+                task_state.tool_run.tool_call,
+                tool_context,
+            )
+            if blocked is not None:
+                self.schema_bypassed_tool_runs.add(id(task_state.tool_run))
+                return "Tool call refused."
+            if tool_call.arguments != task_state.tool_run.tool_call.arguments:
+                raise UserError("Plugin tool arguments changed before execution.")
         bypass_output_schema = False
         try:
             with hook_payload_diagnostics(
@@ -2157,11 +2215,12 @@ class _FunctionToolBatchExecutor:
                     if tool_context._edit_text is not None
                     else _invoke_function_tool_with_metadata
                 )
-                invocation_result = await invoke(
-                    function_tool=func_tool,
-                    context=tool_context,
-                    arguments=tool_call.arguments,
-                )
+                with progress_scope(tool_context, func_tool):
+                    invocation_result = await invoke(
+                        function_tool=func_tool,
+                        context=tool_context,
+                        arguments=tool_call.arguments,
+                    )
             real_result = invocation_result.output
             bypass_output_schema = invocation_result.is_sdk_generated_error
         except asyncio.CancelledError as e:
@@ -2218,6 +2277,21 @@ class _FunctionToolBatchExecutor:
             )
         # Only the SDK's original failure may bypass a success schema.
         bypass_output_schema = bypass_output_schema and real_result is unfiltered_result
+        if self.public_agent.plugins or self.context_wrapper._plugin_selections:
+            from .._plugin_state import bind_plugins
+
+            bind_plugins(self.public_agent, self.context_wrapper, self.config.plugin_revision)
+        if self.public_agent.plugins and not bypass_output_schema:
+            from .plugin_tools import filter_result
+
+            real_result = await filter_result(
+                self.public_agent,
+                self.context_wrapper,
+                func_tool,
+                task_state.tool_run.tool_call,
+                real_result,
+            )
+            real_result = redact_payload(real_result)
         output_guardrail_result = await _execute_tool_output_guardrails(
             func_tool=func_tool,
             tool_context=tool_context,
@@ -2471,6 +2545,7 @@ async def run_tool_end_hooks(
 ) -> None:
     """Notify both observers after the runner records the tool result."""
     await gather_with_cancel(
+        *agent_events(context, agent, "tool_end", tool=tool),
         hooks.on_tool_end(context, agent, tool, result),
         agent_hooks.on_tool_end(context, agent, tool, result)
         if agent_hooks is not None

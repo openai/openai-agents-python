@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..mcp import MCPServer
     from ..model_settings import ModelSettings
     from ..models.interface import Model
+    from ..plugins import Plugin
     from ..prompts import DynamicPromptFunction, Prompt
     from ..tool import Tool
     from ..util._types import MaybeAwaitable
@@ -117,6 +118,7 @@ class SandboxAgent(Agent[TContext], _SandboxFields[TContext]):
             run_as: User | dict[str, Any] | str | None = None,
             *,
             decisions: DecisionProvider | None = None,
+            plugins: Sequence[Plugin[TContext]] = (),
         ) -> None: ...
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:

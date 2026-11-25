@@ -161,7 +161,11 @@ def _iter_agent_graph(
         if not include_tools:
             continue
         # Include agent-as-tool instances so nested approvals can be restored.
-        tools = getattr(current, "tools", None)
+        tools = (
+            current._tools_with_plugins()
+            if getattr(current, "plugins", ())
+            else getattr(current, "tools", None)
+        )
         if tools:
             for tool in tools:
                 if not getattr(tool, "_is_agent_tool", False):
@@ -474,7 +478,11 @@ def _agent_identity_signature(agent: Agent[Any]) -> str:
         "reset_tool_choice": getattr(agent, "reset_tool_choice", None),
         "tools": sorted(
             _stable_identity_text(_tool_identity_signature(tool))
-            for tool in getattr(agent, "tools", [])
+            for tool in (
+                agent._tools_with_plugins()
+                if getattr(agent, "plugins", ())
+                else getattr(agent, "tools", [])
+            )
         ),
         "handoffs": sorted(
             _stable_identity_text(_handoff_identity_signature(handoff_item))
@@ -578,7 +586,7 @@ def _decision_bindings(root: Agent[Any]) -> dict[int, tuple[_DecisionHandoff[Any
                     bindings[id(target)] = (route, label)
             else:
                 ordinary.add(id(_ordinary_target(route)))
-        for tool in source.tools:
+        for tool in source._tools_with_plugins():
             if getattr(tool, "_is_agent_tool", False):
                 ordinary.add(id(getattr(tool, "_agent_instance", None)))
     if ordinary.intersection(bindings):

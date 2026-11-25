@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import inspect
+from copy import deepcopy
+from functools import partial
 from typing import Any
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 
-from .._redaction import require_clean
+from .._redaction import redact_model_input, require_clean
 from ..agent import Agent
 from ..agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from ..exceptions import UserError
@@ -53,6 +55,30 @@ def validate_run_hooks(
     return hooks
 
 
+def _accept_pruned_input(before: ModelInputData, after: ModelInputData) -> ModelInputData:
+    """Keep SDK-owned records in order, including both halves of every tool exchange."""
+    if (
+        not isinstance(after, ModelInputData)
+        or not isinstance(after.input, list)
+        or (after.instructions is not None and not isinstance(after.instructions, str))
+    ):
+        raise UserError("A plugin input filter must return ModelInputData.")
+    kept: list[TResponseInputItem] = []
+    for item in before.input:
+        if len(kept) < len(after.input) and item == after.input[len(kept)]:
+            kept.append(item)
+        elif not (
+            isinstance(item, dict)
+            and item.get("role") == "user"
+            and item.get("type", "message") == "message"
+        ):
+            raise UserError("A plugin input filter may only remove user messages.")
+    if len(kept) != len(after.input):
+        raise UserError("A plugin input filter may only remove user messages.")
+    # Never retain entries from the plugin. An editor may keep its own mutable view.
+    return ModelInputData(input=kept, instructions=after.instructions)
+
+
 async def maybe_filter_model_input(
     *,
     agent: Agent[TContext],
@@ -60,10 +86,35 @@ async def maybe_filter_model_input(
     context_wrapper: RunContextWrapper[TContext],
     input_items: list[TResponseInputItem],
     system_instructions: str | None,
+    server_managed: bool = False,
 ) -> ModelInputData:
-    """Apply optional call_model_input_filter to modify model input."""
+    """Apply selected plugins to prepared history, then the app's input filter."""
     effective_instructions = system_instructions
     effective_input: list[TResponseInputItem] = input_items
+
+    if agent.plugins:
+        from .._plugin_state import bind_plugins
+        from .plugin_tools import _apply
+
+        filters = [
+            p.hooks.filter_input
+            for p in agent.plugins
+            if p.hooks is not None and p.hooks.filter_input is not None
+        ]
+        if filters:
+            if server_managed:
+                raise UserError("Plugin input filters require client-managed history.")
+            bind_plugins(agent, context_wrapper, run_config.plugin_revision)
+            data = ModelInputData(input=deepcopy(input_items), instructions=system_instructions)
+            for handler in filters:
+                redact_model_input(data, None)
+                data = await _apply(
+                    handler, deepcopy(data), capture=partial(_accept_pruned_input, data)
+                )
+                bind_plugins(agent, context_wrapper, run_config.plugin_revision)
+            if run_config.call_model_input_filter is not None:
+                redact_model_input(data, None)
+            effective_input, effective_instructions = data.input, data.instructions
 
     if run_config.call_model_input_filter is None:
         return ModelInputData(input=effective_input, instructions=effective_instructions)

@@ -168,6 +168,7 @@ from .items import (
     shell_rejection_item,
 )
 from .native_approvals import native_pending_step, resolve_native_approval_step
+from .plugin_events import agent_events
 from .run_steps import (
     NOT_FINAL_OUTPUT,
     NextStepFinalOutput,
@@ -403,6 +404,7 @@ async def run_final_output_hooks(
     context_wrapper._share_tool_state_with(agent_hook_context)
 
     await gather_with_cancel(
+        *agent_events(context_wrapper, agent, "agent_end"),
         hooks.on_agent_end(agent_hook_context, agent, final_output),
         agent.hooks.on_end(agent_hook_context, agent, final_output)
         if agent.hooks is not None
@@ -773,6 +775,7 @@ async def execute_handoffs(
             handoff_output_committer(handoff_output, new_agent)
 
         await gather_with_cancel(
+            *agent_events(context_wrapper, public_agent, "handoff", target=new_agent),
             hooks.on_handoff(
                 context=context_wrapper,
                 from_agent=public_agent,
@@ -1097,6 +1100,7 @@ async def execute_tools_and_side_effects(
     precomputed_skipped_raw_item_ids: set[int] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    steer_after_final: Callable[[], bool] | None = None,
     on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
@@ -1478,6 +1482,31 @@ async def execute_tools_and_side_effects(
                     )
                 ):
                     set_final_output_item(message_items[-1] if message_items else None)
+                    # A queued user turn can keep a plain reply provisional.
+                    # Tool stops, refusals and explicit final-output policy decisions win.
+                    if (
+                        potential_final_output_text
+                        and not has_policy
+                        and steer_after_final is not None
+                        and steer_after_final()
+                    ):
+                        require_clean_final_output(
+                            potential_final_output_text,
+                            original_input,
+                            pre_step_items,
+                            new_step_items,
+                        )
+                        return SingleStepResult(
+                            original_input=original_input,
+                            model_response=new_response,
+                            pre_step_items=pre_step_items,
+                            new_step_items=new_step_items,
+                            next_step=NextStepFinalOutput(
+                                potential_final_output_text, continue_after_guardrails=True
+                            ),
+                            tool_input_guardrail_results=tool_input_guardrail_results,
+                            tool_output_guardrail_results=tool_output_guardrail_results,
+                        )
                     return await execute_final_output_call(
                         public_agent=public_agent,
                         original_input=original_input,
@@ -1618,6 +1647,7 @@ async def resolve_interrupted_turn(
                 if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
+            *agent_events(context_wrapper, public_agent, "model_end"),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),
         )
 
@@ -2030,6 +2060,10 @@ async def resolve_interrupted_turn(
         key = call_id or f"raw:{id(item.raw_item)}"
         if key in pending_interruption_keys:
             return
+        if context_wrapper._plugin_selections:
+            from .._plugin_state import issue_plugin_proposal
+
+            issue_plugin_proposal(context_wrapper, item)
         pending_interruption_keys.add(key)
         pending_interruptions.append(item)
 
@@ -2465,7 +2499,7 @@ async def resolve_interrupted_turn(
         ]
     resolved_function_tools = [tool for tool in resolved_tools if isinstance(tool, FunctionTool)]
     local_function_tool_ids = {
-        id(tool) for tool in execution_agent.tools if isinstance(tool, FunctionTool)
+        id(tool) for tool in execution_agent._tools_with_plugins() if isinstance(tool, FunctionTool)
     }
     available_function_tools = [
         tool for tool in resolved_function_tools if id(tool) in local_function_tool_ids
@@ -4324,9 +4358,14 @@ async def get_single_step_result_from_response(
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    steer_after_final: Callable[[], bool] | None = None,
     on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
+    if item_agent.plugins or context_wrapper._plugin_selections:
+        from .._plugin_state import bind_plugins
+
+        bind_plugins(item_agent, context_wrapper, run_config.plugin_revision)
 
     def classify() -> ProcessedResponse:
         if prepared_tools is not None:
@@ -4369,6 +4408,11 @@ async def get_single_step_result_from_response(
         if after_invocation_validation is not None:
             await after_invocation_validation(None)
         raise
+
+    if item_agent.plugins and processed_response.functions:
+        from .plugin_tools import prepare_settings
+
+        settings = prepare_settings(item_agent, processed_response, settings)
 
     if settings is not None and settings.prepare_tool_input is not None:
         proposals = _preflight_response_invocations(
@@ -4416,6 +4460,14 @@ async def get_single_step_result_from_response(
                 context_wrapper._tool_invocations.get(action.tool_call.call_id),
             )
 
+    if item_agent.plugins or context_wrapper._plugin_selections:
+        from .._plugin_state import bind_plugins
+        from .plugin_tools import pin_calls
+
+        bind_plugins(item_agent, context_wrapper, run_config.plugin_revision)
+        if item_agent.plugins:
+            pin_calls(bindings, context_wrapper, processed_response)
+
     if after_invocation_validation is not None:
         await after_invocation_validation(processed_response)
 
@@ -4440,5 +4492,6 @@ async def get_single_step_result_from_response(
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
+        steer_after_final=steer_after_final,
         on_tool_error_selected=on_tool_error_selected,
     )

@@ -365,7 +365,7 @@ def _check_approved_functions(
         return
     registered = {
         key
-        for tool in snapshot_agent_tools(agent)
+        for tool in agent._tools_with_plugins(snapshot_agent_tools(agent))
         if isinstance(tool, FunctionTool) and tool.is_enabled is not False
         for key in get_function_tool_lookup_keys(tool)
     }

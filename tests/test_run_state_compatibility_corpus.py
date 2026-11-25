@@ -165,7 +165,8 @@ def test_historical_state_comparison_preserves_json_scalar_types() -> None:
 def test_historical_fixture_corpus_matches_supported_schema_versions() -> None:
     assert SOURCES["baseline"] == "v0.19.4"
     # The current writer can introduce a version before a historical writer exists.
-    assert frozenset(SOURCES["versions"]) | {CURRENT_SCHEMA_VERSION} == SUPPORTED_SCHEMA_VERSIONS
+    writers = {CURRENT_SCHEMA_VERSION, f"{CURRENT_SCHEMA_VERSION}+plugins.1"}
+    assert frozenset(SOURCES["versions"]) | writers == SUPPORTED_SCHEMA_VERSIONS
     assert all(entry["commit"] for entry in SOURCES["versions"].values())
     assert {entry["version"] for entry in SOURCES["features"]} == {
         version for version in SOURCES["versions"] if version not in {"1.0", "1.1"}

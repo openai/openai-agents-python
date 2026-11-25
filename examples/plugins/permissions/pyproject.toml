@@ -1,0 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-permissions"
+version = "0.1.0"
+description = "Per-call permission checks for SDK function tools"
+requires-python = ">=3.10"
+dependencies = ["openai-agents"]
+readme = "README.md"

@@ -358,6 +358,21 @@ def resolve_trace_settings(
     return workflow_name, trace_id, group_id, metadata, tracing
 
 
+def _has_plugin_selection(state: RunState[Any]) -> bool:
+    """Inspect active approvals, including delegates under a manager without plugins."""
+    if state._context is not None and state._context._plugin_selections:
+        return True
+    if state._last_processed_response is not None:
+        for action in state._last_processed_response.functions:
+            result = peek_agent_tool_run_result(
+                action.tool_call, scope_id=state._agent_tool_state_scope_id
+            )
+            child = get_agent_tool_resume_state(result)
+            if child is not None and _has_plugin_selection(child):
+                return True
+    return False
+
+
 def resolve_resumed_context(
     *,
     run_state: RunState[TContext],
@@ -369,6 +384,7 @@ def resolve_resumed_context(
     authoritative. Only its application ``context`` value is replaced so
     run-owned wrapper state (approvals, usage, turn input, tool input, ...)
     survives the override instead of being dropped by a fresh wrapper.
+    With plugins, approvals must stay bound to the original application object.
     Nested ``Agent.as_tool()`` resumes should pass the parent application
     context into ``Runner.run`` / ``Runner.run_streamed`` so this same path
     applies there.
@@ -376,15 +392,21 @@ def resolve_resumed_context(
     if run_state._context is None:
         run_state._context = ensure_context_wrapper(context)
     elif context is not None and run_state._context is not context:
-        run_state._context.context = (
-            context.context if isinstance(context, RunContextWrapper) else context
-        )
+        application_context = context.context if isinstance(context, RunContextWrapper) else context
+        if application_context is not run_state._context.context and _has_plugin_selection(
+            run_state
+        ):
+            raise UserError("Resume a plugin run with its original application context.")
+        run_state._context.context = application_context
     set_agent_tool_state_scope(run_state._context, run_state._agent_tool_state_scope_id)
     if current_redactor() is not None:
         # Check exactly what can be saved, without rewriting an approved action.
         run_state._redact_text = current_redactor()
         run_state._requires_redaction = True
-        run_state.to_json()
+        if _has_plugin_selection(run_state):
+            run_state._checked_snapshot(for_resume=True)
+        else:
+            run_state.to_json()
     return run_state._context
 
 
@@ -414,7 +436,9 @@ async def validate_resumed_agent_tools(
         # Turn resolution can rebind a queued call after load_state(). Check
         # the current qualified binding and grant only for required branches.
         key = get_function_tool_lookup_key_for_call(action.tool_call)
-        tools = state._current_agent.tools if state._current_agent is not None else []
+        tools = (
+            state._current_agent._tools_with_plugins() if state._current_agent is not None else []
+        )
         bindings = [
             tool
             for tool in tools

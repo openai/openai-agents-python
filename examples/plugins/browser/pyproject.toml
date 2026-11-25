@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-browser"
+version = "0.1.0"
+description = "App-approved browser reads for the Agents SDK"
+requires-python = ">=3.10"
+dependencies = ["openai-agents"]
+readme = "README.md"
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.65,<2"]

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
-from copy import deepcopy
+from copy import copy, deepcopy
 from functools import partial
 from typing import Any, TypeVar, cast
 from uuid import uuid4
@@ -79,6 +80,7 @@ from ..models._response_terminal import (
     response_terminal_failure_error,
 )
 from ..models._run_context import ModelToolHooks, model_run_context
+from ..plugin_http import validate_http
 from ..result import RunResultStreaming
 from ..run_budget import _admit
 from ..run_config import ReasoningItemIdPolicy, RunConfig
@@ -171,6 +173,8 @@ from .model_retry import (
     stream_response_with_retry,
 )
 from .oai_conversation import OpenAIServerConversationTracker
+from .plugin_cancellation import may_run_plugins, streams
+from .plugin_events import agent_events
 from .prompt_cache_key import PromptCacheKeyResolver, model_settings_with_prompt_cache_key
 from .resumable_session import ResumableRun, checkpoint_streamed_result
 from .run_steps import (
@@ -433,11 +437,28 @@ async def _wait_for_streamed_turn_events_and_stop_if_cancelled(
     return True
 
 
+async def _check_streamed_input(
+    streamed_result: RunResultStreaming, run_state: RunState[Any] | None
+) -> None:
+    try:
+        if streamed_result._input_guardrails_task is not None:
+            await streamed_result._input_guardrails_task
+        for guardrail_result in streamed_result.input_guardrail_results:
+            if guardrail_result.output.tripwire_triggered:
+                raise InputGuardrailTripwireTriggered(guardrail_result)
+    except BaseException:
+        if run_state is not None:
+            run_state._terminal_unrecoverable = True
+        raise
+
+
 def _publish_streamed_result_agent(
     streamed_result: RunResultStreaming,
     agent: Agent[Any],
 ) -> None:
     """Publish an agent transition before cancellation can complete the streamed run."""
+    streamed_result._can_steer = False
+    streamed_result._finish_steering(False)
     streamed_result.current_agent = agent
     streamed_result._current_agent_output_schema = get_output_schema(agent)
 
@@ -781,7 +802,8 @@ async def _finalize_streamed_final_output(
     # The append and any post-append maintenance both succeeded, so the turn is durable and the
     # state is open again.
     if streamed_result._state is not None:
-        streamed_result._state._terminal_unrecoverable = False
+        # A steered provisional answer still needs its reserved user input.
+        streamed_result._state._terminal_unrecoverable = bool(streamed_result._steering_reserved)
 
     if stream_items_after_guardrails:
         _publish_stream_items(items, streamed_result)
@@ -983,6 +1005,7 @@ async def start_streaming(
 ):
     """Run the streaming loop for a run result."""
     streamed_result._stream_started = True
+    streamed_result._steering_options = run_config.steering
     if streamed_result._approved_output is not None and session is not None:
         streamed_result._approved_output.session_id = session.session_id or None
     if streamed_result.trace is not None:
@@ -1339,6 +1362,11 @@ async def start_streaming(
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
         raise
 
+    progress_token = (
+        streams.set((*streams.get(), weakref.ref(streamed_result)))
+        if may_run_plugins(current_agent)
+        else None
+    )
     try:
         pending_feedback: str | None = None
         while True:
@@ -1720,10 +1748,40 @@ async def start_streaming(
             if streamed_result.is_complete:
                 break
 
-            if run_state is not None and run_state._pending_input:
-                if run_state._current_step is None:
+            steering = streamed_result._reserve_steering()
+            if steering and (
+                run_state is None
+                or not isinstance(run_state._current_step, NextStepRunAgain)
+                or (max_turns is not None and current_turn >= max_turns)
+            ):
+                streamed_result._finish_steering(False)
+                steering = 0
+            if run_state is not None and (run_state._pending_input or steering):
+                admission_state = run_state
+                if steering:
+                    await _check_streamed_input(streamed_result, run_state)
+                    if streamed_result._cancel_mode != "none":
+                        continue
+                    # Do not expose unadmitted live text in a concurrent to_state().
+                    admission_state = copy(run_state)
+                    admission_state.clear_pending_input()
+                    for text, _receipt in streamed_result._steering[:steering]:
+                        admission_state.add_input(text)
+                    admission_state._session_items = streamed_result.new_items
+                    if current_redactor() is not None:
+                        candidates = [
+                            InputItem(agent=current_agent, raw_item=item)
+                            for item in admission_state.pending_input
+                        ]
+                        require_clean_run_items(
+                            admission_state._original_input, streamed_result.new_items, candidates
+                        )
+                        require_clean_run_items(
+                            streamed_result.input, streamed_result._model_input_items, candidates
+                        )
+                elif run_state._current_step is None:
                     run_state._current_step = NextStepRunAgain()
-                pending_input = run_state.pending_input
+                pending_input = admission_state.pending_input
                 pending_guardrails = current_agent.input_guardrails + (
                     run_config.input_guardrails or []
                 )
@@ -1757,14 +1815,34 @@ async def start_streaming(
                 store_setting = current_agent.model_settings.resolve(
                     run_config.model_settings
                 ).store
-                admission_items = await admit_pending_input(
-                    run_state=run_state,
+                if steering and streamed_result._cancel_mode != "none":
+                    continue
+                admission = admit_pending_input(
+                    run_state=admission_state,
                     agent=current_agent,
                     session=session,
                     server_conversation_tracker=server_conversation_tracker,
                     store=store_setting,
                     wrapper=context_wrapper,
                 )
+                interrupted_write = False
+                if steering and session is not None:
+                    # A cancelled append may still commit. Settle the checked write
+                    # before deciding what to publish in replay and on the receipt.
+                    run_state._terminal_unrecoverable = True
+                    write = asyncio.create_task(admission)
+                    try:
+                        while not write.done():
+                            try:
+                                await asyncio.shield(write)
+                            except asyncio.CancelledError:
+                                interrupted_write = True
+                        admission_items = write.result()
+                    except BaseException:
+                        streamed_result._finish_steering(None, steering)
+                        raise
+                else:
+                    admission_items = await admission
                 streamed_result._model_input_items.extend(admission_items)
                 streamed_result.new_items.extend(admission_items)
                 if pending_server_items is not None:
@@ -1775,10 +1853,20 @@ async def start_streaming(
                 if not run_state._pending_input:
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
+                if steering:
+                    run_state._terminal_unrecoverable = False
+                    streamed_result._finish_steering(True, steering)
+                    if interrupted_write:
+                        raise asyncio.CancelledError
+                    if streamed_result._cancel_mode != "none":
+                        continue
 
             current_turn += 1
             feedback, pending_feedback = pending_feedback, None
             streamed_result.current_turn = current_turn
+            streamed_result._can_steer = (
+                not is_resumed_state and server_conversation_tracker is None
+            )
             streamed_result._current_turn_persisted_item_count = 0
             if run_state is not None:
                 run_state._current_turn_persisted_item_count = 0
@@ -2145,9 +2233,10 @@ async def start_streaming(
                     ),
                 )
 
-                streamed_result.raw_responses = streamed_result.raw_responses + [
-                    turn_result.model_response
-                ]
+                if not streamed_result._steering_reserved:
+                    streamed_result.raw_responses = streamed_result.raw_responses + [
+                        turn_result.model_response
+                    ]
                 _accumulate_tool_guardrail_results(
                     streamed_result,
                     turn_result,
@@ -2169,7 +2258,11 @@ async def start_streaming(
                 ):
                     streamed_result._model_input_items = model_input_items
                     streamed_result.new_items.extend(turn_session_items)
-                if pending_input_admission_items and run_state is not None:
+                if (
+                    pending_input_admission_items
+                    and run_state is not None
+                    and not streamed_result._steering_reserved
+                ):
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
                     run_state._model_responses = list(streamed_result.raw_responses)
@@ -2209,16 +2302,7 @@ async def start_streaming(
                     # A failed input check makes this completed speculative turn non-resumable:
                     # replaying it would skip the starting agent's guardrails. Keep its executed
                     # call/output records coherent instead of partially rolling back history.
-                    try:
-                        if streamed_result._input_guardrails_task is not None:
-                            await streamed_result._input_guardrails_task
-                        for guardrail_result in streamed_result.input_guardrail_results:
-                            if guardrail_result.output.tripwire_triggered:
-                                raise InputGuardrailTripwireTriggered(guardrail_result)
-                    except BaseException:
-                        if run_state is not None:
-                            run_state._terminal_unrecoverable = True
-                        raise
+                    await _check_streamed_input(streamed_result, run_state)
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
@@ -2268,6 +2352,11 @@ async def start_streaming(
                         break
                     if turn_result.next_step.continue_after_guardrails:
                         pending_feedback = turn_result.feedback
+                        if streamed_result._steering_reserved:
+                            streamed_result.raw_responses = [
+                                *streamed_result.raw_responses,
+                                turn_result.model_response,
+                            ]
                         streamed_result._model_input_items = model_input_items
                         streamed_result.new_items.extend(turn_session_items)
                         streamed_result._replay_from_model_input_items = (
@@ -2419,6 +2508,10 @@ async def start_streaming(
     else:
         streamed_result.is_complete = True
     finally:
+        streamed_result._can_steer = False
+        streamed_result._finish_steering(False)
+        if progress_token is not None:
+            streams.reset(progress_token)
         await cleanup_models_after_run(tool_use_tracker)
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
@@ -2514,6 +2607,10 @@ async def run_single_turn_streamed(
 
     with guard_agent_tool_configuration(public_agent):
         if should_run_agent_start_hooks:
+            if public_agent.plugins:
+                from .._plugin_state import bind_plugins
+
+                bind_plugins(public_agent, context_wrapper, run_config.plugin_revision)
             agent_hook_context = AgentHookContext(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
@@ -2522,6 +2619,7 @@ async def run_single_turn_streamed(
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
+                *agent_events(context_wrapper, public_agent, "agent_start"),
                 hooks.on_agent_start(agent_hook_context, public_agent),
                 (
                     public_agent.hooks.on_start(agent_hook_context, public_agent)
@@ -2571,6 +2669,11 @@ async def run_single_turn_streamed(
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
         validate_output_guardrails_for_server_model(public_agent, run_config, model)
+    if public_agent.plugins or context_wrapper._plugin_selections:
+        from .._plugin_state import bind_plugins
+
+        bind_plugins(public_agent, context_wrapper, run_config.plugin_revision)
+    validate_http(public_agent, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
@@ -2609,6 +2712,7 @@ async def run_single_turn_streamed(
 
     filtered = await maybe_filter_model_input(
         agent=public_agent,
+        server_managed=server_conversation_tracker is not None,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=_with_feedback(input, feedback, server_conversation_tracker, session),
@@ -2629,6 +2733,7 @@ async def run_single_turn_streamed(
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     await gather_with_cancel(
+        *agent_events(context_wrapper, public_agent, "model_start"),
         hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
             public_agent.hooks.on_llm_start(
@@ -2887,6 +2992,7 @@ async def run_single_turn_streamed(
                 if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
+            *agent_events(context_wrapper, public_agent, "model_end"),
             hooks.on_llm_end(context_wrapper, public_agent, final_response),
         )
         return response_accepted
@@ -2918,6 +3024,7 @@ async def run_single_turn_streamed(
         before_side_effects=check_input_guardrails_before_side_effects,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
+        steer_after_final=streamed_result._reserve_steering_after_final,
         on_tool_error_selected=on_tool_error_selected,
     )
 
@@ -2967,6 +3074,10 @@ async def run_single_turn(
 
     with guard_agent_tool_configuration(public_agent):
         if should_run_agent_start_hooks:
+            if public_agent.plugins:
+                from .._plugin_state import bind_plugins
+
+                bind_plugins(public_agent, context_wrapper, run_config.plugin_revision)
             agent_hook_context = AgentHookContext(
                 context=context_wrapper.context,
                 usage=context_wrapper.usage,
@@ -2975,6 +3086,7 @@ async def run_single_turn(
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
             await gather_with_cancel(
+                *agent_events(context_wrapper, public_agent, "agent_start"),
                 hooks.on_agent_start(agent_hook_context, public_agent),
                 (
                     public_agent.hooks.on_start(agent_hook_context, public_agent)
@@ -3058,6 +3170,7 @@ async def run_single_turn(
                 if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
+            *agent_events(context_wrapper, public_agent, "model_end"),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),
         )
         return response_accepted
@@ -3112,6 +3225,7 @@ async def get_new_response(
     execution_agent = bindings.execution_agent
     filtered = await maybe_filter_model_input(
         agent=public_agent,
+        server_managed=server_conversation_tracker is not None,
         run_config=run_config,
         context_wrapper=context_wrapper,
         input_items=input,
@@ -3129,6 +3243,11 @@ async def get_new_response(
     if server_conversation_tracker is not None:
         server_conversation_tracker.validate_model(model)
         validate_output_guardrails_for_server_model(public_agent, run_config, model)
+    if public_agent.plugins or context_wrapper._plugin_selections:
+        from .._plugin_state import bind_plugins
+
+        bind_plugins(public_agent, context_wrapper, run_config.plugin_revision)
+    validate_http(public_agent, model)
     tool_use_tracker.record_model(model)
     model_settings = get_model_settings(
         public_agent,
@@ -3147,6 +3266,7 @@ async def get_new_response(
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
     await gather_with_cancel(
+        *agent_events(context_wrapper, public_agent, "model_start"),
         hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
         (
             public_agent.hooks.on_llm_start(
@@ -3270,6 +3390,7 @@ async def get_new_response(
                 if public_agent.hooks is not None
                 else _coro.noop_coroutine()
             ),
+            *agent_events(context_wrapper, public_agent, "model_end"),
             hooks.on_llm_end(context_wrapper, public_agent, new_response),
         )
 

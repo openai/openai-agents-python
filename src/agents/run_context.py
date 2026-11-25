@@ -4,7 +4,8 @@ import copy
 import json
 import weakref
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import cached_property
 from typing import TYPE_CHECKING, Annotated, Any, Generic, cast
 from uuid import uuid4
 
@@ -43,8 +44,11 @@ from .run_budget import _BudgetState
 from .usage import Usage
 
 if TYPE_CHECKING:
+    from ._plugin_state import PluginCallState
     from ._run_state_agent_identity import _DecisionPath
+    from .agent import Agent
     from .items import ToolApprovalItem, TResponseInputItem
+    from .plugins import Plugin
     from .run_internal.tool_declarations import PreparedTool
 else:
     # Keep runtime annotations resolvable for TypeAdapter users (e.g., Temporal's
@@ -291,8 +295,20 @@ class RunContextWrapper(Generic[TContext]):
             # A fresh live decision takes precedence over transported state.
             self._approvals.setdefault(resolved, record)
 
+    # Outside the dataclass fields so converters never export live tools or callbacks.
+    _plugin_revision = cast("str | None", None)
+    _plugin_selections = cast("tuple[tuple[Agent[Any], tuple[Plugin[Any], ...]], ...]", ())
+
+    @cached_property
+    def _plugin_calls(self) -> dict[str, PluginCallState]:
+        return {}
+
     def _share_tool_state_with(self, target: RunContextWrapper[Any]) -> None:
         """Share tool approval and invocation state with a derived context wrapper."""
+        if self._plugin_selections:
+            target._plugin_selections = self._plugin_selections
+            target._plugin_revision = self._plugin_revision
+            target._plugin_calls = self._plugin_calls
         target._approvals = self._approvals
         target._tool_invocations = self._tool_invocations
         target._allow_legacy_approval_binding_reconstruction = (
@@ -310,6 +326,8 @@ class RunContextWrapper(Generic[TContext]):
         copied.usage = copy.deepcopy(self.usage)
         if self._budget is not None:
             copied._budget = copy.copy(self._budget)
+        if self._plugin_selections:
+            copied._plugin_calls = self._plugin_calls.copy()
         copied._approvals = copy.deepcopy(self._approvals)
         copied._tool_invocations = copy.deepcopy(self._tool_invocations)
         copied._restored_unbound_approval_call_ids = set(self._restored_unbound_approval_call_ids)
@@ -1214,6 +1232,12 @@ class RunContextWrapper(Generic[TContext]):
         rejection_message: str | None = None,
     ) -> None:
         """Record an approval or rejection decision."""
+        plugin_call = None
+        if self._plugin_selections or getattr(approval_item, "_plugin_proposal", None) is not None:
+            from ._plugin_state import check_plugin_proposal
+
+            plugin_call = check_plugin_proposal(self, approval_item)
+
         from .models._codex_items import native_approval_checkpoint
 
         if native_approval_checkpoint(approval_item.raw_item) is not None and always:
@@ -1369,6 +1393,8 @@ class RunContextWrapper(Generic[TContext]):
         if invocation is not None:
             assert call_id is not None
             self._restored_unbound_approval_call_ids.discard(call_id)
+            if plugin_call is not None and plugin_call.required:
+                self._plugin_calls[call_id] = replace(plugin_call, approved=approve)
 
     def approve_tool(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
         """Approve a tool call, optionally for future calls.

@@ -497,15 +497,16 @@ async def test_sandbox_provider_preserves_released_fields_and_survives_preparati
         model=ScriptedModel([[assistant_message("done")]]),
         hooks=AgentHooks(final_output_policy=finish),
     )
-    assert [f.name for f in fields(SandboxAgent) if f.init][-5:] == [
+    assert [f.name for f in fields(SandboxAgent) if f.init][-6:] == [
         "default_manifest",
         "base_instructions",
         "capabilities",
         "run_as",
         "decisions",
+        "plugins",
     ]
     for agent in (Agent(name="Helper", decisions=provider), worker):
-        assert fields(agent)[-1].kw_only
+        assert {f.name for f in fields(agent) if f.kw_only} >= {"decisions", "plugins"}
         assert "decisions=" not in repr(agent)
         assert agent.clone().decisions is replace(agent).decisions is provider
     assert await worker.decide("Ready?", input="start")

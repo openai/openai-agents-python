@@ -217,7 +217,7 @@ async def validate_pending_text_transforms(
                 continue
             matches = [
                 candidate
-                for candidate in snapshot_agent_tools(agent)
+                for candidate in agent._tools_with_plugins(snapshot_agent_tools(agent))
                 if isinstance(candidate, FunctionTool)
                 and candidate.is_enabled is not False
                 and key in get_function_tool_lookup_keys(candidate)

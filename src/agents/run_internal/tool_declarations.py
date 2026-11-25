@@ -102,7 +102,7 @@ class PreparedTool:
         if self.binding and (
             index is None
             or not 0 <= index < len(agent.mcp_servers)
-            or any(item is tool for item in self.execution.tools)
+            or any(item is tool for item in self.execution._tools_with_plugins())
         ):
             raise UserError("Use agent.mcp_servers for MCP tools with prepare_tool_declaration.")
         self.server = agent.mcp_servers[index] if index is not None else None
@@ -160,12 +160,12 @@ class PreparedTool:
                 raise UserError("The prepared MCP recipient changed before execution.")
         elif (
             self._capability_source() != self.capability
-            or all(item is not tool for item in self.execution.tools)
+            or all(item is not tool for item in self.execution._tools_with_plugins())
             # Execution clones can retain a direct tool removed from the public agent.
             or (
                 self.capability is None
                 and self.execution is not self.agent
-                and all(item is not tool for item in self.agent.tools)
+                and all(item is not tool for item in self.agent._tools_with_plugins())
             )
         ):
             raise UserError("The prepared function is no longer configured.")

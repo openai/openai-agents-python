@@ -18,6 +18,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from .._plugin_state import require_plugin_revision
 from .._redaction import current_redactor, require_clean
 from ..exceptions import (
     UserError,
@@ -252,6 +253,7 @@ class ResumableSession:
         context_override: ContextOverride | None = None,
         context_deserializer: ContextDeserializer | None = None,
         strict_context: bool = False,
+        plugin_revision: str | None = None,
     ) -> RunState[Any, Any]:
         """Load the run waiting for approval, using this worker's agent and tools.
 
@@ -260,6 +262,8 @@ class ResumableSession:
         The runner saves the outcome in this session. If you also pass ``session=``,
         pass the session that loaded the state. On another worker, resume by session
         ID and call ``load_state`` again to restore the connection to the store.
+        For plugin runs, supply the trusted ``RunConfig.plugin_revision`` and
+        replace any application context with a fresh ``context_override``.
         """
         from ..run_state import RunState
 
@@ -275,6 +279,7 @@ class ResumableSession:
                 context_override=context_override,
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
+                plugin_revision=plugin_revision,
             )
             if not state.get_interruptions():
                 failed = True
@@ -328,6 +333,7 @@ class ResumableSession:
         self, input: Any, tool_hooks: ModelToolHooks, tool_not_found_behavior: ToolNotFoundBehavior
     ) -> None:
         self._validate_run(input)
+        require_plugin_revision(tool_hooks.context)
         if current_redactor() is not None:
             require_clean(tool_hooks.context.context)
         if not self.is_paused:
