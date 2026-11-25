@@ -113,19 +113,24 @@ def specialist(
     client: Client,
     *,
     question: str,
-    artifact_id: str,
+    artifact_id: str | None,
     verdicts: tuple[str, ...],
     durable: DurableCall | None = None,
 ) -> Plugin[None]:
-    """Create once per owner and question. The token provider must recheck the grant."""
+    """Create once per owner and question. The token provider must recheck the grant.
+
+    Pass artifact_id=None to accept any nonempty ID on the task's single artifact.
+    """
     if client.rpc_token_provider is None or client.card_json is None:
         raise ValueError("Supply a grant-checking token provider and a local Agent Card.")
     endpoint: str = getattr(client, "rpc_url", "") if durable is not None else ""
     if durable is not None and not endpoint:
         raise ValueError("Durable calls require a client with a fixed rpc_url.")
     allowed = frozenset(verdicts)
-    if not question or not artifact_id or not allowed or allowed & {"", "pending", "unknown"}:
-        raise ValueError("Supply a question, artifact ID and nonempty, non-reserved verdicts.")
+    if artifact_id is not None and not artifact_id:
+        raise ValueError("Supply a nonempty artifact ID or None.")
+    if not question or not allowed or allowed & {"", "pending", "unknown"}:
+        raise ValueError("Supply a question and nonempty, non-reserved verdicts.")
 
     attempted = False
     receipt: tuple[str, str] | None = None
@@ -137,7 +142,11 @@ def specialist(
             return "pending"
         if task.status.state == TaskState.TASK_STATE_COMPLETED and len(task.artifacts) == 1:
             artifact = task.artifacts[0]
-            if artifact.artifact_id == artifact_id and len(artifact.parts) == 1:
+            if (
+                artifact.artifact_id
+                and (artifact_id is None or artifact.artifact_id == artifact_id)
+                and len(artifact.parts) == 1
+            ):
                 verdict = artifact.parts[0].text
                 if verdict in allowed:
                     return verdict

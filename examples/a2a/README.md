@@ -6,6 +6,10 @@ Install the optional client with `pip install '.[a2a]'` from this checkout. A di
 
 Supply the approved endpoint as `rpc_url` and its UTF-8 Agent Card JSON bytes as `card_json`. On each request, `rpc_token_provider()` must check the current user's grant for that endpoint and return a fresh token. Keep this function non-blocking. The service must enforce task ownership.
 
+For HTTPS with a private certificate authority, pass a trusted PEM file to `A2AClient` as `ca_file`. This client then trusts only the roots in that file, even if `SSL_CERT_FILE` points elsewhere. It checks the hostname for both the RPC URL and a card URL on the same origin. Other clients keep their own trust settings. Without `ca_file`, the default roots depend on your platform and HTTP library. Never take the file path or destination from model output.
+
+By default, `send_message` asks the service to wait for a result. For long tasks, set `return_immediately=True` when creating the client. A conforming service can return a pending task or a task that has already finished. Check the returned status. Use `refresh_task` to read a pending task when the user authorizes that read. The client never polls or resends automatically.
+
 This example assumes the user may read a direct reply or the completed task's `verdict` artifact. It accepts only one text part, `yes` or `no`. Inside an async function, send once and check progress at most once.
 
 ```python

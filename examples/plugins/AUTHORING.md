@@ -21,7 +21,7 @@ build-backend = "hatchling.build"
 name = "desk-hours"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["openai-agents==0.25.0+plugins.preview.1"]
+dependencies = ["openai-agents==0.25.0+plugins.preview.2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["desk_hours"]
@@ -83,6 +83,8 @@ asyncio.run(main())
 ```
 
 To use a real model, replace the scripted model with a model name. For opt-in Codex, supply `RunConfig(model_provider=provider)` and close the provider after use. See [provider setup and a complete call](README.md#choose-the-provider). Use the combined preview wheel for Codex. A scripted model bypasses the provider, so use the loopback verifier below to test the provider path.
+
+For a real service check, follow the [upstream A2A trial](contract/README.md#test-with-the-upstream-hello-world-agent). The peer runs its own A2A server. The Python and opt-in Codex checks reuse the same installed specialist plugin and use local model responses.
 
 ## Choose the hook for the job
 

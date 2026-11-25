@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -49,7 +51,12 @@ def _origin(value: str) -> tuple[str, str, int | None]:
     return url.scheme, url.host, url.port
 
 
-async def _fetch(url: str, token: Callable[[], str] | None, body: bytes | None = None) -> bytes:
+async def _fetch(
+    url: str,
+    token: Callable[[], str] | None,
+    verify: ssl.SSLContext | Literal[True],
+    body: bytes | None = None,
+) -> bytes:
     headers = {"Accept-Encoding": "identity", "A2A-Version": "1.0"}
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -63,7 +70,9 @@ async def _fetch(url: str, token: Callable[[], str] | None, body: bytes | None =
         headers["Authorization"] = f"Bearer {bearer}"
 
     # Keep cookies, redirects and ambient proxy settings out of both requests.
-    async with httpx2.AsyncClient(trust_env=False, follow_redirects=False, timeout=None) as client:
+    async with httpx2.AsyncClient(
+        verify=verify, trust_env=False, follow_redirects=False, timeout=None
+    ) as client:
         async with client.stream(
             "GET" if body is None else "POST", url, content=body, headers=headers
         ) as response:
@@ -87,6 +96,10 @@ class A2AClient:
 
     Token providers must check current grants for their respective URLs without blocking.
     Treat every field of a returned Message or Task as private, untrusted peer data.
+    For HTTPS, ca_file replaces the default trust store with an application-approved
+    PEM bundle. Each operation loads it once for both the card and RPC.
+    Set return_immediately to request a reply before work finishes. The reply may
+    already be complete. The client never polls or retries.
     """
 
     rpc_url: str
@@ -95,6 +108,8 @@ class A2AClient:
     rpc_token_provider: Callable[[], str] | None = field(default=None, repr=False)
     card_token_provider: Callable[[], str] | None = field(default=None, repr=False)
     timeout: float = 10.0
+    ca_file: str | Path | None = field(default=None, repr=False)
+    return_immediately: bool = False
 
     def __post_init__(self) -> None:
         origin = _origin(self.rpc_url)
@@ -111,6 +126,11 @@ class A2AClient:
             raise TypeError("card_token_provider must be callable")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("timeout must be positive and finite")
+        if self.ca_file is not None:
+            if not isinstance(self.ca_file, (str, Path)) or not self.ca_file:
+                raise ValueError("ca_file must be a nonempty file path")
+            if origin[0] != "https":
+                raise ValueError("ca_file requires HTTPS")
 
     async def send_message(self, text: str, *, message_id: str) -> Message | Task:
         """Send once and return an agent message or task. The caller owns the unique message ID."""
@@ -121,7 +141,9 @@ class A2AClient:
                 message_id=message_id, role=a2a.ROLE_USER, parts=[a2a.Part(text=text)]
             ),
             configuration=a2a.SendMessageConfiguration(
-                accepted_output_modes=["text/plain"], history_length=0
+                accepted_output_modes=["text/plain"],
+                history_length=0,
+                return_immediately=self.return_immediately,
             ),
         )
         return await self._call(request)
@@ -178,10 +200,19 @@ class A2AClient:
         if len(body) > _REQUEST_BYTES:
             raise A2AError("request")
 
+        verify: ssl.SSLContext | Literal[True] = True
+        if self.ca_file is not None:
+            # Verify certificates and hostnames without consulting SSLKEYLOGFILE.
+            verify = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            try:
+                verify.load_verify_locations(cafile=self.ca_file)
+            except (OSError, ValueError):
+                raise A2AError("request") from None
+
         raw = self.card_json
         if raw is None:
             assert self.card_url is not None
-            raw = await _fetch(self.card_url, self.card_token_provider)
+            raw = await _fetch(self.card_url, self.card_token_provider, verify)
         if len(raw) > _RESPONSE_BYTES:
             raise A2AError("protocol")
         card = ParseDict(json.loads(raw), a2a.AgentCard())
@@ -194,7 +225,7 @@ class A2AClient:
         ):
             raise A2AError("protocol")
 
-        reply = json.loads(await _fetch(self.rpc_url, self.rpc_token_provider, body))
+        reply = json.loads(await _fetch(self.rpc_url, self.rpc_token_provider, verify, body))
         if reply.get("jsonrpc") != "2.0" or reply.get("id") != rpc_id:
             raise A2AError("protocol")
         if ("result" in reply) == ("error" in reply):

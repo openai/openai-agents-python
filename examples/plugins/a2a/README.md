@@ -20,6 +20,8 @@ refresh_specialist -> ready
 
 See the [loopback example](src/agents_specialist/example.py) for the SDK client, scripted model, and simulated approvals. No API key required.
 
+For a separate server, follow [Test with the upstream Hello World agent](../contract/README.md#test-with-the-upstream-hello-world-agent). That check uses an installed plugin and an unmodified A2A service in different environments.
+
 ## Select the question and allowed replies
 
 ```python
@@ -38,12 +40,21 @@ def release_manager(client, *, durable=None):
     return Agent(name="Release manager", plugins=[check])
 ```
 
-Expect no model arguments for either tool and only a status or verdict in the output.
+The application chooses the question, service and allowed replies. Neither tool takes model-supplied arguments. A real service can complete the task on the first call. Only refresh a pending task after a separate approval. The local example deliberately returns a pending task first.
+
+For a long operation, create the client with `return_immediately=True`. This asks the service to return the task before work finishes. It may already be complete. If the result is `pending`, request approval before calling `refresh_specialist`. This option does not poll, retry a send, or recover a lost initial reply. By default, the client waits for the service's response. A timeout can occur after the service accepts the task.
+
+Choose how to identify the result.
+
+- Keep `artifact_id="readiness"` when the service promises that exact ID. A different ID returns `unknown`.
+- Pass `artifact_id=None` when the service assigns a fresh ID to the task's only artifact. The [A2A specification](https://a2a-protocol.org/latest/specification/#417-artifact) requires an ID unique within the task. The caller need not know it in advance. The plugin still requires one nonempty ID, one text part and an exact match in `verdicts`. Use this option only for a service where the sole artifact represents the result you expect.
+
+A direct A2A message, multiple artifacts or free-form text outside the allowlist returns `unknown`. This plugin handles task verdicts. For other reply formats, use your own tool or client.
 
 | Condition | Tool result |
 | --- | --- |
 | Submitted or working task | `pending` |
-| Completed task with exactly one artifact, the expected ID, and one allowed text part | The matching verdict |
+| Completed task with one artifact matching the selected ID rule and one allowed text part | The matching verdict |
 | Other reply, error, repeated send, or no matching task | `unknown` |
 
 Without `durable`, use the same plugin instance to refresh a pending task. In this mode, expect no recovery after a lost first reply or a process restart. The only copy of the task and context IDs on the manager's side is in memory.
@@ -81,6 +92,28 @@ Run the [recovery tests](tests/test_durable.py) from the repository root. In the
 ```sh
 python -m unittest discover -s examples/plugins/a2a/tests -v
 ```
+
+## Connect to a service with a private certificate authority
+
+A partner may sign its HTTPS certificate with a private certificate authority (CA). Obtain the CA bundle and approved endpoint from the service operator through a trusted channel. With this preview, pass the PEM file to the optional SDK client. This affects only this client. The server certificate must still match the host. Omit `ca_file` for the default trust roots.
+
+```python
+from pathlib import Path
+
+from agents.extensions.a2a import A2AClient
+
+
+def partner_agent(rpc_url, card_path, ca_path, token_for_current_grant):
+    client = A2AClient(
+        rpc_url=rpc_url,
+        card_json=Path(card_path).read_bytes(),
+        rpc_token_provider=token_for_current_grant,
+        ca_file=ca_path,
+    )
+    return release_manager(client)
+```
+
+Use the `release_manager` function above with a service that returns the configured `readiness` artifact. The factory does not send anything. Review the destination and question before approving a call. A transport error, an unexpected result or a lost response can all yield `unknown`. Check the service's records before considering another send.
 
 ## Before connecting a live specialist
 

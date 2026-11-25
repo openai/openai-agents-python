@@ -1,6 +1,6 @@
 # Build the plugin preview
 
-Build `openai-agents==0.25.0+plugins.preview.1` locally from the plugin branch. For installation and examples, see the [plugin guide](../README.md).
+Build `openai-agents==0.25.0+plugins.preview.2` locally from the plugin branch. For installation and examples, see the [plugin guide](../README.md).
 
 Start at the repository root in a clean checkout. Use Python 3.12 and `uv` in one Bash session. Build both variants from the same Python source without editing the SDK version.
 
@@ -8,7 +8,7 @@ Start at the repository root in a clean checkout. Use Python 3.12 and `uv` in on
 
 ```bash
 preview=examples/plugins/preview
-pywheel=dist/python/openai_agents-0.25.0+plugins.preview.1-py3-none-any.whl
+pywheel=dist/python/openai_agents-0.25.0+plugins.preview.2-py3-none-any.whl
 uv run --no-project --with hatchling==1.33.0 python "$preview/build.py" --out-dir dist/python
 bash examples/plugins/check_installed.sh "$pywheel"
 ```
@@ -23,7 +23,7 @@ Use CPython on Linux x86-64 with glibc 2.28 or newer. Start with the Python buil
 gh run download 45484940731 --repo openai/openai-agents-python \
   --name codex-wheel-manylinux_2_28_x86_64 --dir dist/runtime
 original=dist/runtime/openai_agents-1.0.0a2-cp310-abi3-manylinux_2_28_x86_64.whl
-native=dist/codex/openai_agents-0.25.0+plugins.preview.1-cp310-abi3-manylinux_2_28_x86_64.whl
+native=dist/codex/openai_agents-0.25.0+plugins.preview.2-cp310-abi3-manylinux_2_28_x86_64.whl
 uv run --no-project --with hatchling==1.33.0 python "$preview/build.py" \
   --out-dir dist/codex --codex-wheel "$original"
 python "$preview/verify_wheels.py" "$pywheel" "$native" "$original"

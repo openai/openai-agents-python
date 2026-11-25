@@ -52,6 +52,7 @@ COMMON_PATH_HINTS = (
 DISCOVERY_EXCLUDE = {
     # These build and test entry points need separately installed wheels or CLI arguments.
     "examples/plugins/a2a/tests/test_durable.py",
+    "examples/plugins/contract/check_helloworld.py",
     "examples/plugins/contract/test_ticket.py",
     "examples/plugins/preview/build.py",
     "examples/plugins/preview/verify_wheels.py",

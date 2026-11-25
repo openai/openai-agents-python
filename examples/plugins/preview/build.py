@@ -47,7 +47,7 @@ def main() -> None:
     args = parser.parse_args()
     with TemporaryDirectory() as temporary:
         builder = CodexWheelBuilder(str(ROOT)) if args.codex_wheel else WheelBuilder(str(ROOT))
-        builder.raw_config["project"]["version"] += "+plugins.preview.1"
+        builder.raw_config["project"]["version"] += "+plugins.preview.2"
         config = builder.raw_config["tool"]["hatch"]["build"]
         config["exclude"] += ["/src/agents/models/_codex_bin", "/src/agents/models/_codex_native.*"]
         if args.codex_wheel:

@@ -13,7 +13,9 @@ Only install packages you trust. They run with the application's Python permissi
 
 ## Install the preview
 
-Use Python 3.10 or later in a fresh environment. Get **one** trusted `0.25.0+plugins.preview.1` wheel from the maintainer. The Python wheel needs no Codex installation. The Linux x86-64 wheel also supports the opt-in Codex provider, with Python as the default. Both use the same plugin packages. This is an unpublished branch preview. Installing a stock SDK or running `pip install .` in the SDK checkout does not install this version.
+Use Python 3.10 or later in a fresh environment. Get **one** trusted `0.25.0+plugins.preview.2` wheel from the maintainer. The Python wheel needs no Codex installation. The Linux x86-64 wheel also supports the opt-in Codex provider, with Python as the default. Both use the same plugin packages. This is an unpublished branch preview. Installing a stock SDK or running `pip install .` in the SDK checkout does not install this version.
+
+**Upgrading from preview 1.** The original kit still works as a set. Its example wheels pin that SDK exactly. Install the preview 2 SDK and the new example wheels together in a fresh environment. If your own package pins preview 1, update its dependency, rebuild and test it before switching. Existing fixed-ID calls keep their meaning. Review the deployment revision before restoring any saved approval. The released v0 SDK version and the Codex runtime have not changed.
 
 Maintainers can [build the preview wheels](preview/README.md). Run these commands from the checkout root in one shell.
 
@@ -23,7 +25,7 @@ python -m venv "$workdir/venv"
 . "$workdir/venv/bin/activate"
 python -m pip install hatchling==1.33.0
 python examples/plugins/preview/build.py --out-dir "$workdir/wheels"
-python -m pip install "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.1-py3-none-any.whl
+python -m pip install "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.2-py3-none-any.whl
 ```
 
 For a first package, see [Write and install a plugin](AUTHORING.md). To test your own installed wheel outside this checkout, copy the [partner test kit](contract/README.md).
@@ -37,7 +39,7 @@ python -m pip install './examples/plugins/a2a[example]'
 python -m agents_specialist.example
 ```
 
-The first approved call returns `pending`. A second approved call reads the task and returns `ready`. The example uses synthetic grants and a fixed question. In a real application, show the destination and question to the reviewer and check the signed-in user's grant again before each request.
+In this simulation, the first approved call returns `pending`. A second approved call reads the task and returns `ready`. A real service can finish on the first call. [Run the same plugin against the upstream A2A sample](contract/README.md#test-with-the-upstream-hello-world-agent) to see that path. The example uses synthetic grants and a fixed question. In a real application, show the destination and question to the reviewer and check the signed-in user's grant again before each request.
 
 | Package | Public entry point | What the example exercises |
 | --- | --- | --- |
@@ -135,7 +137,7 @@ The A2A example can use the SDK's optional client or a partner's own compatible 
 From the SDK root, use the same shell and wheel as in [Install the preview](#install-the-preview). Each command creates a temporary environment, builds and installs all eight example packages, and tests them against local fixtures. No model key, vendor account or paid inference is needed. Installing dependencies may require a package index.
 
 ```sh
-bash examples/plugins/check_installed.sh "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.1-py3-none-any.whl
+bash examples/plugins/check_installed.sh "$workdir/wheels/"openai_agents-0.25.0+plugins.preview.2-py3-none-any.whl
 ```
 
 For the combined Linux wheel, pass its path and add `--codex`. This runs the same checks in Python and then in Codex. The local model server verifies which provider made the request. A missing binding fails the Codex check.

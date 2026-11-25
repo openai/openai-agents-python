@@ -4,8 +4,11 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import ssl
 from contextlib import closing
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from uuid import uuid4
 
@@ -133,6 +136,83 @@ def stored(url: str) -> A2AClient:
     )
 
 
+def _loopback_tls(tmp_path: Path) -> tuple[ssl.SSLContext, Path]:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "synthetic")])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.IPAddress(ip_address("127.0.0.1"))]), False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_file, key_file = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_file.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+    key_file.unlink()
+    return context, cert_file
+
+
+@pytest.mark.asyncio
+async def test_private_trust_is_scoped_to_one_clients_card_and_rpc(tmp_path, monkeypatch):
+    context, cert_file = _loopback_tls(tmp_path)
+    with closing(sqlite3.connect(":memory:")) as db:
+        peer = Receiver(db, "yes")
+        server = TestServer(peer.app)
+        await server.start_server(ssl=context)
+        async with server:
+            client = A2AClient(
+                rpc_url=str(server.make_url("/rpc")),
+                card_url=str(server.make_url("/card")),
+                rpc_token_provider=lambda: "synthetic-rpc",
+                card_token_provider=lambda: "synthetic-card",
+                ca_file=cert_file,
+            )
+            assert str(cert_file) not in repr(client)
+            keylog = tmp_path / "keys.log"
+            monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+            task = await client.send_message("Ready?", message_id="one")
+            assert isinstance(task, Task) and task.artifacts[0].parts[0].text == "yes"
+            assert not keylog.exists()
+            with pytest.raises(A2AError, match="transport"):
+                await replace(client, ca_file=None).refresh_task(task)
+            cert_file.unlink()
+            with pytest.raises(A2AError, match="^A2A request error$") as exc:
+                await client.refresh_task(task)
+            assert exc.value.__context__ is None
+            assert peer.methods == ["card", "SendMessage"]
+
+
+@pytest.mark.parametrize("ca_file", [False, ""])
+def test_private_trust_rejects_invalid_paths(ca_file):
+    with pytest.raises(ValueError, match="ca_file"):
+        replace(stored("https://example.org/rpc"), ca_file=ca_file)
+
+
+def test_private_trust_requires_https():
+    with pytest.raises(ValueError, match="HTTPS"):
+        replace(stored("http://127.0.0.1/rpc"), ca_file="private.pem")
+
+
 @pytest.mark.asyncio
 async def test_direct_message_preserves_standard_fields_without_a_task():
     methods = []
@@ -148,6 +228,7 @@ async def test_direct_message_preserves_standard_fields_without_a_task():
         body = await request.json()
         methods.append(body["method"])
         assert body["params"]["message"]["messageId"] == "outgoing"
+        assert "returnImmediately" not in body["params"]["configuration"]
         return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": {"message": reply}})
 
     app = web.Application()
@@ -177,6 +258,7 @@ async def test_refresh_task_reads_once_and_checks_both_ids(mismatch):
         methods.append(body["method"])
         task = {"id": "one", "contextId": "group", "status": {"state": "TASK_STATE_WORKING"}}
         if body["method"] == "SendMessage":
+            assert body["params"]["configuration"]["returnImmediately"] is True
             result = {"task": task}
         else:
             assert body["params"] == {"id": "one", "historyLength": 0}
@@ -188,7 +270,7 @@ async def test_refresh_task_reads_once_and_checks_both_ids(mismatch):
     app = web.Application()
     app.router.add_post("/rpc", handle)
     async with TestServer(app) as server:
-        client = stored(str(server.make_url("/rpc")))
+        client = replace(stored(str(server.make_url("/rpc"))), return_immediately=True)
         pending = await client.send_message("Ready?", message_id=uuid4().hex)
         assert isinstance(pending, Task)
         assert methods == ["SendMessage"]
