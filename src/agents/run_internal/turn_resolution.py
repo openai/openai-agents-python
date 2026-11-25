@@ -407,15 +407,16 @@ def _get_turn_input(
             ItemHelpers.input_to_new_input_list(original_input) if len(ids) < len(task) else []
         )
         keys = _user_message_keys(history)
-        task_input: list[TResponseInputItem] = []
-        for key in task:
-            if isinstance(key, str):
-                if key in visible:
-                    task_input.append(visible[key])
-            elif keys.get(key[0]) == key[1]:
-                task_input.append(history[key[0]])
-            else:
-                raise UserError("Invalid active task input references.")
+        positions = {ref[0]: ref[1] for ref in task if isinstance(ref, tuple)}
+        if any(keys.get(i) != key for i, key in positions.items()):
+            raise UserError("Invalid active task input references.")
+        include_non_user = None in task
+        task_input = [
+            item
+            for i, item in enumerate(history)
+            if i in positions or (include_non_user and i not in keys)
+        ]
+        task_input.extend(visible[key] for key in task if isinstance(key, str) and key in visible)
         original_input = task_input
     try:
         return ItemHelpers.input_to_new_input_list(original_input)
@@ -723,7 +724,7 @@ class _HandoffTaskInputs:
         self,
         history: str | list[TResponseInputItem],
         items: list[RunItem],
-        task: Container[str | tuple[int, str]],
+        task: Container[str | tuple[int, str] | None],
         turn_input: list[TResponseInputItem],
     ) -> None:
         self._input_ids: dict[str, _MessageOwner] = {}
@@ -894,8 +895,7 @@ class _HandoffTaskInputs:
             # The first follow-up has not passed admission yet.
             return
         refs = [ref for ref, keep in zip(keys.items(), current, strict=True) if keep]
-        generated = (ref for ref in task if isinstance(ref, str))
-        state._task_input_ids = (*refs, *generated)
+        state._replace_task_input_refs(refs, (ref for ref in task if isinstance(ref, str)))
 
 
 async def execute_handoffs(
@@ -1203,7 +1203,7 @@ async def execute_handoffs(
                     original_input[index] = source
         run_state._original_input = copy_input_items(original_input)
         run_state._generated_items = list(items)
-        run_state._task_input_ids = (*history_refs, *item_refs)
+        run_state._replace_task_input_refs(history_refs, item_refs)
 
     return SingleStepResult(
         original_input=original_input,

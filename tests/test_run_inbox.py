@@ -949,6 +949,133 @@ async def test_server_filtered_input_survives_approval_state_roundtrip(
 
 
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_mid_task_steers_reach_tool_guardrails(streamed: bool) -> None:
+    inbox = RunInbox()
+    entered, release = asyncio.Event(), asyncio.Event()
+    checked: list[list[str]] = []
+    effects: list[str] = []
+    original = "Publish the public draft."
+    follow_up = "Publish the private draft."
+    corrections = ["Do not publish the public draft.", "Do not publish the private draft."]
+
+    @function_tool
+    async def review() -> str:
+        entered.set()
+        await release.wait()
+        release.clear()
+        return "Reviewed."
+
+    @tool_input_guardrail
+    def check_publication(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        task = messages(data.context.turn_input)
+        checked.append(task)
+        if any(correction in task for correction in corrections):
+            return ToolGuardrailFunctionOutput.reject_content("Publication blocked.")
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(tool_input_guardrails=[check_publication])
+    async def publish() -> str:
+        effects.append("published")
+        return "Published."
+
+    @function_tool(needs_approval=True, tool_input_guardrails=[check_publication])
+    async def publish_private() -> str:
+        effects.append("published private draft")
+        return "Published."
+
+    model = ScriptedModel(
+        [
+            [function_call("review", "{}", call_id="review-public")],
+            [function_call("publish", "{}", call_id="publish-public")],
+            [assistant_message("Public review complete.")],
+            [function_call("review", "{}", call_id="review-private")],
+            [function_call("publish_private", "{}", call_id="publish-private")],
+            [assistant_message("Private review complete.")],
+        ]
+    )
+    agent = Agent(name="editor", model=model, tools=[review, publish, publish_private])
+    run = asyncio.create_task(drive(streamed, agent, original, inbox=inbox))
+    try:
+        await wait(entered)
+        entered.clear()
+        inbox.queue(follow_up)
+        first = inbox.steer(corrections[0])
+        release.set()
+        await wait(entered)
+        second = inbox.steer(corrections[1])
+        release.set()
+        paused = await asyncio.wait_for(run, 3)
+    finally:
+        await finish(run, release)
+
+    assert first.status == second.status == "submitted"
+    assert messages(model.calls[1].input) == [original, corrections[0]]
+    assert messages(model.calls[4].input) == [original, corrections[0], follow_up, corrections[1]]
+    state = await RunState.from_string(agent, paused.to_state().to_string())
+    state.approve(state.get_interruptions()[0])
+    await drive(streamed, agent, state)
+    assert effects == []
+    assert checked == [[original, corrections[0]], [follow_up, corrections[1]]]
+    for call in (model.calls[2], model.calls[5]):
+        assert call.input[-1]["output"] == "Publication blocked."
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("approval", [False, True], ids=["direct", "json-approval"])
+async def test_steer_preserves_mixed_initial_input_for_tool_guardrail(
+    streamed: bool, approval: bool
+) -> None:
+    inbox = RunInbox()
+    initial = [
+        {"role": "developer", "content": "Ask before publishing."},
+        {"role": "assistant", "content": "The draft is ready."},
+        {"role": "user", "content": "Publish it."},
+    ]
+    correction = {"role": "user", "content": "Wait for my review."}
+    expected = [(item["role"], item["content"]) for item in [*initial, correction]]
+    checked: list[list[tuple[str, str | None]]] = []
+    effects: list[str] = []
+
+    @function_tool
+    async def review() -> str:
+        inbox.steer(correction["content"])
+        return "Reviewed."
+
+    @tool_input_guardrail
+    def check_publication(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        task = data.context.turn_input
+        checked.append(
+            [(item.get("role", ""), message_text(item, item.get("role", ""))) for item in task]
+        )
+        if correction["content"] in messages(task):
+            return ToolGuardrailFunctionOutput.reject_content("Publication blocked.")
+        return ToolGuardrailFunctionOutput.allow()
+
+    @function_tool(needs_approval=approval, tool_input_guardrails=[check_publication])
+    async def publish() -> str:
+        effects.append("published")
+        return "Published."
+
+    model = ScriptedModel(
+        [
+            [function_call("review", "{}", call_id="review")],
+            [function_call("publish", "{}", call_id="publish")],
+            [assistant_message("Done.")],
+        ]
+    )
+    agent = Agent(name="editor", model=model, tools=[review, publish])
+    result = await drive(streamed, agent, initial, inbox=inbox)
+    if approval:
+        assert checked == effects == []
+        state = await RunState.from_string(agent, result.to_state().to_string())
+        state.approve(state.get_interruptions()[0])
+        await drive(streamed, agent, state)
+    assert checked == [expected]
+    assert effects == []
+    assert model.calls[-1].input[-1]["output"] == "Publication blocked."
+
+
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("serialize", [False, True], ids=["in-memory", "json"])
 async def test_approved_tool_guardrail_checks_follow_up_after_resume(
     streamed: bool, serialize: bool
@@ -1010,6 +1137,8 @@ async def test_approved_tool_guardrail_checks_follow_up_after_resume(
         "negative-position",
         "out-of-range-position",
         "history-missing-items",
+        "history-missing-context-flag",
+        "history-invalid-context-flag",
         "history-empty",
         "history-negative",
         "history-boolean",
@@ -1080,7 +1209,13 @@ async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
         # The intermediate writer omitted follow-up identity. It cannot resume safely.
         with pytest.raises(UserError, match="schema version is not supported"):
             await RunState.from_json(agent, payload)
+        # The 1.27 writer could identify a follow-up but omit a later steer.
+        payload["$schemaVersion"] = "1.27"
+        payload["task_input_refs"] = [first]
+        with pytest.raises(UserError, match="schema version is not supported"):
+            await RunState.from_json(agent, payload)
         payload["$schemaVersion"] = "1.25"
+        payload.pop("task_input_refs")
         # The older label alone is valid. It cannot carry a newer task selection.
         await RunState.from_json(agent, payload)
         payload["task_input_refs"] = [first, second]
@@ -1092,6 +1227,8 @@ async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
         ]
         positions = {
             "history-missing-items": [0],
+            "history-missing-context-flag": [0],
+            "history-invalid-context-flag": [0],
             "history-empty": [],
             "history-negative": [-1],
             "history-boolean": [False],
@@ -1100,9 +1237,17 @@ async def test_approval_rejects_invalid_task_input_refs(invalid: str) -> None:
             "history-unsorted": [2, 0],
             "history-non-user": [1],
         }[invalid]
-        payload["task_input_refs"] = {"history": positions, "items": []}
+        payload["task_input_refs"] = {
+            "history": positions,
+            "items": [],
+            "include_non_user_history": False,
+        }
         if invalid == "history-missing-items":
             del payload["task_input_refs"]["items"]
+        elif invalid == "history-missing-context-flag":
+            del payload["task_input_refs"]["include_non_user_history"]
+        elif invalid == "history-invalid-context-flag":
+            payload["task_input_refs"]["include_non_user_history"] = 1
     else:
         payload["task_input_refs"] = {
             "unknown-id": ["missing"],
@@ -1192,6 +1337,58 @@ async def test_follow_up_survives_session_append_failure(
     assert not effects
     assert not request.tools
     assert request.system_instructions == expected
+    assert await receipt.wait() == outcome
+
+
+@pytest.mark.parametrize("clear_pending", [False, True], ids=["retained", "cleared"])
+async def test_steer_after_failed_session_append_preserves_original_task(
+    clear_pending: bool,
+) -> None:
+    correction = "Wait for my review."
+
+    class Session(SimpleListSession):
+        failed = False
+
+        async def add_items(self, items):
+            if not self.failed and correction in messages(items):
+                self.failed = True
+                raise RuntimeError("correction append failed")
+            await super().add_items(items)
+
+    @function_tool
+    async def review() -> str:
+        return "Reviewed."
+
+    session = Session()
+    model = ScriptedModel(
+        [[function_call("review", "{}", call_id="review")], [assistant_message("Done.")]]
+    )
+    agent = Agent(
+        name="editor",
+        model=model,
+        tools=[review],
+        instructions=lambda ctx, agent: " | ".join(messages(ctx.turn_input)),
+    )
+    original = "Publish the draft."
+    stream = Runner.run_streamed(
+        agent, original, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    receipt = stream.steer(correction)
+    with pytest.raises(RuntimeError, match="correction append failed"):
+        async for _ in stream.stream_events():
+            pass
+    outcome = await receipt.wait()
+    assert outcome.status == "not_submitted" and outcome.retained
+    state = stream.to_state()
+    assert messages(state.pending_input) == [correction]
+    if clear_pending:
+        state.clear_pending_input()
+    state = await RunState.from_string(agent, state.to_string())
+    await drive(False, agent, state, session=session)
+    expected = [original] if clear_pending else [original, correction]
+    assert messages(model.calls[-1].input) == expected
+    assert model.calls[-1].system_instructions == " | ".join(expected)
+    assert messages(await session.get_items()) == expected
     assert await receipt.wait() == outcome
 
 

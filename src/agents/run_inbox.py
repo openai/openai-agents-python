@@ -133,15 +133,17 @@ class RunInbox:
     Use ``await receipt.wait()`` in a separate task or after the run ends if you
     need the submission outcome. Waiting inside a tool can block delivery.
 
-    If approval pauses a follow-up, the checkpoint identifies the active task
-    so guardrails see the same input after resume. It does not save the inbox
-    or messages still waiting in the queue.
+    After the SDK admits a steer, tool policies and guardrails see it in
+    context.turn_input alongside the task it updates. A message admitted
+    after an answer starts a separate task. An approval checkpoint keeps
+    that task's input, including its admitted steers. It does not save the
+    inbox or messages still waiting in the queue.
 
     Custom handoff filters should preserve message objects or InputItem IDs
     when editing or moving messages. This lets tool guardrails distinguish the
     current task from earlier requests. To replace a task with a summary,
     edit its message in place or keep its InputItem ID. Use steer() or queue()
-    to add a new instruction. If the run continues after an answer, a handoff
+    to add a new instruction. Once the SDK admits an inbox message, a handoff
     filter or sandbox context hook can rebuild messages without their original
     objects or IDs only if it preserves the entire sequence of user messages
     and the SDK can still identify each message's task. Otherwise the run
@@ -308,12 +310,8 @@ class RunInbox:
         return redact_items(items)
 
     def _stage(self, items: list[TResponseInputItem], run_state: RunState[Any]) -> None:
-        run_state._pending_input.extend(items)
+        run_state._stage_inbox_input(items, new_task=bool(self._pending_output))
         self._retained = True
-        if self._pending_output:
-            # A follow-up starts a new task. A steer during a tool turn
-            # stays with the current task. Retries must keep that distinction.
-            run_state._task_input_ids = run_state._track_pending_input()[-len(items) :]
 
     def _admitted(self, items: list[InputItem]) -> None:
         if self._batch:

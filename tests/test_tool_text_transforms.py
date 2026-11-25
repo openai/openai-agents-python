@@ -940,13 +940,13 @@ async def test_pending_text_requirement_uses_current_checkpoint_schema(historica
     config = RunConfig(tool_execution=ToolExecutionConfig(tool_text_transforms=[(report, edit)]))
     paused = await Runner.run(agent, "go", run_config=config)
     snapshot = paused.to_state().to_json()
-    assert snapshot["$schemaVersion"] == "1.27"
+    assert snapshot["$schemaVersion"] == "1.28"
     snapshot["$schemaVersion"] = historical
-    with pytest.raises(UserError, match="require RunState schema 1.27"):
+    with pytest.raises(UserError, match="require RunState schema 1.28"):
         await RunState.from_json(agent, snapshot)
     del snapshot["context"]["tool_invocations"]["one"]["requires_text_transform"]
     state = await RunState.from_json(agent, snapshot)
-    assert not effects and state.to_json()["$schemaVersion"] == "1.27"
+    assert not effects and state.to_json()["$schemaVersion"] == "1.28"
     state.approve(state.get_interruptions()[0])
     result = await Runner.run(agent, state, run_config=config)
     assert effects == [True] and RAW not in result.to_state().to_string()
@@ -981,14 +981,18 @@ async def test_invalid_task_reference_cannot_drop_pending_child():
         await RunState.from_json(parent, snapshot)
     assert not effects
 
-    # A 1.26 child has no task references to trigger the required-child check.
-    snapshot = paused.to_state().to_json()
-    nested = snapshot["last_processed_response"]["functions"][0]["agent_run_state"]
-    nested["$schemaVersion"] = "1.26"
-    del nested["task_input_refs"]
-    with pytest.raises(UserError, match="schema version is not supported"):
-        await RunState.from_json(parent, snapshot)
-    assert not effects
+    # Intermediate writers could omit a follow-up or a mid-task steer.
+    for version in ("1.26", "1.27"):
+        snapshot = paused.to_state().to_json()
+        nested = snapshot["last_processed_response"]["functions"][0]["agent_run_state"]
+        nested["$schemaVersion"] = version
+        if version == "1.26":
+            del nested["task_input_refs"]
+        else:
+            nested["task_input_refs"] = None
+        with pytest.raises(UserError, match="schema version is not supported"):
+            await RunState.from_json(parent, snapshot)
+        assert not effects
 
     state = await RunState.from_json(parent, paused.to_state().to_json())
     state.approve(state.get_interruptions()[0])
@@ -1116,12 +1120,12 @@ async def test_missing_editor_leaves_session_paused_for_corrected_retry(streamed
     if route == "child":
         snapshot = paused.to_state().to_json()
         child = snapshot["last_processed_response"]["functions"][0]["agent_run_state"]
-        assert child["$schemaVersion"] == snapshot["$schemaVersion"] == "1.27"
+        assert child["$schemaVersion"] == snapshot["$schemaVersion"] == "1.28"
         for node in (child, snapshot):
             node["$schemaVersion"] = "1.25"
-            with pytest.raises(UserError, match="require RunState schema 1.27"):
+            with pytest.raises(UserError, match="require RunState schema 1.28"):
                 await RunState.from_json(agent, snapshot)
-            node["$schemaVersion"] = "1.27"
+            node["$schemaVersion"] = "1.28"
         assert not effects
     saved = store.records[session.session_id]
 

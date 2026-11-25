@@ -822,6 +822,40 @@ async def test_child_budget_stop_uses_existing_tool_error_policy(streamed):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("method", ["steer", "queue"])
+async def test_budget_stop_closes_inbox_before_checkpoint(streamed, method):
+    @tool
+    def record() -> str:
+        return "saved"
+
+    store = MemoryStore()
+    session = await ResumableSession.create(store)
+    store.block_checkpoint = True
+    inbox = RunInbox()
+    model = ScriptedModel([[get_function_tool_call("record")]])
+    agent = Agent(name="root", model=model, tools=[record])
+    task = asyncio.create_task(
+        run(agent, RunBudget(max_model_calls=1), streamed, session=session, inbox=inbox)
+    )
+    try:
+        # No steer is waiting when the mandatory second request exhausts the budget.
+        await asyncio.wait_for(store.saving.wait(), timeout=5)
+        with pytest.raises(UserError, match="not accepting"):
+            getattr(inbox, method)("too late")
+    finally:
+        store.release.set()
+        with pytest.raises(RunBudgetError) as error:
+            await asyncio.wait_for(task, timeout=5)
+    assert error.value.limit == "model_calls"
+    assert len(model.calls) == 1
+    history = store.checkpoint(session.session_id)["history"]
+    assert [item["output"] for item in history if item.get("type") == "function_call_output"] == [
+        "saved"
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("session_mode", ["none", "ordinary", "durable", "failed_save"])
 @pytest.mark.parametrize("protected", [False, True])
 async def test_stream_budget_stop_publishes_only_committed_work(session_mode, protected):

@@ -558,7 +558,7 @@ async def test_follow_up_turn_input_survives_tool_continuation(
         return [get_text_message("first answer")]
 
     def instructions(context: RunContextWrapper[Any], agent: Agent[Any]) -> str:
-        return str(context.turn_input[0].get("content"))
+        return " | ".join(str(item.get("content")) for item in context.turn_input)
 
     def enabled(context: RunContextWrapper[Any], agent: AgentBase[Any]) -> bool:
         return context.turn_input == second
@@ -578,13 +578,14 @@ async def test_follow_up_turn_input_survives_tool_continuation(
     agent = Agent(name="test", model=model, hooks=hooks, tools=[work], instructions=instructions)
     result = await _run_with_inbox(agent, inbox, streamed, server_managed=server_managed)
 
-    assert hooks.captured_turn_inputs == hooks.end_inputs == [first, second]
+    assert hooks.captured_turn_inputs == [first, second]
+    assert hooks.end_inputs == [first, [*second, {"role": "user", "content": "clarification"}]]
     assert [call.system_instructions for call in model.calls] == [
         "first task",
         "second task",
-        "second task",
+        "second task | clarification",
     ]
-    assert [bool(call.tools) for call in model.calls] == [False, True, True]
+    assert [bool(call.tools) for call in model.calls] == [False, True, False]
     all_messages = ["first task", "second task", "clarification"]
     for history in (result.to_input_list(), result.to_input_list(mode="normalized")):
         assert [
@@ -658,9 +659,9 @@ async def test_filtered_follow_up_keeps_task_input_on_server_retry(
         task[0],
         task[0],
     ]
-    assert model.calls[2].system_instructions == " | ".join(task)
-    assert model.calls[2].tools
-    assert hooks.end_inputs[-1] == expected
+    assert model.calls[2].system_instructions == " | ".join([*task, task[0]])
+    assert not model.calls[2].tools
+    assert hooks.end_inputs[-1] == [*expected, expected[0]]
 
 
 @pytest.mark.parametrize("streamed", [False, True])

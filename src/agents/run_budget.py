@@ -201,6 +201,11 @@ async def _admit(
         budget.check()
         budget.requests += 1
     except (RunBudgetError, UserError) as error:
+        from .run_inbox import stop_inbox_intake
+
+        # No further request can accept input, even while guardrails finish
+        # or the session saves the completed tool results.
+        stop_inbox_intake()
         if streamed_result is not None:
             from .run_internal.guardrails import input_guardrail_tripwire_triggered_for_stream
 

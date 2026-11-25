@@ -8,7 +8,7 @@ import dataclasses
 import json
 import math
 from collections import deque
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, cast, get_args
 from uuid import uuid4
@@ -269,7 +269,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.27"
+CURRENT_SCHEMA_VERSION = "1.28"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -338,10 +338,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     ),
     "1.24": "Requires caller-supplied text redaction when resuming protected RunState snapshots.",
     "1.25": "Preserves required Runner budgets and consumption across approval resumes.",
-    # Replace the unreleased 1.26 writer. It would ignore the active task on resume.
-    "1.27": (
-        "Preserves the active task across approval resumes and requires an exact text "
-        "editor when resuming selected tool calls."
+    # The unreleased 1.26 and 1.27 writers could omit task input on resume.
+    "1.28": (
+        "Preserves the active task and its steers across approval resumes and requires "
+        "an exact text editor when resuming selected tool calls."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -882,8 +882,9 @@ def _copy_tool_approval_raw_item(raw_item: Any) -> Any:
     raise TypeError("Unsupported tool approval raw item")
 
 
-# Follow-up message IDs, or (position, content digest) pairs after a history rewrite.
-_TaskInputRef = str | tuple[int, str]
+# Message IDs and (position, content digest) pairs identify user messages.
+# A None entry keeps the original task's non-user context alongside them.
+_TaskInputRef = str | tuple[int, str] | None
 _TaskInputRefs = tuple[_TaskInputRef, ...] | None
 
 
@@ -959,8 +960,8 @@ class RunState(Generic[TContext, TAgent]):
     _pending_input: list[TResponseInputItem] = field(default_factory=list)
     """Input staged for admission immediately before the next resumed model call."""
 
-    # None selects the original task. A follow-up can span history, generated
-    # items and pending input. Keep its references in the order seen by the agent.
+    # Before the first inbox admission, None selects the original input.
+    # A tracked task can span history, generated items and pending input.
     # An empty tuple means there is no visible task until new input arrives.
     _task_input_ids: _TaskInputRefs = field(default=None, init=False, repr=False, compare=False)
     # Input stays pending until the session saves it or the server acknowledges it.
@@ -1184,9 +1185,13 @@ class RunState(Generic[TContext, TAgent]):
         visible = self._visible_task_inputs(ids, self._generated_items)
         items = [pending.get(key, key) for key in task if isinstance(key, str) and key in visible]
         history = [key for key in task if isinstance(key, tuple)]
-        if history:
+        if history or None in task:
             self._validate_task_history(self._original_input)
-            return {"history": [i for i, _ in history], "items": items}
+            return {
+                "history": [i for i, _ in history],
+                "items": items,
+                "include_non_user_history": None in task,
+            }
         return items
 
     def _restore_task_input_refs(
@@ -1199,12 +1204,18 @@ class RunState(Generic[TContext, TAgent]):
             return validation_error_factory("Invalid active task input references.", UserError)
 
         ids: list[_TaskInputRef] = []
-        if isinstance(refs, dict) and set(refs) == {"history", "items"}:
+        if isinstance(refs, dict):
+            if set(refs) != {"history", "items", "include_non_user_history"} or not isinstance(
+                refs["include_non_user_history"], bool
+            ):
+                raise invalid()
+            if refs["include_non_user_history"]:
+                ids.append(None)
             positions = refs["history"]
             keys = _user_message_keys(self._original_input)
             if (
                 not isinstance(positions, list)
-                or not positions
+                or (not positions and None not in ids)
                 or any(type(i) is not int or i not in keys for i in positions)
                 or positions != sorted(set(positions))
             ):
@@ -1423,6 +1434,31 @@ class RunState(Generic[TContext, TAgent]):
 
         normalized = ItemHelpers.input_to_new_input_list(input)
         self._pending_input.extend(copy.deepcopy(normalized))
+
+    def _stage_inbox_input(self, items: list[TResponseInputItem], *, new_task: bool) -> None:
+        """Bind guarded input to its task before a session write can fail."""
+        previous = self._task_input_ids
+        start = len(self._pending_input)
+        if new_task:
+            previous = ()
+        elif previous is None:
+            # The first mid-task steer extends the same prepared input the
+            # tool policy already saw, including developer and assistant context.
+            previous = (None, *_user_message_keys(self._original_input).items())
+        elif not previous:
+            # A replacement staged with add_input() after withdrawal also
+            # belongs to the empty task, as in _track_pending_input().
+            start = 0
+        self._pending_input.extend(items)
+        added = self._track_pending_input()[start:]
+        self._task_input_ids = (*previous, *added)
+
+    def _replace_task_input_refs(
+        self, history: list[tuple[int, str]], items: Iterable[str]
+    ) -> None:
+        """Keep the original task's context when a hook moves its user messages."""
+        prefix = (None,) if None in (self._task_input_ids or ()) else ()
+        self._task_input_ids = (*prefix, *history, *items)
 
     def _track_pending_input(self) -> tuple[str, ...]:
         """Assign stable identities before storage or model dispatch can fail."""
@@ -3048,19 +3084,24 @@ def _validate_pending_approvals(
                 requires_budget |= budget
                 requires_editor |= editor
                 requires_task |= task
-    # A 1.26 child lacks the marker that would otherwise make its restoration mandatory.
-    if requires_budget or requires_editor or requires_task or state.get("$schemaVersion") == "1.26":
+    # Unreleased children can omit task input even when no marker is present.
+    if (
+        requires_budget
+        or requires_editor
+        or requires_task
+        or state.get("$schemaVersion") in ("1.26", "1.27")
+    ):
         version = _validate_run_state_schema_version(
             state, validation_error_factory=validation_error_factory
         )
         schema = tuple(map(int, version.split(".")))
-        if requires_task and schema < (1, 27):
+        if requires_task and schema < (1, 28):
             raise validation_error_factory(
-                "Active task input requires RunState schema 1.27.", UserError
+                "Active task input requires RunState schema 1.28.", UserError
             )
-        if requires_editor and schema < (1, 27):
+        if requires_editor and schema < (1, 28):
             raise validation_error_factory(
-                "Tool text transforms require RunState schema 1.27.", UserError
+                "Tool text transforms require RunState schema 1.28.", UserError
             )
         if requires_budget and schema < (1, 25):
             raise _BudgetCheckpointError("Run budgets require schema 1.25 or later.")
@@ -6287,7 +6328,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state pending_input must be a list",
         "Missing active task input references.",
         "Invalid active task input references.",
-        "Active task input requires RunState schema 1.27.",
+        "Active task input requires RunState schema 1.28.",
         "Run state pending Session write is invalid",
         "Invalid tool output guardrail result boundary",
         "Run state tool output guardrail result boundary requires schema 1.20.",
@@ -6328,7 +6369,7 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         _REQUIRED_CHILD_MISSING,
         "RunState tool_invocations must be a mapping.",
         "RunState tool_invocations contains an invalid call ID.",
-        "Tool text transforms require RunState schema 1.27.",
+        "Tool text transforms require RunState schema 1.28.",
         "RunState tool text transform requirement is invalid.",
         "RunState tool invocation must be a mapping.",
         "RunState tool invocation contains invalid lifecycle data.",
