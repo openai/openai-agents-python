@@ -50,6 +50,8 @@ COMMON_PATH_HINTS = (
 )
 
 DISCOVERY_EXCLUDE = {
+    # The partner verifier runs as a standalone script with separately installed wheels.
+    "examples/plugins/verify_partner_routes.py",
     "examples/run_examples.py",
     "examples/sandbox/tutorials/data/dataroom/setup.py",
 }

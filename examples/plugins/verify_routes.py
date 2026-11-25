@@ -12,13 +12,6 @@ from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import httpx2
-from a2a.types import Artifact, Part, Task, TaskState, TaskStatus
-from agents_browser import browser
-from agents_langsmith import langsmith
-from agents_permissions import permissions
-from agents_postman import postman
-from agents_specialist import specialist
 from openai import AsyncOpenAI
 
 from agents import Agent, RunConfig, Runner, RunState
@@ -37,9 +30,9 @@ CALLS = [
 ]
 
 
-def reply(turn: int) -> dict:
-    if turn < len(CALLS):
-        name, arguments = CALLS[turn]
+def reply(turn: int, calls) -> dict:
+    if turn < len(calls):
+        name, arguments = calls[turn]
         item = {
             "id": f"fc_{turn}",
             "type": "function_call",
@@ -72,7 +65,7 @@ def reply(turn: int) -> dict:
 
 
 @asynccontextmanager
-async def route(codex, workspace, requests):
+async def route(codex, workspace, requests, calls=CALLS):
     # ScriptedModel bypasses the native provider. Check the HTTP client on every turn.
     prefix = "codex_cli_rs/" if codex else "Agents/Python "
 
@@ -88,7 +81,7 @@ async def route(codex, workspace, requests):
             ):
                 self.send_error(400)
                 return
-            response = reply(len(requests))
+            response = reply(len(requests), calls)
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(body)
             self.send_response(200)
@@ -181,6 +174,14 @@ async def route(codex, workspace, requests):
 
 
 async def verify(codex: bool, workspace: Path):
+    import httpx2
+    from a2a.types import Artifact, Part, Task, TaskState, TaskStatus
+    from agents_browser import browser
+    from agents_langsmith import langsmith
+    from agents_permissions import permissions
+    from agents_postman import postman
+    from agents_specialist import specialist
+
     requests, records, effects = [], [], []
     url = "https://example.test/private-endpoint"
     collection = {

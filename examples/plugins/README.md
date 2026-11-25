@@ -1,6 +1,8 @@
-# Five reference plugins for the Agents SDK
+# Plugins for the Agents SDK
 
-Install the SDK from this branch in a fresh virtual environment. The five packages below use the same `Plugin` type and the ordinary `Runner`. Each package is independently installable. An application chooses each plugin explicitly on each agent. Only install packages you trust. A plugin runs Python code with the permissions of the application.
+Install the SDK from this branch in a fresh virtual environment. The packages below use the same `Plugin` type and the ordinary `Runner`. Each package is independently installable. An application chooses each plugin explicitly on each agent. Only install packages you trust. A plugin runs Python code with the permissions of the application.
+
+For a first package, see [Write and install a plugin](AUTHORING.md). The guide includes an offline test, a hook reference, and an approval example.
 
 ## Start with A2A
 
@@ -20,6 +22,14 @@ The first approved call returns `pending`. A second approved call reads the task
 | [Postman](postman/README.md) | `agents_postman.postman` | An allowlist of collection requests and bounded HTTP status checks |
 | [Browser automation](browser/README.md) | `agents_browser.browser` | Named actions and an optional offline Playwright adapter |
 | [Enterprise permissions](permissions/README.md) | `agents_permissions.permissions` | A host policy over the final arguments of SDK function calls, including approval resume |
+
+Three more packages exercise the public authoring API. Run them together with the [partner verifier](AUTHORING.md#try-the-three-packages-together).
+
+| Package | Public entry point | What the example exercises |
+| --- | --- | --- |
+| [Ticket desk](ticket/README.md) | `agents_ticket_desk.ticket_desk` | Approval before a write and a fresh access check at the service |
+| [Knowledge search](knowledge/README.md) | `agents_knowledge.knowledge` | Bounded search results and citations from a user-scoped client |
+| [Text masking](masking/README.md) | `agents_masking.masking` | Editing selected SDK function text results before the next model turn |
 
 These are reference implementations. The application supplies credentials, destinations, policy and any costs. The SDK does not sandbox imported packages or install them from model input. The permissions plugin covers SDK function tools. Hosted tools and native Codex actions need their own controls.
 
@@ -92,7 +102,7 @@ finally:
 
 Plain released v0 wheels lack the preview plugin API. Use a plugin-enabled SDK for these examples. Native Codex also needs a matching binding. The verified opt-in route uses a plugin-enabled alpha.2 Python SDK with its original native binding. The ordinary Python path works without that binding. The branch's A2A client is an optional SDK extension. A compatible application-supplied client also works with the specialist factory.
 
-## Check all five together
+## Check the first five together
 
 Install the five packages alongside a plugin-enabled SDK. From the repository root, in the selected SDK environment
 
@@ -111,7 +121,7 @@ The trial drives the real Runner against a local Responses server and checks the
 
 ## Resume a reviewed call
 
-For a live pause, use `state = result.to_state()`, review the final tool arguments, and call `state.approve(item)` or `state.reject(item)` on the current interruption. Pass that state back to `Runner.run`. Starting another plugin run with a reused context wrapper gives the new run its own approvals. Only an actual resume carries the old decision forward.
+For a live pause, use `state = result.to_state()`, review the final tool arguments, and call `state.approve(item)` or `state.reject(item)` on the current interruption. Pass that state back to `Runner.run` with the original agent. Omit `context` on live resume to keep the same application object. An equal but distinct object fails the identity check. Starting another plugin run with a reused context wrapper gives the new run its own approvals. Only an actual resume carries the old decision forward.
 
 For a saved single-agent approval, supply an application-owned `RunConfig(plugin_revision=...)` before the first run. Change the revision when the deployed tools or policy change. Authenticate the checkpoint and its owner, then supply the trusted revision and fresh application context to `RunState.from_string` or `ResumableSession.load_state`. A mismatch requires a fresh proposal and decision. Plugin approvals inside a handoff or a nested agent support in-memory resume only. A checkpoint does not store external clients, grants, or plugin-owned task receipts.
 

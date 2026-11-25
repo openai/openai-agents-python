@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-ticket-desk"
+version = "0.1.0"
+description = "Close a support ticket after per-call review and a current grant check"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["openai-agents"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agents_ticket_desk"]

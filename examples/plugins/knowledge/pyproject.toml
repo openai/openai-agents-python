@@ -1,0 +1,11 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-knowledge"
+version = "0.1.0"
+description = "Per-user knowledge search for the Agents SDK plugin preview"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["openai-agents"]

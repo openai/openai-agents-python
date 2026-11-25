@@ -14,6 +14,7 @@ This example uses `OPENAI_API_KEY` and sends a live model request. Other example
 | --- | --- |
 | Start an agent, use prompts, or stream output | [Basic examples](basic/README.md) |
 | Call Python, hosted, or local execution tools | [Tools](tools/README.md) |
+| Package and install an agent plugin (branch preview) | [Authoring guide](plugins/AUTHORING.md) and [plugin examples](plugins/README.md) |
 | Keep conversation history or recover approvals | [Memory and sessions](memory/README.md) |
 | Connect to MCP servers | [MCP](mcp/README.md) and [hosted MCP](hosted_mcp/README.md) |
 | Transfer work between agents | [Handoffs](handoffs/) |
