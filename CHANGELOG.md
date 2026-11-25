@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.26.1](https://github.com/openai/openai-agents-python/compare/v0.26.0...v0.26.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **deps:** update httpx2 requirement from &gt;=2.16.0 to &gt;=2.16.2 in /examples/realtime/twilio ([#6196](https://github.com/openai/openai-agents-python/issues/6196)) ([cd68216](https://github.com/openai/openai-agents-python/commit/cd68216a09844ba37fc5e0bcaf56a07121ae251c))
+* **deps:** update httpx2 requirement from &gt;=2.16.0 to &gt;=2.16.2 in /examples/realtime/twilio_sip ([#6198](https://github.com/openai/openai-agents-python/issues/6198)) ([0d10b5d](https://github.com/openai/openai-agents-python/commit/0d10b5d5a619103b0c2256c596816b74dbdd1aa4))
+* **deps:** update httpx2 requirement in /examples/realtime/twilio ([cd68216](https://github.com/openai/openai-agents-python/commit/cd68216a09844ba37fc5e0bcaf56a07121ae251c))
+* **deps:** update httpx2 requirement in /examples/realtime/twilio_sip ([0d10b5d](https://github.com/openai/openai-agents-python/commit/0d10b5d5a619103b0c2256c596816b74dbdd1aa4))
+* **deps:** update openai requirement from &lt;4,&gt;=3.48.0 to &gt;=3.52.0,&lt;4 in /examples/realtime/twilio_sip ([#6200](https://github.com/openai/openai-agents-python/issues/6200)) ([4e162c7](https://github.com/openai/openai-agents-python/commit/4e162c79a4a951c6fc8b698d5c8279c1963c099b))
+* **deps:** update openai requirement in /examples/realtime/twilio_sip ([4e162c7](https://github.com/openai/openai-agents-python/commit/4e162c79a4a951c6fc8b698d5c8279c1963c099b))
+* **deps:** update python-multipart requirement ([1b56a40](https://github.com/openai/openai-agents-python/commit/1b56a403b8e2e8dcc86c50717226f841c4d3062e))
+* **deps:** update python-multipart requirement from &gt;=0.0.33 to &gt;=0.0.34 in /examples/realtime/twilio ([#6197](https://github.com/openai/openai-agents-python/issues/6197)) ([1b56a40](https://github.com/openai/openai-agents-python/commit/1b56a403b8e2e8dcc86c50717226f841c4d3062e))
+
 ## [0.26.0](https://github.com/openai/openai-agents-python/compare/v0.25.0...v0.26.0) (2026-11-24)
 
 
