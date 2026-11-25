@@ -56,6 +56,7 @@ from agents.guardrail import (
 )
 from agents.handoffs import Handoff
 from agents.items import (
+    CompactionItem,
     HandoffOutputItem,
     ItemHelpers,
     MCPApprovalResponseItem,
@@ -4945,6 +4946,34 @@ class TestDeserializeHelpers:
         restored = await RunState.from_string(agent_a, state.to_string())
         assert len(restored._generated_items) == 1
         assert restored._generated_items[0].type == "handoff_output_item"
+
+    async def test_handoff_and_compaction_replay_after_restore(self):
+        target = Agent(name="target")
+        source = Agent(name="source", handoffs=[target])
+        state = make_state(source, context=RunContextWrapper(context=None))
+        output: TResponseInputItem = {
+            "type": "function_call_output",
+            "call_id": "transfer",
+            "output": [{"type": "input_text", "text": "accepted"}],
+        }
+        compaction: TResponseInputItem = {
+            "type": "compaction",
+            "id": "cmp_1",
+            "encrypted_content": "opaque",
+        }
+        state._generated_items.extend(
+            [
+                HandoffOutputItem(
+                    agent=target, source_agent=source, target_agent=target, raw_item=output
+                ),
+                CompactionItem(agent=target, raw_item=compaction),
+            ]
+        )
+
+        restored = await RunState.from_string(source, state.to_string())
+
+        assert [item.to_input_item() for item in restored._generated_items] == [output, compaction]
+        assert all(item.agent is target for item in restored._generated_items)
 
     async def test_model_response_serialization_roundtrip(self):
         """Test that model responses serialize and deserialize correctly."""
