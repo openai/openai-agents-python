@@ -30,6 +30,8 @@ def browser(actions: Mapping[str, Callable[[], Awaitable[str]]]) -> Plugin[Any]:
     async def browser_read(ctx: ToolContext[Any], action: str) -> str:
         await ctx.report_progress("Reading a page")
         text = await reads[action]()
+        if not isinstance(text, str):
+            raise TypeError("Browser actions must return a string.")
         if len(text) > 2000:
             text = text[:2000] + "…"
         return json.dumps({"action": action, "text": text})

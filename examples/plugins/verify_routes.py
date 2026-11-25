@@ -24,6 +24,7 @@ CALLS = [
     ("postman_check_request", {"name": "Ping"}),
     ("ask_specialist", {}),
     ("refresh_specialist", {}),
+    ("browser_read", {"action": "broken"}),
 ]
 
 
@@ -91,6 +92,10 @@ async def verify(codex: bool, workspace: Path):
         effects.append("restricted")
         return "private-page"
 
+    async def broken():
+        # Simulate an integration returning a service response instead of the requested text.
+        return {"text": "9 to 5", "token": "private-token"}
+
     def resolve(agent, policy, call, app):
         if policy != "permissions":
             return {}
@@ -109,7 +114,7 @@ async def verify(codex: bool, workspace: Path):
             model=MODEL,
             plugins=[
                 permissions(),
-                browser({"hours": hours, "restricted": restricted}),
+                browser({"hours": hours, "restricted": restricted, "broken": broken}),
                 postman(client, collection, approved={"Ping": url}),
                 specialist(
                     Specialist(),
@@ -169,7 +174,7 @@ async def verify(codex: bool, workspace: Path):
     assert outputs[0] == "Tool call refused."
     assert json.loads(outputs[1]) == {"action": "hours", "text": "9 to 5"}
     assert json.loads(outputs[2]) == ["Ping"]
-    assert outputs[3:] == ["HTTP 200", "pending", "ready"]
+    assert outputs[3:] == ["HTTP 200", "pending", "ready", "Browser read failed."]
     assert [r["outputs"] for r in records] == [{"status": "paused"}] * 3 + [{"status": "completed"}]
     assert all(r["inputs"] == {} and r["project_name"] == "Trial" for r in records)
     assert "CHAT_MARKER" not in repr(records) and "9 to 5" not in repr(records)

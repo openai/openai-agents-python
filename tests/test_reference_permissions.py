@@ -7,7 +7,12 @@ from agents import Agent, RunConfig, Runner, UserError
 from agents.items import ToolCallOutputItem
 from agents.testing import ScriptedModel, assistant_message, function_call
 from examples.plugins.permissions.src.agents_permissions import permissions
-from examples.plugins.permissions.src.agents_permissions.example import Records, records, resolve
+from examples.plugins.permissions.src.agents_permissions.example import (
+    Records,
+    records,
+    resolve,
+    resume_once,
+)
 
 KEY = ("acme", "pat", "R42")
 
@@ -130,3 +135,31 @@ async def test_approved_read_cannot_move_to_another_signed_in_user() -> None:
     with pytest.raises(UserError, match="original application context"):
         await Runner.run(agent, state, context=lee, run_config=config)
     assert not pat.reads and not lee.reads
+
+
+@pytest.mark.asyncio
+async def test_saved_approval_is_only_available_to_its_owner_once() -> None:
+    grants = {KEY: "review", ("other", "pat", "R42"): "review", ("acme", "lee", "R42"): "review"}
+    pat = Records("acme", "pat", grants)
+    config = RunConfig(policy_context=resolve, plugin_revision="desk-v1", tracing_disabled=True)
+    paused = await Runner.run(desk("latest"), "Read", context=pat, run_config=config)
+    (item,) = paused.interruptions
+    assert item.arguments and json.loads(item.arguments) == {"record_id": "R42"}
+    state = paused.to_state()
+    state.approve(item)
+    request_id = "request-1"
+    saved = {(pat.tenant, pat.subject, request_id): state.to_string()}
+
+    agent = desk()
+    for other in (Records("other", "pat", grants), Records("acme", "lee", grants)):
+        with pytest.raises(PermissionError):
+            await resume_once(agent, other, saved, request_id, config)
+        assert not other.reads
+
+    owner = Records("acme", "pat", grants)
+    finished = await resume_once(agent, owner, saved, request_id, config)
+    assert not finished.interruptions and not pat.reads
+    assert owner.reads == ["R42"]
+    with pytest.raises(PermissionError):
+        await resume_once(agent, owner, saved, request_id, config)
+    assert owner.reads == ["R42"]

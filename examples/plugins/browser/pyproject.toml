@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-browser"
-version = "0.1.2"
+version = "0.1.3"
 description = "App-approved browser reads for the Agents SDK"
 requires-python = ">=3.10"
 dependencies = ["openai-agents==0.25.0+plugins.preview.2"]

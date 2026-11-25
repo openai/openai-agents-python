@@ -34,10 +34,24 @@ Registration of a single action, with an app-supplied async function `hours()` r
 from agents import Agent
 from agents_browser import browser
 
+
+async def hours() -> str:
+    return "Weekdays from 9 to 5."
+
+
 agent = Agent("Desk", plugins=[browser({"hours": hours})])
 ```
 
 - **Model input** — One action name from the list in the tool description. No URL, selector, script or button from the model. For an unknown name, `Tool call refused.` before dispatch.
 - **Model output** — JSON text with the action name and up to 2,000 characters from the page. An extra ellipsis for a longer answer. Page text as untrusted data, never as instructions.
+- **Read failures** — If a callback raises an exception or returns something other than a string, the model receives `Browser read failed.` This prevents an accidental return of a whole service response. You still need to choose which text is safe to share.
 - **Access** — A copy of the action map at factory time. A fresh plugin per user and only names and answers safe for disclosure. For changing permissions, a fresh access check inside each function. Full app permissions for custom functions. Playwright optional.
-- **Browser lifetime** — In the [Playwright adapter](src/agents_browser/panels.py), one offline context per read, with JavaScript and downloads disabled. Only trusted app HTML with a collapsed `<details data-testid="…">`, a `<summary>` and one `<p>`. No live navigation or untrusted HTML. The app has been closing the browser after each run, including cancellation.
+- **Browser access** — In the [Playwright adapter](src/agents_browser/panels.py), one offline context per read, with JavaScript and downloads disabled. Only trusted app HTML with a collapsed `<details data-testid="…">`, a `<summary>` and one `<p>`. No live navigation or untrusted HTML.
+
+## Closing a shared browser
+
+If a caller cancels a read while Playwright creates a browser context, `read_panel` waits for creation to finish and closes that context. Other tabs and contexts stay open.
+
+`Runner.run` can return control to the caller before a cancelled tool finishes cleaning up. If your app closes the browser after the run, keep it open until those reads finish. The [offline example](src/agents_browser/example.py) shows how to do this with `async with browser_for_run({"hours": hours}) as plugin` inside the browser's `async with` block. Keep any approval and resume steps in the same scope. On exit, the helper refuses new reads and waits for the reads that started in that scope. It doesn't wait for reads in other scopes.
+
+Set timeouts on the operations in your callback. A callback that never finishes can keep the scope open indefinitely.

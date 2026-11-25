@@ -99,6 +99,33 @@ Import `PluginHooks` and the decision types from `agents.plugins`. Pass callback
 
 The table lists the four core hooks. The same API also includes experimental features. These include argument edits (`prepare_tool`), input filtering, lifecycle events, progress, streaming callbacks, local commands, installed-package discovery and HTTP hooks. Their contracts can change. A policy must review the final arguments after any edits.
 
+### Pass an app decision to a policy
+
+Pass a function to `RunConfig(policy_context=...)`. Before each check, the SDK calls this function with the agent, the name of the plugin doing the check, the proposed call, and the app context you passed to the Runner. Here the [permissions plugin](permissions/README.md) checks a tool that belongs to the [browser plugin](browser/README.md).
+
+```python
+from agents import RunConfig
+
+
+def resolve(agent, policy, call, app):
+    if policy == "permissions" and (call.owner, call.namespace, call.name) == (
+        "browser",
+        None,
+        "browser_read",
+    ):
+        return {"decision": app.decision_for(call.arguments["action"])}
+    return {}
+
+
+config = RunConfig(policy_context=resolve)
+```
+
+In this example, `app.decision_for(action)` looks up the signed-in user's current grant for that action. Scope the lookup to the agent too if agents have different grants. The checker reads the result from `call.context` as a read-only mapping. Without a resolver, this mapping is empty and the permissions plugin refuses the call. Return only what the checker needs. Keep credentials in the app.
+
+If you send arguments to a policy service, send only the fields it needs. Nested objects in `call.arguments` are read-only too. Use `json.dumps(fields, default=dict)` to encode the selected fields, including nested objects. A shallow `dict(call.arguments)` leaves those objects unchanged.
+
+### Run checks and observers safely
+
 If an observer calls a synchronous client with `asyncio.to_thread`, cancelling the await leaves the thread running. Closing the client at that point can interrupt the export. The [LangSmith example](langsmith/agents_langsmith/__init__.py) uses `await_session_mutation` from `agents.memory` to wait for the call to finish before passing cancellation back to the app. Set timeouts on the client, since a stuck call also delays cancellation. If the client queues writes, follow its shutdown instructions to drain that queue.
 
 Use decorated functions with plain JSON parameters under a policy or argument editor. The SDK checks enabled tools before sending the model request for that turn. For example, a `datetime.date` parameter needs conversion. Accept an ISO date string and parse it inside the tool instead. Checks that depend on the actual arguments still run after the model responds. The SDK checks policy again just before invocation, including after resume. Keep callbacks safe to repeat. A result filter alone does not require argument editing or policy checks.

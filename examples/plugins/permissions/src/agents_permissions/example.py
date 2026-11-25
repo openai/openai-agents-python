@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, RunConfig, RunContextWrapper, Runner, RunResult, RunState
 from agents.decorators import tool
 from agents.plugins import Plugin, PluginHooks, ReplaceArguments, ToolCall
 from agents.testing import ScriptedModel, assistant_message, function_call
@@ -61,6 +61,26 @@ def resolve(_agent: Agent[Any], policy: str, call: ToolCall, app: Records) -> di
     if not isinstance(record_id, str):
         return {}
     return {"decision": app.decision(record_id)}
+
+
+async def resume_once(
+    agent: Agent[Records],
+    app: Records,
+    saved: dict[tuple[str, str, str], str],
+    request_id: str,
+    config: RunConfig,
+) -> RunResult:
+    """Single-use lookup in a simulated, server-owned store."""
+    snapshot = saved.pop((app.tenant, app.subject, request_id), None)
+    if snapshot is None:
+        raise PermissionError("No saved approval for this request.")
+    restored = await RunState.from_string(
+        agent,
+        snapshot,
+        context_override=RunContextWrapper(app),
+        plugin_revision=config.plugin_revision,
+    )
+    return await Runner.run(agent, restored, run_config=config)
 
 
 async def main() -> None:
