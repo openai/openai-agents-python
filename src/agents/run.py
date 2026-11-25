@@ -106,7 +106,10 @@ from .run_internal.error_handlers import (
     build_run_error_data,
     resolve_run_error_handler_result,
 )
-from .run_internal.guardrails import input_guardrail_tool_gate_scope
+from .run_internal.guardrails import (
+    input_guardrail_tool_gate_scope,
+    preserve_parallel_input_guardrail_dispatch,
+)
 from .run_internal.items import (
     copy_input_items,
     ensure_nested_history_run_item_occurrence_key,
@@ -168,7 +171,6 @@ from .run_internal.tool_use_tracker import (
     serialize_tool_use_tracker,
 )
 from .run_state import RunState
-from .sandbox.memory.rollouts import terminal_metadata_for_exception
 from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
@@ -1059,6 +1061,8 @@ class AgentRunner:
                         g for g in all_input_guardrails if not g.run_in_parallel
                     ]
                     parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+                    if parallel_guardrails:
+                        preserve_parallel_input_guardrail_dispatch()
                     if sandbox_runtime.enabled and sequential_guardrails:
                         # Blocking first-turn guardrails must run before sandbox prep so a tripwire
                         # can prevent session creation, startup, or live-session mutation.
@@ -2476,6 +2480,8 @@ class AgentRunner:
                                 input_override=memory_input,
                             )
                         elif run_exception is not None:
+                            from .sandbox.memory.rollouts import terminal_metadata_for_exception
+
                             current_step = getattr(run_state, "_current_step", None)
                             await sandbox_runtime.enqueue_memory_payload(
                                 input=memory_input,

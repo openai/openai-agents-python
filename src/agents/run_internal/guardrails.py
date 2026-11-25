@@ -37,6 +37,7 @@ class _InputGuardrailToolGate:
     should_cancel: Callable[[], bool] | None = None
     rejection: InputGuardrailResult | None = None
     cancel_tools: set[Callable[[], None]] = field(default_factory=set)
+    preserve_dispatch: bool = False
 
 
 _input_guardrail_tool_gate: ContextVar[_InputGuardrailToolGate | None] = ContextVar(
@@ -54,6 +55,18 @@ def input_guardrail_tool_gate_scope(
         yield
     finally:
         _input_guardrail_tool_gate.reset(token)
+
+
+def preserve_parallel_input_guardrail_dispatch() -> None:
+    """Keep original dispatch checkpoints for a run racing parallel input guardrails."""
+    gate = _input_guardrail_tool_gate.get()
+    if gate is not None:
+        gate.preserve_dispatch = True
+
+
+def input_guardrail_dispatch_is_preserved() -> bool:
+    gate = _input_guardrail_tool_gate.get()
+    return gate is not None and gate.preserve_dispatch
 
 
 def _reject_input_guardrail_tools(result: InputGuardrailResult) -> None:

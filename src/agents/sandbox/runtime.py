@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Generic, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeGuard, cast
 
 from ..agent import Agent
 from ..exceptions import UserError
@@ -23,23 +23,18 @@ from ..run_internal.agent_bindings import (
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
 from ..tracing.context import TraceCtxManager
-from .capabilities import Capability
-from .capabilities.memory import Memory
-from .memory.manager import SandboxMemoryGenerationManager, get_or_create_memory_generation_manager
-from .memory.rollouts import (
-    RolloutTerminalMetadata,
-    build_rollout_payload,
-)
-from .runtime_agent_preparation import (
-    clone_capabilities,
-    prepare_sandbox_agent,
-    prepare_sandbox_input,
-)
-from .runtime_session_manager import SandboxRuntimeSessionManager
-from .sandbox_agent import SandboxAgent
-from .session.base_sandbox_session import BaseSandboxSession
-from .types import User
-from .workspace_paths import SandboxWorkspaceScope, sandbox_path_str
+from ._run_state import copy_sandbox_resume_state
+
+if TYPE_CHECKING:
+    from .capabilities import Capability
+    from .capabilities.memory import Memory
+    from .memory.manager import SandboxMemoryGenerationManager
+    from .memory.rollouts import RolloutTerminalMetadata
+    from .runtime_session_manager import SandboxRuntimeSessionManager
+    from .sandbox_agent import SandboxAgent
+    from .session.base_sandbox_session import BaseSandboxSession
+    from .types import User
+    from .workspace_paths import SandboxWorkspaceScope
 
 logger = logging.getLogger(__name__)
 
@@ -86,27 +81,31 @@ class SandboxRuntime(Generic[TContext]):
         self._sandbox_config = run_config.sandbox if run_config is not None else None
         self._tracing_disabled = run_config.tracing_disabled if run_config is not None else False
         self._run_config_model = run_config.model if run_config is not None else None
-        self._workspace_scope = SandboxWorkspaceScope.from_cwd(
-            self._sandbox_config.cwd if self._sandbox_config is not None else None
-        )
-        # The runner resolves this before constructing the runtime. It can be None only when
-        # sandbox is disabled or tests instantiate the runtime directly.
+        self._run_state = run_state
+        # Disabled runs do not own sandbox resources.
+        self._workspace_scope: SandboxWorkspaceScope | None = None
+        self._session_manager: SandboxRuntimeSessionManager[TContext] | None = None
+        if self._sandbox_config is not None:
+            from .runtime_session_manager import SandboxRuntimeSessionManager
+            from .workspace_paths import SandboxWorkspaceScope
+
+            self._workspace_scope = SandboxWorkspaceScope.from_cwd(self._sandbox_config.cwd)
+            self._session_manager = SandboxRuntimeSessionManager(
+                starting_agent=starting_agent,
+                sandbox_config=self._sandbox_config,
+                run_state=run_state,
+            )
         self._rollout_id = rollout_id
         self._active_memory_capability: Memory | None = None
-        self._session_manager = SandboxRuntimeSessionManager(
-            starting_agent=starting_agent,
-            sandbox_config=self._sandbox_config,
-            run_state=run_state,
-        )
         self._prepared_agents: dict[int, _SandboxPreparedAgentCache[TContext]] = {}
 
     @property
     def enabled(self) -> bool:
-        return self._session_manager.enabled
+        return self._session_manager is not None and self._session_manager.enabled
 
     @property
     def current_session(self) -> BaseSandboxSession | None:
-        return self._session_manager.current_session
+        return self._session_manager.current_session if self._session_manager is not None else None
 
     def apply_result_metadata(self, result: RunResult | RunResultStreaming) -> None:
         session = self.current_session
@@ -147,7 +146,7 @@ class SandboxRuntime(Generic[TContext]):
             result._sandbox_cleanup = _cleanup_and_store
 
     def assert_agent_supported(self, agent: Agent[TContext]) -> None:
-        if isinstance(agent, SandboxAgent) and self._sandbox_config is None:
+        if _is_sandbox_agent(agent) and self._sandbox_config is None:
             raise UserError("SandboxAgent execution requires `RunConfig(sandbox=...)`")
 
     async def enqueue_memory_result(
@@ -179,6 +178,8 @@ class SandboxRuntime(Generic[TContext]):
         manager = self._memory_generation_manager()
         if manager is None or self._rollout_id is None:
             return
+        from .memory.rollouts import build_rollout_payload
+
         payload = build_rollout_payload(
             input=input,
             new_items=new_items,
@@ -199,6 +200,8 @@ class SandboxRuntime(Generic[TContext]):
             or self._active_memory_capability.generate is None
         ):
             return None
+        from .memory.manager import get_or_create_memory_generation_manager
+
         return get_or_create_memory_generation_manager(
             session=session,
             memory=self._active_memory_capability,
@@ -217,12 +220,21 @@ class SandboxRuntime(Generic[TContext]):
     ) -> _SandboxPreparedAgent[TContext]:
         self.assert_agent_supported(current_agent)
         self._set_active_memory_capability(current_agent)
-        if not isinstance(current_agent, SandboxAgent):
+        if not _is_sandbox_agent(current_agent):
             return _SandboxPreparedAgent(
                 bindings=bind_public_agent(current_agent),
                 input=current_input,
             )
 
+        from .runtime_agent_preparation import (
+            clone_capabilities,
+            prepare_sandbox_agent,
+            prepare_sandbox_input,
+        )
+        from .sandbox_agent import SandboxAgent
+
+        assert self._session_manager is not None
+        assert self._workspace_scope is not None
         span_cm = (
             custom_span(
                 "sandbox.prepare_agent",
@@ -314,6 +326,8 @@ class SandboxRuntime(Generic[TContext]):
             )
 
     async def cleanup(self) -> dict[str, object] | None:
+        if self._session_manager is None:
+            return copy_sandbox_resume_state(self._run_state)
         should_trace_cleanup = self.current_session is not None or bool(self._prepared_agents)
         span_cm = (
             custom_span("sandbox.cleanup", data={})
@@ -327,9 +341,19 @@ class SandboxRuntime(Generic[TContext]):
                 self._prepared_agents.clear()
 
 
+def _is_sandbox_agent(agent: Agent[TContext]) -> TypeGuard[SandboxAgent[TContext]]:
+    if type(agent) is Agent:
+        return False
+    from .sandbox_agent import SandboxAgent
+
+    return isinstance(agent, SandboxAgent)
+
+
 def _get_memory_capability(agent: Agent[TContext]) -> Memory | None:
-    if not isinstance(agent, SandboxAgent):
+    if not _is_sandbox_agent(agent):
         return None
+    from .capabilities.memory import Memory
+
     for capability in agent.capabilities:
         if isinstance(capability, Memory):
             return capability
@@ -339,6 +363,8 @@ def _get_memory_capability(agent: Agent[TContext]) -> Memory | None:
 def _coerce_run_as_user(run_as: User | str | None) -> User | None:
     if run_as is None:
         return None
+    from .types import User
+
     if isinstance(run_as, User):
         return run_as
     return User(name=run_as)
@@ -358,6 +384,8 @@ async def _validate_workspace_scope(
     cwd = scope.cwd
     if cwd is None:
         return
+
+    from .workspace_paths import sandbox_path_str
 
     resolved_cwd = sandbox_path_str(session.normalize_path(cast(Path | str, scope.anchor("."))))
     for test_flag in ("-d", "-x"):

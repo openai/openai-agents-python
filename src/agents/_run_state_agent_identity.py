@@ -15,8 +15,6 @@ from ._tool_identity import get_function_tool_namespace, get_function_tool_quali
 from .agent import Agent
 from .handoffs import Handoff
 from .logger import logger
-from .sandbox.capabilities.capability import Capability
-from .sandbox.session.base_sandbox_session import BaseSandboxSession
 from .tool import (
     ApplyPatchTool,
     ComputerTool,
@@ -191,6 +189,8 @@ _THREADING_LOCK_TYPES = (type(threading.Lock()), type(threading.RLock()))
 
 
 def _is_capability_runtime_only_value(value: Any) -> bool:
+    from .sandbox.session.base_sandbox_session import BaseSandboxSession
+
     return isinstance(
         value,
         (
@@ -256,6 +256,8 @@ def _normalize_capability_identity_value(
             }
         finally:
             seen.remove(object_id)
+
+    from .sandbox.capabilities.capability import Capability
 
     if isinstance(value, Capability):
         seen.add(object_id)

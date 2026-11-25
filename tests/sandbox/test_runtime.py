@@ -4705,6 +4705,66 @@ async def test_session_manager_rejects_running_injected_session_account_mutation
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_runner_preserves_saved_sandbox_after_resuming_ordinary_agent_without_config(
+    streamed: bool,
+) -> None:
+    client = _ManifestSessionClient()
+    manifest = Manifest()
+
+    @function_tool(needs_approval=True)
+    def approval_tool() -> str:
+        return "approved"
+
+    ordinary_model = ScriptedModel(
+        [
+            [get_function_tool_call("approval_tool", "{}", call_id="approval")],
+            [get_final_output_message("done")],
+        ]
+    )
+    ordinary = Agent(name="ordinary", model=ordinary_model, tools=[approval_tool])
+    sandbox_model = ScriptedModel([[get_handoff_tool_call(ordinary)]])
+    sandbox = SandboxAgent(
+        name="sandbox",
+        model=sandbox_model,
+        default_manifest=manifest,
+        capabilities=[],
+        handoffs=[ordinary],
+    )
+    config = RunConfig(sandbox=SandboxRunConfig(client=client))
+    paused: RunResult | RunResultStreaming
+    if streamed:
+        paused = Runner.run_streamed(sandbox, "start", run_config=config)
+        async for _ in paused.stream_events():
+            pass
+    else:
+        paused = await Runner.run(sandbox, "start", run_config=config)
+
+    assert paused.last_agent is ordinary
+    assert len(paused.interruptions) == 1
+    state = paused.to_state()
+    saved_payload = state.to_json()["sandbox"]
+    assert saved_payload is not None
+    assert saved_payload["backend_id"] == "manifest"
+    state.approve(paused.interruptions[0])
+
+    resumed: RunResult | RunResultStreaming
+    if streamed:
+        resumed = Runner.run_streamed(sandbox, state, run_config=RunConfig())
+        async for _ in resumed.stream_events():
+            pass
+    else:
+        resumed = await Runner.run(sandbox, state, run_config=RunConfig())
+
+    assert resumed.final_output == "done"
+    assert resumed.last_agent is ordinary
+    assert resumed.to_state().to_json()["sandbox"] == saved_payload
+    assert client.created_manifests == [manifest]
+    sandbox_model.assert_complete()
+    ordinary_model.assert_complete()
+
+
+@pytest.mark.asyncio
 async def test_session_manager_preserves_existing_payload_when_no_sandbox_session_is_used() -> None:
     client = _FakeClient(_FakeSession(Manifest()))
     agent = SandboxAgent(name="sandbox", model=ScriptedModel(), instructions="Base instructions.")

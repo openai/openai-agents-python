@@ -58,7 +58,7 @@ from ..items import (
     TResponseInputItem,
     TResponseStreamEvent,
 )
-from ..lifecycle import RunHooks
+from ..lifecycle import _SKIP_HOOK, RunHooks, _hook_awaitable, _run_hook_callbacks
 from ..logger import (
     log_model_action_error,
     log_model_action_warning,
@@ -98,8 +98,7 @@ from ..usage import (
     _requests_for_response_without_usage,
     _response_usage_to_usage,
 )
-from ..util import _coro, _error_tracing
-from ..util._asyncio_tasks import gather_with_cancel
+from ..util import _error_tracing
 from .agent_bindings import AgentBindings, bind_public_agent
 from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
@@ -136,6 +135,7 @@ from .error_handlers import (
 )
 from .guardrails import (
     input_guardrail_tripwire_triggered_for_stream,
+    preserve_parallel_input_guardrail_dispatch,
     run_input_guardrails,
     run_input_guardrails_with_queue,
     run_output_guardrails,
@@ -230,6 +230,7 @@ from .turn_preparation import (
     get_model_settings,
     get_output_schema,
     maybe_filter_model_input,
+    resolve_agent_prompts,
     validate_run_hooks,
 )
 from .turn_resolution import (
@@ -1368,6 +1369,8 @@ async def start_streaming(
             )
             sequential_guardrails = [g for g in all_input_guardrails if not g.run_in_parallel]
             parallel_guardrails = [g for g in all_input_guardrails if g.run_in_parallel]
+            if parallel_guardrails:
+                preserve_parallel_input_guardrail_dispatch()
             current_bindings = bind_public_agent(current_agent)
             execution_agent = current_bindings.execution_agent
             prepared_turn_input = copy_input_items(streamed_result.input)
@@ -2475,13 +2478,11 @@ async def run_single_turn_streamed(
                 tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
-            await gather_with_cancel(
-                hooks.on_agent_start(agent_hook_context, public_agent),
-                (
-                    public_agent.hooks.on_start(agent_hook_context, public_agent)
-                    if public_agent.hooks is not None
-                    else _coro.noop_coroutine()
-                ),
+            await _run_hook_callbacks(
+                _hook_awaitable(hooks.on_agent_start, agent_hook_context, public_agent),
+                _hook_awaitable(public_agent.hooks.on_start, agent_hook_context, public_agent)
+                if public_agent.hooks is not None
+                else _SKIP_HOOK,
             )
 
         all_tools = await get_all_tools(execution_agent, context_wrapper)
@@ -2492,10 +2493,7 @@ async def run_single_turn_streamed(
     streamed_result.current_agent = public_agent
     streamed_result._current_agent_output_schema = get_output_schema(public_agent)
 
-    system_prompt, prompt_config = await gather_with_cancel(
-        execution_agent.get_system_prompt(context_wrapper),
-        execution_agent.get_prompt(context_wrapper),
-    )
+    system_prompt, prompt_config = await resolve_agent_prompts(execution_agent, context_wrapper)
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     all_tools, handoffs = resolve_tool_name_collisions(
@@ -2566,18 +2564,19 @@ async def run_single_turn_streamed(
         # explicitly rewind this state before replaying a failed request.
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    await gather_with_cancel(
-        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
-        (
-            public_agent.hooks.on_llm_start(
-                context_wrapper,
-                public_agent,
-                filtered.instructions,
-                filtered.input,
-            )
-            if public_agent.hooks is not None
-            else _coro.noop_coroutine()
+    await _run_hook_callbacks(
+        _hook_awaitable(
+            hooks.on_llm_start, context_wrapper, public_agent, filtered.instructions, filtered.input
         ),
+        _hook_awaitable(
+            public_agent.hooks.on_llm_start,
+            context_wrapper,
+            public_agent,
+            filtered.instructions,
+            filtered.input,
+        )
+        if public_agent.hooks is not None
+        else _SKIP_HOOK,
     )
 
     await _persist_stream_input_if_needed(
@@ -2767,13 +2766,13 @@ async def run_single_turn_streamed(
                 _ensure_stream_event_item_occurrence_key(item) for item in model_items
             )
             stream_step_items_to_queue(model_items, streamed_result._event_queue)
-        await gather_with_cancel(
-            (
-                public_agent.hooks.on_llm_end(context_wrapper, public_agent, final_response)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-            hooks.on_llm_end(context_wrapper, public_agent, final_response),
+        await _run_hook_callbacks(
+            _hook_awaitable(
+                public_agent.hooks.on_llm_end, context_wrapper, public_agent, final_response
+            )
+            if public_agent.hooks is not None
+            else _SKIP_HOOK,
+            _hook_awaitable(hooks.on_llm_end, context_wrapper, public_agent, final_response),
         )
         return response_accepted
 
@@ -2859,22 +2858,17 @@ async def run_single_turn(
                 tool_input=context_wrapper.tool_input,
             )
             context_wrapper._share_tool_state_with(agent_hook_context)
-            await gather_with_cancel(
-                hooks.on_agent_start(agent_hook_context, public_agent),
-                (
-                    public_agent.hooks.on_start(agent_hook_context, public_agent)
-                    if public_agent.hooks is not None
-                    else _coro.noop_coroutine()
-                ),
+            await _run_hook_callbacks(
+                _hook_awaitable(hooks.on_agent_start, agent_hook_context, public_agent),
+                _hook_awaitable(public_agent.hooks.on_start, agent_hook_context, public_agent)
+                if public_agent.hooks is not None
+                else _SKIP_HOOK,
             )
 
         all_tools = await get_all_tools(execution_agent, context_wrapper)
     all_tools = await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
-    system_prompt, prompt_config = await gather_with_cancel(
-        execution_agent.get_system_prompt(context_wrapper),
-        execution_agent.get_prompt(context_wrapper),
-    )
+    system_prompt, prompt_config = await resolve_agent_prompts(execution_agent, context_wrapper)
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     all_tools, handoffs = resolve_tool_name_collisions(
@@ -2927,13 +2921,13 @@ async def run_single_turn(
             on_response_accepted(new_response, _processed_response)
         if response_accepted and on_response_hooks_started is not None:
             on_response_hooks_started()
-        await gather_with_cancel(
-            (
-                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        await _run_hook_callbacks(
+            _hook_awaitable(
+                public_agent.hooks.on_llm_end, context_wrapper, public_agent, new_response
+            )
+            if public_agent.hooks is not None
+            else _SKIP_HOOK,
+            _hook_awaitable(hooks.on_llm_end, context_wrapper, public_agent, new_response),
         )
         return response_accepted
 
@@ -3006,18 +3000,19 @@ async def get_new_response(
         server_conversation_tracker.validate_pending_input_filter(filtered.input)
         server_conversation_tracker.mark_input_as_sent(filtered.input)
 
-    await gather_with_cancel(
-        hooks.on_llm_start(context_wrapper, public_agent, filtered.instructions, filtered.input),
-        (
-            public_agent.hooks.on_llm_start(
-                context_wrapper,
-                public_agent,
-                filtered.instructions,
-                filtered.input,
-            )
-            if public_agent.hooks is not None
-            else _coro.noop_coroutine()
+    await _run_hook_callbacks(
+        _hook_awaitable(
+            hooks.on_llm_start, context_wrapper, public_agent, filtered.instructions, filtered.input
         ),
+        _hook_awaitable(
+            public_agent.hooks.on_llm_start,
+            context_wrapper,
+            public_agent,
+            filtered.instructions,
+            filtered.input,
+        )
+        if public_agent.hooks is not None
+        else _SKIP_HOOK,
     )
 
     previous_response_id = (
@@ -3111,13 +3106,13 @@ async def get_new_response(
     context_wrapper.usage.add(new_response.usage)
 
     if not defer_llm_end_hooks:
-        await gather_with_cancel(
-            (
-                public_agent.hooks.on_llm_end(context_wrapper, public_agent, new_response)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-            hooks.on_llm_end(context_wrapper, public_agent, new_response),
+        await _run_hook_callbacks(
+            _hook_awaitable(
+                public_agent.hooks.on_llm_end, context_wrapper, public_agent, new_response
+            )
+            if public_agent.hooks is not None
+            else _SKIP_HOOK,
+            _hook_awaitable(hooks.on_llm_end, context_wrapper, public_agent, new_response),
         )
 
     return new_response
