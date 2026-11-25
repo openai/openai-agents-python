@@ -2385,7 +2385,15 @@ async def test_multiple_tool_calls_do_not_wait_for_cancelled_sibling_tool_before
 
 
 @pytest.mark.asyncio
-async def test_multiple_tool_calls_bound_cancelled_sibling_self_rescheduling_cleanup():
+async def test_multiple_tool_calls_bound_cancelled_sibling_self_rescheduling_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Keep the drain deadline beyond the hang guard so only the step limit can end the drain.
+    monkeypatch.setattr(
+        tool_execution,
+        "_FUNCTION_TOOL_CANCELLED_DRAIN_SECONDS",
+        2 * _CANCELLATION_HANG_GUARD_SECONDS,
+    )
     sibling_ready = asyncio.Event()
     cleanup_started = asyncio.Event()
     cleanup_finished = asyncio.Event()
@@ -2428,13 +2436,18 @@ async def test_multiple_tool_calls_bound_cancelled_sibling_self_rescheduling_cle
         response_id=None,
     )
 
-    with pytest.raises(UserError, match="Error running tool error_tool: boom"):
-        await asyncio.wait_for(get_execute_result(agent, response), timeout=0.2)
+    try:
+        with pytest.raises(UserError, match="Error running tool error_tool: boom"):
+            await asyncio.wait_for(
+                get_execute_result(agent, response),
+                timeout=_CANCELLATION_HANG_GUARD_SECONDS,
+            )
+        assert cleanup_started.is_set()
+        assert not cleanup_finished.is_set()
+    finally:
+        stop_cleanup.set()
 
-    assert cleanup_started.is_set()
-
-    stop_cleanup.set()
-    await asyncio.wait_for(cleanup_finished.wait(), timeout=0.2)
+    await asyncio.wait_for(cleanup_finished.wait(), timeout=_CANCELLATION_HANG_GUARD_SECONDS)
 
 
 @pytest.mark.asyncio
