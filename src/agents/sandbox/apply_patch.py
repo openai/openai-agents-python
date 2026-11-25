@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkabl
 from uuid import uuid4
 
 from ..apply_diff import ApplyDiffMode, apply_diff
-from ..editor import ApplyPatchOperation, ApplyPatchOperationType, ApplyPatchResult
+from ..editor import ApplyPatchOperation, ApplyPatchResult
 from .errors import (
     ApplyPatchDecodeError,
     ApplyPatchDiffError,
@@ -358,7 +358,7 @@ def _coerce_operation_mapping(operation: dict[str, object]) -> ApplyPatchOperati
             message=f"Invalid apply_patch move_to type: {type(raw_move_to).__name__}"
         )
     return ApplyPatchOperation(
-        type=cast(ApplyPatchOperationType, raw_type),
+        type=raw_type,
         path=raw_path,
         diff=raw_diff,
         ctx_wrapper=cast(Any, raw_ctx_wrapper),
