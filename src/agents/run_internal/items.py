@@ -739,7 +739,7 @@ def rebase_nested_history_owned_item_refs(
 
 def _dedupe_key(item: TResponseInputItem) -> str | None:
     """Return a stable identity key when items carry explicit identifiers."""
-    payload = _coerce_to_dict(item)
+    payload = item if type(item) is dict else _coerce_to_dict(item)
     if payload is None:
         return None
 

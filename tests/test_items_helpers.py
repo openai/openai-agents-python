@@ -180,6 +180,16 @@ def test_input_to_new_input_list_deep_copies_lists() -> None:
     assert "content" in original[0] and original[0].get("content") == "abc"
 
 
+def test_repeated_input_messages_keep_independent_nested_content() -> None:
+    message = {"role": "user", "content": [{"type": "input_text", "text": "original"}]}
+    original = cast(list[TResponseInputItem], [message, message])
+    first, second = ItemHelpers.input_to_new_input_list(original)
+    assert first == second == message
+    cast(Any, first)["content"][0]["text"] = "changed"
+    assert second == message
+    assert cast(Any, message)["content"][0]["text"] == "original"
+
+
 def test_text_message_output_concatenates_text_segments() -> None:
     # Build a message with both text and refusal segments, only text segments are concatenated.
     pieces: list[ResponseOutputText | ResponseOutputRefusal] = []

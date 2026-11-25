@@ -70,8 +70,8 @@ def _to_dump_compatible_internal(obj: Any) -> Any:
     if type(obj) is str:
         return obj
 
-    if isinstance(obj, Mapping):
-        return {k: _to_dump_compatible_internal(v) for k, v in obj.items()}
+    if type(obj) is dict or isinstance(obj, Mapping):
+        return {k: v if type(v) is str else _to_dump_compatible_internal(v) for k, v in obj.items()}
 
     if isinstance(obj, list | tuple):
         return [_to_dump_compatible_internal(x) for x in obj]

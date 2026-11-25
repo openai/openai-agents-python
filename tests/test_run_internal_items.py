@@ -1191,3 +1191,20 @@ def test_deduplicate_input_items_preferring_latest_leaves_unique_items_untouched
     ]
 
     assert run_items.deduplicate_input_items_preferring_latest(items) == items
+
+
+def test_latest_deduplication_keeps_mixed_message_and_tool_order() -> None:
+    user = {"role": "user", "content": "before"}
+    followup = {"role": "user", "content": "after"}
+    call = {"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"}
+    latest_call = {**call, "arguments": '{"x":1}'}
+    reasoning = {"type": "reasoning", "id": "r", "summary": []}
+    latest_reasoning = {**reasoning, "summary": [{"type": "summary_text", "text": "latest"}]}
+    output = {"type": "function_call_output", "call_id": "c", "output": "old"}
+    latest_output = {**output, "output": "new"}
+    items = [user, call, reasoning, output, followup, latest_call, latest_reasoning, latest_output]
+    result = run_items.deduplicate_input_items_preferring_latest(cast(Any, items))
+    expected = [user, latest_call, latest_reasoning, followup, latest_output]
+    assert len(result) == len(expected)
+    assert all(actual is wanted for actual, wanted in zip(result, expected, strict=True))
+    assert items[1] is call and call["arguments"] == "{}"
