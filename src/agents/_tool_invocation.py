@@ -88,6 +88,9 @@ def _has_other_model_type(value: Any, types: Collection[str]) -> bool:
 
 
 def _normalize_value(value: Any, *, exclude_none: bool = False) -> Any:
+    kind = type(value)
+    if value is None or kind is str or kind is int or kind is float or kind is bool:
+        return value
     mapping = _as_mapping(value)
     if mapping is not None:
         return {
@@ -97,7 +100,7 @@ def _normalize_value(value: Any, *, exclude_none: bool = False) -> Any:
         }
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [_normalize_value(item, exclude_none=exclude_none) for item in value]
-    if value is None or isinstance(value, str | int | float | bool):
+    if isinstance(value, str | int | float | bool):
         return value
     return str(value)
 
@@ -114,7 +117,8 @@ def _normalize_arguments(value: Any) -> Any:
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         return value
-    return _normalize_value(parsed)
+    # The decoder produces plain JSON values. The fingerprint encoder sorts object keys.
+    return parsed
 
 
 def _unwrap_hosted_mcp_approval(raw_item: Any) -> Mapping[str, Any] | None:

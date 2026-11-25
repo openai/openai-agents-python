@@ -226,6 +226,18 @@ def test_canonical_shell_identity_treats_optional_nulls_as_omitted() -> None:
     assert tool_invocation_identity(provider_call) == tool_invocation_identity(normalized_call)
 
 
+def test_nested_function_identity_matches_reordered_json_and_object_arguments() -> None:
+    call = {"type": "function_call", "call_id": "call_0", "name": "lookup"}
+    arguments = {"z": [{"b": None, "a": "été"}, 2], "a": True}
+    expected = tool_invocation_identity({**call, "arguments": arguments})
+    assert expected is not None
+    assert tool_invocation_identity({**call, "arguments": json.dumps(arguments)}) == expected
+    reordered = '{"a":true,"z":[{"a":"été","b":null},2]}'
+    assert tool_invocation_identity({**call, "arguments": reordered}) == expected
+    changed = '{"a":true,"z":[2,{"a":"été","b":null}]}'
+    assert tool_invocation_identity({**call, "arguments": changed}) != expected
+
+
 def test_canonical_function_identity_preserves_null_argument_values() -> None:
     call_with_null = {
         "type": "function_call",
