@@ -19,6 +19,7 @@ from agents import (
     RunContextWrapper,
     RunHooks,
     Runner,
+    ToolOutputText,
     UserError,
     function_tool,
 )
@@ -77,6 +78,27 @@ async def test_function_tool_custom_data_is_attached_but_not_replayed() -> None:
     assert all(
         not (isinstance(item, dict) and "custom_data" in item) for item in model.calls[-1].input
     )
+
+
+@pytest.mark.asyncio
+async def test_function_tool_extractor_cannot_mutate_nested_model_input() -> None:
+    def extract(ctx: Any) -> dict[str, Any]:
+        ctx.raw_item["output"][0]["text"] = "changed by extractor"
+        return {"label": "visible"}
+
+    @function_tool(custom_data_extractor=extract)
+    def get_data() -> list[ToolOutputText]:
+        return [ToolOutputText(text="original")]
+
+    model = ScriptedModel()
+    model.extend([[get_function_tool_call("get_data", "{}")], [get_text_message("done")]])
+    result = await Runner.run(Agent(name="test", model=model, tools=[get_data]), input="user")
+
+    item = _tool_output_items(result.new_items)[0]
+    assert item.custom_data == {"label": "visible"}
+    expected = [{"type": "input_text", "text": "original"}]
+    assert cast(dict[str, Any], item.raw_item)["output"] == expected
+    assert cast(dict[str, Any], model.calls[-1].input[-1])["output"] == expected
 
 
 @pytest.mark.asyncio

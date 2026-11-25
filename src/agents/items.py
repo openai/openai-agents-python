@@ -960,21 +960,28 @@ class ItemHelpers:
         # If the output is either a single or list of the known structured output types, convert to
         # ResponseFunctionCallOutputItemListParam.
         if isinstance(output, list | tuple):
-            maybe_converted_output_list = [
-                cls._maybe_get_output_as_structured_function_output(item) for item in output
+            parts: list[str | ValidToolOutputPydanticModels] = []
+            for item in output:
+                # Both ToolOutputText fields are already valid for these plain dictionaries.
+                # Keep just the immutable text until the whole list qualifies.
+                if type(item) is dict and len(item) == 2:
+                    kind, text = item.get("type"), item.get("text")
+                    if type(kind) is str and kind == "text" and type(text) is str:
+                        parts.append(text)
+                        continue
+                structured = cls._maybe_get_output_as_structured_function_output(item)
+                if structured is None:
+                    return None
+                parts.append(structured)
+
+            if not parts:
+                return None
+            return [
+                {"type": "input_text", "text": part}
+                if isinstance(part, str)
+                else cls._convert_single_tool_output_pydantic_model(part)
+                for part in parts
             ]
-            # An empty list/tuple has no structured items; ``all([])`` is ``True``,
-            # so guard against it to avoid emitting an empty structured-output list
-            # (which would drop the tool result) and stringify instead.
-            if maybe_converted_output_list and all(
-                item is not None for item in maybe_converted_output_list
-            ):
-                return [
-                    cls._convert_single_tool_output_pydantic_model(item)
-                    for item in maybe_converted_output_list
-                    if item is not None
-                ]
-            return None
 
         maybe_converted_output = cls._maybe_get_output_as_structured_function_output(output)
         if maybe_converted_output is not None:
@@ -985,7 +992,7 @@ class ItemHelpers:
     def _maybe_get_output_as_structured_function_output(
         cls, output: Any
     ) -> ValidToolOutputPydanticModels | None:
-        if isinstance(output, ToolOutputText | ToolOutputImage | ToolOutputFileContent):
+        if isinstance(output, ValidToolOutputPydanticModels):
             return output
         elif isinstance(output, dict):
             # Require explicit 'type' field in dict to be considered a structured output
