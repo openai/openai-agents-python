@@ -4,8 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-langsmith"
-version = "0.1.2"
+version = "0.1.3"
 description = "Per-agent LangSmith outcome traces for the OpenAI Agents SDK plugin preview"
 requires-python = ">=3.10"
 dependencies = ["openai-agents==0.25.0+plugins.preview.2"]
 readme = "README.md"
+
+[project.optional-dependencies]
+example = ["langsmith==0.15.0"]

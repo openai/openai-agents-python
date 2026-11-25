@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
+from agents.memory import await_session_mutation
 from agents.plugins import Plugin, PluginHooks, RunOutcome
 
 
@@ -23,7 +24,7 @@ def langsmith(client: _Client, *, project_name: str = "Agents") -> Plugin[Any]:
 
     async def record(outcome: RunOutcome) -> None:
         end = datetime.now(timezone.utc)
-        await asyncio.to_thread(
+        write = asyncio.to_thread(
             client.create_run,
             id=uuid4(),
             project_name=project_name,
@@ -35,5 +36,8 @@ def langsmith(client: _Client, *, project_name: str = "Agents") -> Plugin[Any]:
             outputs={"status": outcome.status},
             error=outcome.status if outcome.status in ("failed", "cancelled") else None,
         )
+
+        # Finish using the app-owned client before cancellation reaches its owner.
+        await await_session_mutation(write)
 
     return Plugin(name="langsmith", hooks=PluginHooks(on_run_end=record))

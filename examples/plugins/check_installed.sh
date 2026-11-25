@@ -17,14 +17,15 @@ py="$tmp/venv/bin/python"
 # Build the partner distributions separately so imports cannot fall back to checkout sources.
 "$py" -m pip wheel --disable-pip-version-check --no-deps -w "$tmp/packages" \
   "$here"/{a2a,browser,knowledge,langsmith,masking,permissions,postman,ticket}
-"$py" -m pip install --disable-pip-version-check "$wheel" "$tmp/packages/"*.whl "agents-specialist[example]"
+"$py" -m pip install --disable-pip-version-check "$wheel" "$tmp/packages/"*.whl \
+  "agents-specialist[example]" "agents-langsmith[example]; python_version >= '3.11'"
 "$py" -m pip check
 
 # Copy only the checks. The SDK and all integrations must come from the environment.
 cp "$here"/verify_{routes,partner_routes,durable}.py "$tmp/"
 cp -R "$here/contract" "$tmp/contract"
 cd "$tmp"
-for package in a2a knowledge masking ticket; do
+for package in a2a knowledge langsmith masking postman ticket; do
     "$py" -I -B -m unittest discover -s "$here/$package/tests"
 done
 run_checks() {

@@ -44,8 +44,8 @@ In this simulation, the first approved call returns `pending`. A second approved
 | Package | Public entry point | What the example exercises |
 | --- | --- | --- |
 | [A2A](a2a/README.md) | `agents_specialist.specialist` | Approved delegation, a separate task lookup and optional recovery after a lost reply |
-| [LangSmith](langsmith/README.md) | `agents_langsmith.langsmith` | One metadata-only trace per submission, including errors and pauses |
-| [Postman](postman/README.md) | `agents_postman.postman` | An allowlist of collection requests and bounded HTTP status checks |
+| [LangSmith](langsmith/README.md) | `agents_langsmith.langsmith` | One status record per submission, including pauses and failures. The client controls extra metadata. |
+| [Postman](postman/README.md) | `agents_postman.postman` | Status checks for explicitly approved requests, including requests in collection folders |
 | [Browser automation](browser/README.md) | `agents_browser.browser` | Named actions and an optional offline Playwright adapter |
 | [Enterprise permissions](permissions/README.md) | `agents_permissions.permissions` | A host policy over the final arguments of SDK function calls, including approval resume |
 
@@ -141,6 +141,8 @@ bash examples/plugins/check_installed.sh "$workdir/wheels/"openai_agents-0.25.0+
 ```
 
 For the combined Linux wheel, pass its path and add `--codex`. This runs the same checks in Python and then in Codex. The local model server verifies which provider made the request. A missing binding fails the Codex check.
+
+The [combined example](verify_routes.py) checks a request inside a Postman folder. It also checks which outcomes the LangSmith plugin reports when the app pauses for approval and resumes. This example uses a mock HTTP transport and an in-memory trace client. Separate [Postman tests](postman/tests/test_postman.py) check which requests leave the tool. On Python 3.11 and later, the [LangSmith tests](langsmith/tests/test_langsmith.py) also check what the official client sends to a local receiver. Python 3.10 can still use the plugin with a compatible client.
 
 The [A2A recovery check](verify_durable.py) drops a reply after the receiver accepts the question. A new agent restores an approved lookup and retrieves the verdict from the original task. If the application revokes access before restore, there is no lookup. The [A2A package test](a2a/tests/test_durable.py) separately checks a real process exit and a dropped loopback connection.
 

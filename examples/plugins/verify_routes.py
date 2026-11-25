@@ -43,7 +43,12 @@ async def verify(codex: bool, workspace: Path):
             "name": "Health",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
         },
-        "item": [{"name": "Ping", "request": {"method": "GET", "url": url}}],
+        "item": [
+            {
+                "name": "Monitoring",
+                "item": [{"name": "Ping", "request": {"method": "GET", "url": {"raw": url}}}],
+            }
+        ],
     }
 
     class Specialist:

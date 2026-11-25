@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-postman"
-version = "0.1.2"
+version = "0.1.3"
 description = "Status checks for host-approved requests from a Postman collection"
 requires-python = ">=3.10"
 dependencies = ["openai-agents==0.25.0+plugins.preview.2", "httpx2>=2.12.0"]

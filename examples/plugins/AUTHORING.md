@@ -95,9 +95,11 @@ Import `PluginHooks` and the decision types from `agents.plugins`. Pass callback
 | Check SDK function calls on this agent | `check_tool` | Return `Deny(reason)`, `RequireApproval()`, or `None`. A denial blocks the call. Request approval during proposal review to pause the call. |
 | Check only the bundle's own tools | `check_own_tool` | Same decisions. Other plugins' agent-wide checks still apply. Use the application's `RunConfig(policy_context=...)` for current grants. |
 | Edit a successful text result | `filter_result` | Return replacement text or `None`. A dict, list, image, or other non-string value skips this hook even if later converted to text. Remove sensitive fields at the source. |
-| Observe a submission | `on_run_end` | Receive status and elapsed time. A pause and a resume count separately. Drain streamed runs to receive the outcome. |
+| Observe a submission | `on_run_end` | Read `status` and `elapsed_seconds` on the [RunOutcome](README.md#observe-the-outcome-of-a-run). A pause and a resume count separately. Drain streamed runs to receive the outcome. |
 
 The table lists the four core hooks. The same API also includes experimental features. These include argument edits (`prepare_tool`), input filtering, lifecycle events, progress, streaming callbacks, local commands, installed-package discovery and HTTP hooks. Their contracts can change. A policy must review the final arguments after any edits.
+
+If an observer calls a synchronous client with `asyncio.to_thread`, cancelling the await leaves the thread running. Closing the client at that point can interrupt the export. The [LangSmith example](langsmith/agents_langsmith/__init__.py) uses `await_session_mutation` from `agents.memory` to wait for the call to finish before passing cancellation back to the app. Set timeouts on the client, since a stuck call also delays cancellation. If the client queues writes, follow its shutdown instructions to drain that queue.
 
 Use decorated functions with plain JSON parameters under a policy or argument editor. The SDK checks enabled tools before sending the model request for that turn. For example, a `datetime.date` parameter needs conversion. Accept an ISO date string and parse it inside the tool instead. Checks that depend on the actual arguments still run after the model responds. The SDK checks policy again just before invocation, including after resume. Keep callbacks safe to repeat. A result filter alone does not require argument editing or policy checks.
 
@@ -128,6 +130,6 @@ If the offline example reports a missing `socksio` dependency, check whether the
 
 ## Test as a partner
 
-Build a wheel, then install it alongside the preview SDK in a fresh environment outside both checkouts. Run `python -m pip check`. Copy the [partner test kit](contract/README.md) and replace the ticket fixture with your client. Assert what the service actually changes on approval, rejection and revocation. Repeat with the combined wheel before claiming Codex support.
+Build a wheel, then install it alongside the preview SDK in a fresh environment outside both checkouts. Run `python -m pip check`. Copy the [partner test kit](contract/README.md). For a tool, replace the ticket fixture with your client and check what the service changes on approval, rejection and revocation. For an observer, [test a run with no tool calls](contract/README.md#test-an-observer) and inspect what the receiver records. Repeat with the combined wheel before claiming Codex support.
 
 Before upgrading, record the installed wheel hashes. Run the same tests against the upgrade and the previous wheels in separate environments. Rotate the deployment revision if tools or policy change, including on rollback. Never reuse a stale approval to finish a write. For an external operation, keep a trusted receipt outside the SDK checkpoint. The [A2A example](a2a/README.md) shows one way to recover it.

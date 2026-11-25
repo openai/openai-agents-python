@@ -1,6 +1,6 @@
 # Test an installed plugin
 
-Use this kit to test one SDK function tool at a time. The helper checks that the agent offers the tool and that the expected text reaches the next model request. Your test checks what the tool reads or changes. The model's final answer is scripted, so it cannot prove that a write happened.
+Use this kit to test a function tool or [observe a run without a tool call](#test-an-observer). The helper checks that the agent offers the tool and that the expected text reaches the next model request. Your test checks what the tool reads or changes. The model's final answer is scripted, so it cannot prove that a write happened.
 
 ## Run the ticket test
 
@@ -31,6 +31,44 @@ For a write, inspect the proposed call and check for effects before and after re
 | Other tenant uses the owner's agent | 0 | 0 | `denied` |
 
 For a tool without review, remove the interruption and resume steps. Keep the check for effects and let the run continue to the second model turn.
+
+## Test an observer
+
+A tracing plugin can work without a tool call. Pass `calls=[]` to [the local model server](loopback.py) for a run that ends after one response. Save this example as `check_observer.py` in the copied contract directory.
+
+```python
+import asyncio
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from agents import Agent, RunConfig, Runner
+from agents.plugins import Plugin, PluginHooks
+from loopback import MODEL, route
+
+
+async def main(workspace, codex):
+    outcomes, requests = [], []
+    observer = Plugin(name="audit", hooks=PluginHooks(on_run_end=outcomes.append))
+    async with route(codex, workspace, requests, calls=[]) as provider:
+        agent = Agent("Support", model=MODEL, plugins=[observer])
+        config = RunConfig(model_provider=provider, tracing_disabled=True)
+        result = await Runner.run(agent, "private test prompt", run_config=config)
+    assert len(requests) == 1
+    assert result.final_output == "done"
+    assert [outcome.status for outcome in outcomes] == ["completed"]
+    print("One completed run")
+
+
+with TemporaryDirectory() as tmp:
+    os.environ["CODEX_HOME"] = tmp
+    asyncio.run(main(Path(tmp), "--codex" in sys.argv))
+```
+
+Run `python -EsB check_observer.py` for Python. With the combined wheel, run `python -EsB check_observer.py --codex` for Codex. Expect `One completed run` each time.
+
+For a trace exporter, replace the in-memory observer with your plugin. Check the project, status and record count at the receiving service. Verify that the private test prompt stays out of the trace. Run once without the plugin and expect no new record. For a tool that requires approval, check for separate records at the pause and after the decision. A rejected tool can still be part of a completed run.
 
 ## Test with the upstream Hello World agent
 
