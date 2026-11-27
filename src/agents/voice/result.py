@@ -90,6 +90,15 @@ class StreamedAudioResult:
     def _set_task(self, task: asyncio.Task[Any]):
         self.text_generation_task = task
 
+        def release_reader(producer: asyncio.Task[Any]) -> None:
+            # Cancellation before the first step skips the producer's _cancel() call.
+            if producer.cancelled() and not self._terminal_event_enqueued:
+                self._completed_session = True
+                self._queue.put_nowait(VoiceStreamEventLifecycle(event="session_ended"))
+                self._terminal_event_enqueued = True
+
+        task.add_done_callback(release_reader)
+
     async def _add_error(self, error: Exception):
         await self._queue.put(VoiceStreamEventError(error))
 

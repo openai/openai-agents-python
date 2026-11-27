@@ -31,7 +31,7 @@ try:
         VoiceStreamEventAudio,
         VoiceStreamEventLifecycle,
     )
-    from agents.voice.testing import ScriptedTTSModel
+    from agents.voice.testing import ScriptedSTTModel, ScriptedTTSModel, ScriptedVoiceWorkflow
 
     from .helpers import extract_events
     from .pipeline_test_models import (
@@ -1366,6 +1366,36 @@ async def test_voicepipeline_single_turn_cancellation_releases_the_consumer() ->
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(consumer, timeout=5)
     assert producer.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["recorded", "streamed"])
+@pytest.mark.parametrize("join_later", [False, True], ids=["waiting", "joining_later"])
+async def test_voicepipeline_cancellation_before_producer_starts_releases_reader(
+    streamed: bool, join_later: bool
+) -> None:
+    stt = ScriptedSTTModel()
+    pipeline = VoicePipeline(
+        workflow=ScriptedVoiceWorkflow(), stt_model=stt, tts_model=ScriptedTTSModel()
+    )
+    audio = StreamedAudioInput() if streamed else AudioInput(buffer=np.zeros(2, dtype=np.int16))
+    events: list[VoiceStreamEvent] = []
+
+    async def consume() -> None:
+        # Schedule cancellation ahead of the producer's first step, when the reader yields.
+        asyncio.get_running_loop().call_soon(lambda: producer.cancel())
+        result = await pipeline.run(audio)
+        assert result.text_generation_task is not None
+        producer: asyncio.Task[None] = result.text_generation_task
+        if join_later:
+            await asyncio.wait((producer,))
+        async for event in result.stream():
+            events.append(event)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consume(), timeout=1)
+    assert events == [VoiceStreamEventLifecycle(event="session_ended")]
+    assert not stt.calls and not stt.session_calls
 
 
 @pytest.mark.asyncio
