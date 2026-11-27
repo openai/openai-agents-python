@@ -4531,16 +4531,20 @@ async def test_websocket_cancelled_zero_pool_waiter_allows_next_request(monkeypa
             tracing=ModelTracing.DISABLED,
         )
 
+    async def cancelled_request() -> None:
+        # Python 3.10 can drop the message when cancellation crosses a task boundary.
+        with pytest.raises(asyncio.CancelledError, match="cancelled by caller"):
+            await request("cancelled")
+
     first = asyncio.create_task(request("first"))
     try:
         await asyncio.wait_for(receiving.wait(), timeout=1)
-        waiter = asyncio.create_task(request("cancelled"))
+        waiter = asyncio.create_task(cancelled_request())
         # Queue cancellation after the waiter starts, with or without a concurrent release.
         if finish_first:
             finish.set()
         asyncio.get_running_loop().call_soon(waiter.cancel, "cancelled by caller")
-        with pytest.raises(asyncio.CancelledError, match="cancelled by caller"):
-            await waiter
+        await waiter
         if not finish_first:
             with pytest.raises(TimeoutError, match="request lock wait timed out after 0.0 seconds"):
                 await request("blocked")
