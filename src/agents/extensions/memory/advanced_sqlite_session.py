@@ -118,6 +118,7 @@ class AdvancedSQLiteSession(SQLiteSession):
         else:
             self._claim_structure_tables(conn)
             self._create_schema_for_connection(conn)
+        self._init_branch_reservations(conn)
         conn.commit()
         self._refresh_branch_after_external_clear(conn, initialize=False)
 
@@ -333,7 +334,6 @@ class AdvancedSQLiteSession(SQLiteSession):
         # Validate the owner-bearing tables before any helper queries or indexes consume them.
         self._claim_structure_tables(conn)
 
-        self._ensure_branch_reservations_table(conn)
         self._ensure_session_clear_generations_table(conn)
 
         # Indexes
@@ -408,6 +408,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                 target_branch = (
                     self._current_branch_id if self._generation != generation else branch_id
                 )
+                if target_branch != "main":
+                    self._require_active_branch(conn, target_branch)
                 # Keep both writes in one transaction so metadata failures do not leave orphans.
                 self._insert_items(conn, items)
                 self._insert_structure_metadata(conn, items, target_branch)
@@ -531,11 +533,6 @@ class AdvancedSQLiteSession(SQLiteSession):
                 )
                 while True:
                     with closing(conn.cursor()) as cursor:
-                        # Preserve every legacy branch ID before a pop can remove its
-                        # final message_structure row. This stays inside the existing
-                        # rollback boundary for the mutation.
-                        self._ensure_branch_reservations_table(conn)
-
                         # Atomically claim the newest structure row across processes.
                         cursor.execute(
                             """
@@ -586,6 +583,24 @@ class AdvancedSQLiteSession(SQLiteSession):
                                     (self.session_id, resolved_branch_id, user_turn_number),
                                 )
 
+                        # Only a successful pop supplies evidence for a newly empty branch.
+                        cursor.execute(
+                            """
+                            UPDATE branch_reservations SET is_empty = 1
+                            WHERE session_id = ? AND branch_id = ? AND clear_generation = ?
+                            AND NOT EXISTS (
+                                SELECT 1 FROM message_structure
+                                WHERE session_id = ? AND branch_id = ?
+                            )
+                            """,
+                            (
+                                self.session_id,
+                                resolved_branch_id,
+                                self._generation,
+                                self.session_id,
+                                resolved_branch_id,
+                            ),
+                        )
                         conn.commit()
 
                         if message_row is None:
@@ -615,9 +630,10 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         def _clear_session_sync():
             with self._write_connection() as conn:
-                # Backfill legacy branch IDs before clearing their only durable
-                # identity evidence.
-                self._ensure_branch_reservations_table(conn)
+                conn.execute(
+                    "UPDATE branch_reservations SET is_empty = 0 WHERE session_id = ?",
+                    (self.session_id,),
+                )
                 self._ensure_session_clear_generations_table(conn)
                 conn.execute(
                     f"DELETE FROM {self.messages_table} WHERE session_id = ?",
@@ -1158,17 +1174,7 @@ class AdvancedSQLiteSession(SQLiteSession):
             with self._write_connection() as conn:
                 self._ensure_session_clear_generations_table(conn)
                 with closing(conn.cursor()) as cursor:
-                    cursor.execute(
-                        """
-                        SELECT COUNT(*) FROM message_structure
-                        WHERE session_id = ? AND branch_id = ?
-                    """,
-                        (self.session_id, branch_id),
-                    )
-
-                    count = cursor.fetchone()[0]
-                    if count == 0:
-                        raise ValueError(f"Branch '{branch_id}' does not exist")
+                    self._require_active_branch(conn, branch_id)
                     generation = cast(
                         int,
                         cursor.execute(
@@ -1212,41 +1218,23 @@ class AdvancedSQLiteSession(SQLiteSession):
         if branch_id == "main":
             raise ValueError("Cannot delete the 'main' branch")
 
-        # Check if trying to delete current branch
-        if branch_id == self._current_branch_id:
-            if not force:
-                raise ValueError(
-                    f"Cannot delete current branch '{branch_id}'. Use force=True or switch branches first"  # noqa: E501
-                )
-            else:
-                # Confirm the branch is known before switching away from it; the delete
-                # below raises for an unknown branch, which would otherwise leave the
-                # session pointing at 'main'.
-                if not any(
-                    branch["branch_id"] == branch_id for branch in await self.list_branches()
-                ):
-                    raise ValueError(f"Branch '{branch_id}' does not exist")
-                # Switch to main before deleting
-                await self.switch_to_branch("main")
-
         def _delete_sync():
             """Synchronous helper to delete branch and associated data."""
             with self._write_connection() as conn:
-                # Backfill legacy branch IDs before deleting their message structure.
-                self._ensure_branch_reservations_table(conn)
+                if branch_id == self._current_branch_id and not force:
+                    raise ValueError(
+                        f"Cannot delete current branch '{branch_id}'. "
+                        "Use force=True or switch branches first"
+                    )
                 with closing(conn.cursor()) as cursor:
-                    # First verify the branch exists
+                    self._require_active_branch(conn, branch_id)
                     cursor.execute(
                         """
-                        SELECT COUNT(*) FROM message_structure
+                        UPDATE branch_reservations SET is_empty = 0
                         WHERE session_id = ? AND branch_id = ?
-                    """,
+                        """,
                         (self.session_id, branch_id),
                     )
-
-                    count = cursor.fetchone()[0]
-                    if count == 0:
-                        raise ValueError(f"Branch '{branch_id}' does not exist")
 
                     # Delete from turn_usage first (foreign key constraint)
                     cursor.execute(
@@ -1273,6 +1261,8 @@ class AdvancedSQLiteSession(SQLiteSession):
                     orphaned_messages_deleted = self._cleanup_orphaned_messages_sync(conn)
 
                 conn.commit()
+                if branch_id == self._current_branch_id:
+                    self._branch_state = ("main", self._generation)
 
                 return usage_deleted, structure_deleted, orphaned_messages_deleted
 
@@ -1310,13 +1300,22 @@ class AdvancedSQLiteSession(SQLiteSession):
                     cursor.execute(
                         """
                         SELECT
-                            ms.branch_id,
-                            COUNT(*) as message_count,
+                            br.branch_id,
+                            COUNT(ms.id) as message_count,
                             COUNT(CASE WHEN ms.message_type = 'user' THEN 1 END) as user_turns,
-                            MIN(ms.created_at) as created_at
-                        FROM message_structure ms
-                        WHERE ms.session_id = ?
-                        GROUP BY ms.branch_id
+                            br.active_since as created_at
+                        FROM branch_reservations br
+                        LEFT JOIN message_structure ms
+                            ON ms.session_id = br.session_id AND ms.branch_id = br.branch_id
+                        WHERE br.session_id = ? AND (
+                            ms.id IS NOT NULL OR (
+                                br.is_empty = 1 AND br.clear_generation = COALESCE((
+                                    SELECT generation FROM session_clear_generations
+                                    WHERE session_id = br.session_id
+                                ), 0)
+                            )
+                        )
+                        GROUP BY br.branch_id
                         ORDER BY created_at
                     """,
                         (self.session_id,),
@@ -1339,8 +1338,39 @@ class AdvancedSQLiteSession(SQLiteSession):
 
         return await asyncio.to_thread(_list_branches_sync)
 
-    def _ensure_branch_reservations_table(self, conn: sqlite3.Connection) -> None:
-        """Create the reservation table and backfill populated branches for this session."""
+    def _require_active_branch(self, conn: sqlite3.Connection, branch_id: str) -> None:
+        row = conn.execute(
+            """
+            SELECT 1 FROM branch_reservations br
+            WHERE session_id = ? AND branch_id = ? AND (
+                EXISTS (
+                    SELECT 1 FROM message_structure ms
+                    WHERE ms.session_id = br.session_id AND ms.branch_id = br.branch_id
+                ) OR (
+                    is_empty = 1 AND clear_generation = COALESCE((
+                        SELECT generation FROM session_clear_generations
+                        WHERE session_id = br.session_id
+                    ), 0)
+                )
+            )
+            """,
+            (self.session_id, branch_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Branch '{branch_id}' does not exist")
+
+    def _init_branch_reservations(self, conn: sqlite3.Connection) -> None:
+        """Keep populated history authoritative and record explicit emptiness separately."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(branch_reservations)")}
+        if "is_empty" in columns:
+            return
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        # A concurrent opener may have finished initialization while this one waited.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(branch_reservations)")}
+        if "is_empty" in columns:
+            return
+        self._ensure_session_clear_generations_table(conn)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS branch_reservations (
                 session_id TEXT NOT NULL,
@@ -1348,29 +1378,69 @@ class AdvancedSQLiteSession(SQLiteSession):
                 PRIMARY KEY (session_id, branch_id)
             )
         """)
-        missing_branch = conn.execute(
-            """
-            SELECT 1
-            FROM message_structure ms
-            WHERE ms.session_id = ?
-            AND NOT EXISTS (
-                SELECT 1 FROM branch_reservations br
-                WHERE br.session_id = ms.session_id AND br.branch_id = ms.branch_id
-            )
-            LIMIT 1
-            """,
-            (self.session_id,),
-        ).fetchone()
-        if missing_branch is not None:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
-                SELECT DISTINCT session_id, branch_id
-                FROM message_structure
-                WHERE session_id = ?
-                """,
-                (self.session_id,),
-            )
+        had_active_since = "active_since" in columns
+        if not had_active_since:
+            conn.execute("ALTER TABLE branch_reservations ADD COLUMN active_since TIMESTAMP")
+        conn.execute(
+            "ALTER TABLE branch_reservations ADD COLUMN clear_generation INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute(
+            "ALTER TABLE branch_reservations ADD COLUMN is_empty INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.execute("""
+            INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
+            SELECT DISTINCT session_id, branch_id FROM message_structure
+        """)
+        # A non-null prototype timestamp records an explicitly active branch.
+        if had_active_since:
+            conn.execute("""
+                UPDATE branch_reservations SET is_empty = 1
+                WHERE active_since IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM message_structure ms
+                    WHERE ms.session_id = branch_reservations.session_id
+                    AND ms.branch_id = branch_reservations.branch_id
+                )
+            """)
+        # Preserve populated legacy birth times without reviving NULL-only reservations.
+        conn.execute("""
+            UPDATE branch_reservations SET
+                active_since = COALESCE(active_since, (
+                    SELECT MIN(created_at) FROM message_structure ms
+                    WHERE ms.session_id = branch_reservations.session_id
+                    AND ms.branch_id = branch_reservations.branch_id
+                )),
+                clear_generation = COALESCE((
+                    SELECT generation FROM session_clear_generations sg
+                    WHERE sg.session_id = branch_reservations.session_id
+                ), 0)
+        """)
+
+        # Older writers cannot retire our empty marker themselves. Retire it on their
+        # first actual insert, so a subsequent older delete cannot revive an empty branch.
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS branch_reservations_record_fill
+            AFTER INSERT ON message_structure
+            BEGIN
+                INSERT INTO branch_reservations
+                    (session_id, branch_id, active_since, clear_generation, is_empty)
+                VALUES (
+                    NEW.session_id, NEW.branch_id, NEW.created_at,
+                    COALESCE((SELECT generation FROM session_clear_generations
+                              WHERE session_id = NEW.session_id), 0),
+                    0
+                )
+                ON CONFLICT (session_id, branch_id) DO UPDATE SET
+                    active_since = CASE
+                        WHEN clear_generation = excluded.clear_generation
+                        THEN COALESCE(active_since, excluded.active_since)
+                        ELSE excluded.active_since
+                    END,
+                    clear_generation = excluded.clear_generation,
+                    is_empty = 0
+                WHERE is_empty = 1 OR active_since IS NULL
+                    OR clear_generation != excluded.clear_generation;
+            END
+        """)
 
     def _ensure_session_clear_generations_table(self, conn: sqlite3.Connection) -> None:
         """Create and initialize the durable clear generation for this session."""
@@ -1436,10 +1506,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         if new_branch_id is not None:
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
-                VALUES (?, ?)
+                INSERT OR IGNORE INTO branch_reservations
+                    (session_id, branch_id, active_since, clear_generation, is_empty)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?, 1)
                 """,
-                (self.session_id, new_branch_id),
+                (self.session_id, new_branch_id, self._generation),
             )
             if cursor.rowcount == 0:
                 raise ValueError(
@@ -1453,10 +1524,11 @@ class AdvancedSQLiteSession(SQLiteSession):
         while True:
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO branch_reservations (session_id, branch_id)
-                VALUES (?, ?)
+                INSERT OR IGNORE INTO branch_reservations
+                    (session_id, branch_id, active_since, clear_generation, is_empty)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?, 1)
                 """,
-                (self.session_id, branch_id),
+                (self.session_id, branch_id, self._generation),
             )
             if cursor.rowcount == 1:
                 return branch_id
@@ -1484,7 +1556,6 @@ class AdvancedSQLiteSession(SQLiteSession):
                 # Acquire SQLite's write reservation before checking the branch ID so
                 # sessions in other processes cannot pass the same check concurrently.
                 conn.execute("BEGIN IMMEDIATE")
-                self._ensure_branch_reservations_table(conn)
                 self._refresh_branch_after_external_clear(conn)
                 source_branch_id, generation = self._branch_state
                 with closing(conn.cursor()) as cursor:

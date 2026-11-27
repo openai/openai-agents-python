@@ -1483,6 +1483,76 @@ async def test_branch_ids_remain_reserved_after_delete_and_clear():
         session.close()
 
 
+@pytest.mark.parametrize("turn", [1, 2])
+async def test_empty_branch_remains_available_until_deleted(tmp_path: Path, turn: int):
+    db = tmp_path / "branches.db"
+    session = AdvancedSQLiteSession(session_id="session", db_path=db, create_tables=True)
+    items = _branch_collision_items()
+    try:
+        await session.add_items(items)
+        branch = await session.create_branch_from_turn(turn, "alternative")
+        if turn == 2:
+            while await session.pop_item() is not None:
+                pass
+        branches = {row["branch_id"]: row for row in await session.list_branches()}
+        assert branches[branch]["is_current"]
+        assert branches[branch]["message_count"] == branches[branch]["user_turns"] == 0
+        assert branches[branch]["created_at"]
+        await session.switch_to_branch(branch)
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+    reopened = AdvancedSQLiteSession(session_id="session", db_path=db)
+    try:
+        await reopened.switch_to_branch(branch)
+        assert await reopened.get_items() == []
+        await reopened.delete_branch(branch, force=True)
+        assert await reopened.get_items() == items
+        assert [row["branch_id"] for row in await reopened.list_branches()] == ["main"]
+        with pytest.raises(ValueError, match="does not exist"):
+            await reopened.switch_to_branch(branch)
+        with pytest.raises(ValueError, match="already been used"):
+            await reopened.create_branch_from_turn(1, branch)
+    finally:
+        reopened.close()
+
+
+async def test_legacy_reservations_only_restore_branches_with_history(tmp_path: Path):
+    db = tmp_path / "legacy-branches.db"
+    session = AdvancedSQLiteSession(session_id="session", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        await session.create_branch_from_turn(2, "live")
+    finally:
+        session.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE branch_reservations")
+        conn.execute(
+            "CREATE TABLE branch_reservations (session_id TEXT, branch_id TEXT, "
+            "PRIMARY KEY (session_id, branch_id))"
+        )
+        conn.executemany(
+            "INSERT INTO branch_reservations VALUES ('session', ?)",
+            [("main",), ("live",), ("deleted",)],
+        )
+
+    reopened = AdvancedSQLiteSession(session_id="session", db_path=db)
+    try:
+        await reopened.switch_to_branch("live")
+        while await reopened.pop_item() is not None:
+            pass
+        assert {row["branch_id"] for row in await reopened.list_branches()} == {"main", "live"}
+        await reopened.clear_session()
+        assert await reopened.list_branches() == []
+        await reopened.add_items(_branch_collision_items())
+        for used in ("live", "deleted"):
+            with pytest.raises(ValueError, match="already been used"):
+                await reopened.create_branch_from_turn(1, used)
+    finally:
+        reopened.close()
+
+
 async def test_branch_reservations_migrate_existing_populated_branches(tmp_path: Path):
     """Existing databases must backfill branch reservations before allocating IDs."""
     db_path = tmp_path / "branch_reservation_migration.db"
@@ -2341,7 +2411,12 @@ async def test_failed_force_delete_keeps_current_branch():
         branch_id = await session.create_branch_from_turn(1, "alternative_path")
         assert session._current_branch_id == branch_id
 
-        with pytest.raises(ValueError, match="Branch 'alternative_path' does not exist"):
+        with (
+            patch.object(
+                session, "_cleanup_orphaned_messages_sync", side_effect=RuntimeError("failed")
+            ),
+            pytest.raises(RuntimeError, match="failed"),
+        ):
             await session.delete_branch(branch_id, force=True)
 
         assert session._current_branch_id == branch_id
@@ -5264,3 +5339,214 @@ async def test_concurrent_structure_table_claims_leave_one_coherent_owner(tmp_pa
             if process.is_alive():
                 process.terminate()
             process.join(timeout=5)
+
+
+def _released_writer_fill_branch(db: Path, session_id: str, branch_id: str) -> None:
+    """Replay the released writer's reservation and populated-prefix INSERT shapes."""
+    # A separate raw-release subprocess replay verifies these persisted writer shapes.
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO branch_reservations (session_id, branch_id) VALUES (?, ?)",
+            (session_id, branch_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_structure
+                (session_id, message_id, branch_id, message_type, sequence_number,
+                 user_turn_number, branch_turn_number, tool_name)
+            SELECT session_id, message_id, ?, message_type, sequence_number + 100,
+                   user_turn_number, branch_turn_number, tool_name
+            FROM message_structure
+            WHERE session_id = ? AND branch_id = 'main' AND branch_turn_number < 2
+            """,
+            (branch_id, session_id),
+        )
+        conn.commit()
+
+
+def _released_writer_delete_branch(db: Path, session_id: str, branch_id: str) -> None:
+    """Replay released deletion without knowledge of new internal branch metadata."""
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        conn.execute(
+            "DELETE FROM turn_usage WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+        )
+        conn.execute(
+            "DELETE FROM message_structure WHERE session_id = ? AND branch_id = ?",
+            (session_id, branch_id),
+        )
+        conn.commit()
+
+
+async def test_released_writer_populated_branch_after_upgrade_remains_visible(tmp_path: Path):
+    db = tmp_path / "legacy-populated.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    items = _branch_collision_items()
+    try:
+        await session.add_items(items)
+        _released_writer_fill_branch(db, "upgrade", "legacy-created")
+        branches = {row["branch_id"]: row for row in await session.list_branches()}
+        assert branches["legacy-created"]["message_count"] == 2
+        await session.switch_to_branch("legacy-created")
+        assert await session.get_items() == items[:2]
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("initially_empty", [False, True], ids=["populated", "empty-then-filled"])
+async def test_released_writer_delete_does_not_revive_empty_identity(
+    tmp_path: Path, initially_empty: bool
+):
+    db = tmp_path / "legacy-delete.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    stale = None
+    try:
+        await session.add_items(_branch_collision_items())
+        branch = await session.create_branch_from_turn(1 if initially_empty else 2, "retired")
+        stale = AdvancedSQLiteSession(session_id="upgrade", db_path=db)
+        await stale.switch_to_branch(branch)
+        if initially_empty:
+            # No new reader runs between the older writer's fill and delete.
+            _released_writer_fill_branch(db, "upgrade", branch)
+        _released_writer_delete_branch(db, "upgrade", branch)
+        assert {row["branch_id"] for row in await session.list_branches()} == {"main"}
+        with pytest.raises(ValueError, match="does not exist"):
+            await stale.add_items([{"role": "user", "content": "stale append"}])
+        await session.switch_to_branch("main")
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(1, branch)
+    finally:
+        if stale is not None:
+            stale.close()
+        session.close()
+
+
+async def test_released_writer_clear_retires_new_empty_markers(tmp_path: Path):
+    db = tmp_path / "legacy-clear.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        branch = await session.create_branch_from_turn(1, "empty-before-clear")
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            for table in ["turn_usage", "message_structure", "agent_messages", "agent_sessions"]:
+                conn.execute(f"DELETE FROM {table} WHERE session_id = ?", ("upgrade",))
+            conn.execute(
+                "UPDATE session_clear_generations SET generation = generation + 1 "
+                "WHERE session_id = ?",
+                ("upgrade",),
+            )
+            conn.commit()
+        assert await session.list_branches() == []
+        await session.add_items([{"role": "user", "content": "new main history"}])
+        assert {row["branch_id"] for row in await session.list_branches()} == {"main"}
+        with pytest.raises(ValueError, match="already been used"):
+            await session.create_branch_from_turn(1, branch)
+    finally:
+        session.close()
+
+
+async def test_unrelated_released_fill_keeps_explicit_empty_branch(tmp_path: Path):
+    db = tmp_path / "unrelated-legacy-fill.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        branch = await session.create_branch_from_turn(1, "untouched-empty")
+        _released_writer_fill_branch(db, "upgrade", "other-legacy-branch")
+        _released_writer_delete_branch(db, "upgrade", "other-legacy-branch")
+        branches = {row["branch_id"]: row for row in await session.list_branches()}
+        assert set(branches) == {"main", branch}
+        assert branches[branch]["message_count"] == 0
+        await session.switch_to_branch(branch)
+        assert await session.get_items() == []
+    finally:
+        session.close()
+
+
+async def test_branch_birth_time_survives_fill_until_clear_generation_changes(tmp_path: Path):
+    db = tmp_path / "branch-birth.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        with contextlib.closing(sqlite3.connect(db)) as conn:
+            # A historical birth time makes preservation independent of clock resolution.
+            conn.execute(
+                "UPDATE branch_reservations SET active_since = '2000-01-01 00:00:00' "
+                "WHERE session_id = 'upgrade' AND branch_id = 'main'"
+            )
+            conn.commit()
+        await session.add_items([{"role": "user", "content": "same generation"}])
+        assert (await session.list_branches())[0]["created_at"] == "2000-01-01 00:00:00"
+        await session.clear_session()
+        await session.add_items([{"role": "user", "content": "new generation"}])
+        branches = await session.list_branches()
+        assert len(branches) == 1
+        assert branches[0]["created_at"] > "2000-01-01 00:00:00"
+    finally:
+        session.close()
+
+
+async def test_populated_legacy_birth_times_and_order_survive_upgrade(tmp_path: Path):
+    db = tmp_path / "legacy-birth.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        await session.create_branch_from_turn(2, "legacy")
+    finally:
+        session.close()
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        conn.execute("DROP TABLE branch_reservations")
+        conn.execute(
+            "CREATE TABLE branch_reservations (session_id TEXT, branch_id TEXT, "
+            "PRIMARY KEY (session_id, branch_id))"
+        )
+        conn.execute(
+            "UPDATE message_structure SET created_at = CASE branch_id "
+            "WHEN 'main' THEN '2000-01-01 00:00:00' ELSE '2001-01-01 00:00:00' END"
+        )
+        conn.commit()
+    reopened = AdvancedSQLiteSession(session_id="upgrade", db_path=db)
+    try:
+        branches = await reopened.list_branches()
+        assert [(row["branch_id"], row["created_at"]) for row in branches] == [
+            ("main", "2000-01-01 00:00:00"),
+            ("legacy", "2001-01-01 00:00:00"),
+        ]
+        await reopened.switch_to_branch("legacy")
+        assert await reopened.get_items() == _branch_collision_items()[:2]
+    finally:
+        reopened.close()
+
+
+async def test_active_since_prototype_empty_branch_keeps_birth_on_upgrade(tmp_path: Path):
+    db = tmp_path / "prototype-empty.db"
+    session = AdvancedSQLiteSession(session_id="upgrade", db_path=db, create_tables=True)
+    try:
+        await session.add_items(_branch_collision_items())
+        branch = await session.create_branch_from_turn(1, "prototype-empty")
+        birth = next(
+            row["created_at"] for row in await session.list_branches() if row["branch_id"] == branch
+        )
+    finally:
+        session.close()
+    with contextlib.closing(sqlite3.connect(db)) as conn:
+        rows = conn.execute(
+            "SELECT session_id, branch_id, active_since FROM branch_reservations"
+        ).fetchall()
+        conn.execute("DROP TABLE branch_reservations")
+        conn.execute(
+            "CREATE TABLE branch_reservations (session_id TEXT, branch_id TEXT, "
+            "active_since TIMESTAMP, PRIMARY KEY (session_id, branch_id))"
+        )
+        conn.executemany("INSERT INTO branch_reservations VALUES (?, ?, ?)", rows)
+        conn.execute("INSERT INTO branch_reservations VALUES ('upgrade', 'retired', NULL)")
+        conn.commit()
+    reopened = AdvancedSQLiteSession(session_id="upgrade", db_path=db)
+    try:
+        branches = {row["branch_id"]: row for row in await reopened.list_branches()}
+        assert branches[branch]["created_at"] == birth
+        assert branches[branch]["message_count"] == 0
+        assert "retired" not in branches
+        await reopened.switch_to_branch(branch)
+        assert await reopened.get_items() == []
+    finally:
+        reopened.close()
