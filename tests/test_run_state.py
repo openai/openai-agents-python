@@ -12179,3 +12179,115 @@ async def test_guardrail_state_keeps_fallback_when_model_serializer_raises() -> 
     assert restored._output_guardrail_results[0].agent_output == "reason='approved'"
     assert restored._tool_input_guardrail_results[0].output.output_info == "reason='approved'"
     assert restored._tool_output_guardrail_results[0].output.output_info == "reason='approved'"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("with_session", [False, True], ids=["guardrail", "session"])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"conversation_id": "rejected-conversation"},
+        {"previous_response_id": "rejected-response"},
+        {"auto_previous_response_id": True},
+    ],
+    ids=["conversation", "previous-response", "auto-previous-response"],
+)
+async def test_rejected_resume_preserves_conversation_settings(
+    streamed: bool, with_session: bool, override: dict[str, Any]
+) -> None:
+    from agents import SQLiteSession
+
+    executions: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def action() -> str:
+        executions.append("executed")
+        return "approved"
+
+    def check_output(_context: Any, _agent: Agent[Any], _output: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("action", "{}")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="Resume retry",
+        model=model,
+        tools=[action],
+        output_guardrails=[] if with_session else [OutputGuardrail(check_output)],
+    )
+    session = SQLiteSession("resume-retry") if with_session else None
+
+    async def run(value: Any, **options: Any) -> Any:
+        kwargs = dict(session=session, run_config=RunConfig(tracing_disabled=True), **options)
+        if streamed:
+            result = Runner.run_streamed(agent, value, **kwargs)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, value, **kwargs)
+
+    try:
+        paused = await run("approve action")
+        state = paused.to_state()
+        state.approve(paused.interruptions[0])
+        before = state.to_json()
+        with pytest.raises(
+            UserError, match="Session persistence" if with_session else "Output guardrails"
+        ):
+            await run(state, **override)
+        after = state.to_json()
+        for field in ("conversation_id", "previous_response_id", "auto_previous_response_id"):
+            assert after[field] == before[field]
+        assert executions == []
+        assert (await run(state)).final_output == "done"
+        assert executions == ["executed"]
+    finally:
+        if session is not None:
+            session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_resume_keeps_existing_conversation_after_rejected_override(streamed: bool) -> None:
+    model = ScriptedModel()
+    model.enqueue([get_text_message("first")])
+    agent = Agent(name="Existing conversation", model=model)
+    config = RunConfig(tracing_disabled=True)
+    first = await Runner.run(agent, "go", conversation_id="original", run_config=config)
+    state = first.to_state()
+
+    def check_output(_context: Any, _agent: Agent[Any], _output: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def resume(**options: Any) -> Any:
+        if streamed:
+            result = Runner.run_streamed(agent, state, **options)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, state, **options)
+
+    with pytest.raises(UserError, match="Output guardrails"):
+        await resume(
+            conversation_id="rejected",
+            run_config=RunConfig(
+                tracing_disabled=True, output_guardrails=[OutputGuardrail(check_output)]
+            ),
+        )
+    assert state.to_json()["conversation_id"] == "original"
+
+    model.enqueue([get_text_message("inherited")])
+    inherited = await resume(run_config=config)
+    assert inherited.final_output == "inherited"
+    assert inherited.to_state().to_json()["conversation_id"] == "original"
+
+    model.enqueue([get_text_message("overridden")])
+    overridden = await resume(conversation_id="accepted", run_config=config)
+    assert overridden.final_output == "overridden"
+    assert state.to_json()["conversation_id"] == "accepted"
+    assert overridden.to_state().to_json()["conversation_id"] == "accepted"

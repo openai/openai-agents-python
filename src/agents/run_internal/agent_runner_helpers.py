@@ -195,13 +195,32 @@ def apply_resumed_conversation_settings(
     auto_previous_response_id: bool,
 ) -> tuple[str | None, str | None, bool]:
     """Apply RunState conversation identifiers and return the resolved values."""
+    conversation_id, previous_response_id, auto_previous_response_id = (
+        resolve_resumed_conversation_settings(
+            run_state=run_state,
+            conversation_id=conversation_id,
+            previous_response_id=previous_response_id,
+            auto_previous_response_id=auto_previous_response_id,
+        )
+    )
+    run_state._conversation_id = conversation_id
+    run_state._previous_response_id = previous_response_id
+    run_state._auto_previous_response_id = auto_previous_response_id
+    return conversation_id, previous_response_id, auto_previous_response_id
+
+
+def resolve_resumed_conversation_settings(
+    *,
+    run_state: RunState[TContext],
+    conversation_id: str | None,
+    previous_response_id: str | None,
+    auto_previous_response_id: bool,
+) -> tuple[str | None, str | None, bool]:
+    """Resolve resume overrides without changing the caller's checkpoint."""
     conversation_id = conversation_id or run_state._conversation_id
     previous_response_id = previous_response_id or run_state._previous_response_id
     if auto_previous_response_id is False and run_state._auto_previous_response_id:
         auto_previous_response_id = True
-    run_state._conversation_id = conversation_id
-    run_state._previous_response_id = previous_response_id
-    run_state._auto_previous_response_id = auto_previous_response_id
     return conversation_id, previous_response_id, auto_previous_response_id
 
 

@@ -63,7 +63,6 @@ from .run_error_handlers import RunErrorHandlers
 from .run_internal.agent_bindings import bind_public_agent
 from .run_internal.agent_runner_helpers import (
     append_model_response_if_new,
-    apply_resumed_conversation_settings,
     attach_usage_to_span,
     build_interruption_result,
     build_resumed_stream_debug_extra,
@@ -74,6 +73,7 @@ from .run_internal.agent_runner_helpers import (
     reject_unrecoverable_terminal_state,
     resolve_processed_response,
     resolve_resumed_context,
+    resolve_resumed_conversation_settings,
     resolve_trace_settings,
     save_final_turn_items_after_guardrails,
     save_turn_items_if_needed,
@@ -675,7 +675,7 @@ class AgentRunner:
                 conversation_id,
                 previous_response_id,
                 auto_previous_response_id,
-            ) = apply_resumed_conversation_settings(
+            ) = resolve_resumed_conversation_settings(
                 run_state=run_state,
                 conversation_id=conversation_id,
                 previous_response_id=previous_response_id,
@@ -1043,6 +1043,12 @@ class AgentRunner:
                         previous_response_id=previous_response_id,
                         auto_previous_response_id=auto_previous_response_id,
                     )
+                    if is_resumed_state and run_state is not None:
+                        (
+                            run_state._conversation_id,
+                            run_state._previous_response_id,
+                            run_state._auto_previous_response_id,
+                        ) = conversation_id, previous_response_id, auto_previous_response_id
                     if TYPE_CHECKING:
                         # Keep loop-carried types explicit to bound Pyright's flow analysis.
                         original_input = cast(  # type: ignore[redundant-cast]
@@ -2677,7 +2683,7 @@ class AgentRunner:
                     conversation_id,
                     previous_response_id,
                     auto_previous_response_id,
-                ) = apply_resumed_conversation_settings(
+                ) = resolve_resumed_conversation_settings(
                     run_state=run_state,
                     conversation_id=conversation_id,
                     previous_response_id=previous_response_id,
@@ -2768,6 +2774,13 @@ class AgentRunner:
                 previous_response_id=previous_response_id,
                 auto_previous_response_id=auto_previous_response_id,
             )
+
+            if is_resumed_state and run_state is not None:
+                (
+                    run_state._conversation_id,
+                    run_state._previous_response_id,
+                    run_state._auto_previous_response_id,
+                ) = conversation_id, previous_response_id, auto_previous_response_id
 
             (
                 trace_workflow_name,
