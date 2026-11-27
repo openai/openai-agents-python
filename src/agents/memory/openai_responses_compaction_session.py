@@ -667,7 +667,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             return
 
         await self._restore_underlying_session_items(
-            previous_items, clear_error, clear_existing_items=False
+            previous_items, clear_error, surviving_items=current_items
         )
 
     async def _restore_underlying_session_items(
@@ -675,11 +675,22 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         previous_items: list[TResponseInputItem],
         replacement_error: BaseException,
         *,
-        clear_existing_items: bool = True,
+        surviving_items: list[TResponseInputItem] | None = None,
     ) -> None:
         try:
-            if clear_existing_items:
+            if surviving_items is None:
                 await self.underlying_session.clear_session()
+            else:
+                # Keep the intact prefix. Remove only the divergent tail without
+                # repeating the clear that just failed.
+                prefix = 0
+                for current, previous in zip(surviving_items, previous_items, strict=False):
+                    if current != previous:
+                        break
+                    prefix += 1
+                for _ in range(len(surviving_items) - prefix):
+                    await self.underlying_session.pop_item()
+                previous_items = previous_items[prefix:]
             if previous_items:
                 await self.underlying_session.add_items(list(previous_items))
         except Exception as restore_error:

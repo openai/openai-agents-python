@@ -1643,11 +1643,14 @@ class TestOpenAIResponsesCompactionSession:
         assert failing_session.add_calls == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("removed_index", [None, -1, 1, 0])
     async def test_run_compaction_restores_history_when_clear_fails_after_mutation(
-        self,
+        self, removed_index: int | None
     ) -> None:
         history: list[TResponseInputItem] = [
-            cast(TResponseInputItem, {"type": "message", "role": "user", "content": "original"}),
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
         ]
         compacted_items: list[TResponseInputItem] = [
             cast(
@@ -1668,7 +1671,10 @@ class TestOpenAIResponsesCompactionSession:
 
             async def clear_session(self) -> None:
                 self.clear_calls += 1
-                await super().clear_session()
+                if removed_index is None:
+                    await super().clear_session()
+                else:
+                    self.saved_items.pop(removed_index)
                 raise RuntimeError("clear failed")
 
         failing_session = PartiallyFailingClearSession(history=history)
