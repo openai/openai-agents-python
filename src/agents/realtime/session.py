@@ -308,21 +308,55 @@ class RealtimeSession(RealtimeModelListener):
         # Credential callbacks can start nested sessions or shield a child close().
         # Keep enclosing attempts visible to those tasks without retaining sessions.
         self._connect_scope = object()
-        token = _CONNECT_SCOPES.set((*_CONNECT_SCOPES.get(), self._connect_scope))
         try:
 
             async def connect_model() -> None:
                 # Eager factories can execute user callbacks before create_task returns.
                 self._connect_task = asyncio.current_task()
-                await self._model.connect(model_config)
+                token = _CONNECT_SCOPES.set((*_CONNECT_SCOPES.get(), self._connect_scope))
+                try:
+                    await self._model.connect(model_config)
+                finally:
+                    _CONNECT_SCOPES.reset(token)
 
             self._connect_task = asyncio.create_task(connect_model())
-            await self._connect_task
+            # Waiter cancellation is distinct from the model's own outcome below.
+            await asyncio.wait((self._connect_task,))
+        except asyncio.CancelledError:
+            # Preserve retries when cancellation stops connect before acquisition.
+            connect_task = self._connect_task
+            assert connect_task is not None
+            if not connect_task.done():
+                connect_task.cancel()
+            while not connect_task.done():
+                try:
+                    await asyncio.wait((connect_task,))
+                except asyncio.CancelledError:
+                    pass
+            if not connect_task.cancelled() and connect_task.exception() is None:
+                # Failed context entry has no __aexit__; finish the shared close first.
+                close_task = asyncio.create_task(self.close())
+                while not close_task.done():
+                    try:
+                        await asyncio.wait((close_task,))
+                    except asyncio.CancelledError:
+                        pass
+                self._consume_task_result(close_task)
+            else:
+                self._model.remove_listener(self)
+            raise
         except BaseException:
             self._model.remove_listener(self)
             raise
+        else:
+            try:
+                self._connect_task.result()
+            except BaseException:
+                self._model.remove_listener(self)
+                raise
         finally:
-            _CONNECT_SCOPES.reset(token)
+            if self._connect_task is not None and self._connect_task.done():
+                self._consume_task_result(self._connect_task)
             self._connect_scope = None
             self._connect_task = None
 

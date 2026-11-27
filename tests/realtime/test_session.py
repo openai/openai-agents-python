@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 import traceback
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -3178,3 +3179,240 @@ def test_realtime_session_keeps_contextvar_import_private():
     namespace: dict[str, Any] = {}
     exec("from agents.realtime.session import *", namespace)
     assert "ContextVar" not in namespace
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eager", [False, True], ids=["regular", "eager"])
+@pytest.mark.parametrize(
+    "schedule",
+    ["completed", "suppressed", "overlapping-close", "repeated-cancel", "cleanup-failure"],
+)
+async def test_cancelled_entry_releases_connected_model(eager: bool, schedule: str):
+    eager_factory = getattr(asyncio, "eager_task_factory", None)
+    if eager and eager_factory is None:
+        pytest.skip("Eager task factories require Python 3.12 or newer.")
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    connected = asyncio.Event()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    body_entered = False
+    entry_pending_during_close: list[bool] = []
+    closing: asyncio.Task[None] | None = None
+    close_attempts = 0
+
+    class ConnectingModel(_DummyModel):
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                if schedule != "suppressed":
+                    raise
+            await super().connect(options)
+            connected.set()
+
+        async def close(self) -> None:
+            nonlocal close_attempts
+            close_attempts += 1
+            if schedule == "cleanup-failure" and close_attempts == 1:
+                raise RuntimeError("close failed once")
+            if schedule in {"overlapping-close", "repeated-cancel"}:
+                close_started.set()
+                await release_close.wait()
+            await super().close()
+
+    model = ConnectingModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+
+    async def use_session() -> None:
+        nonlocal body_entered
+        async with session:
+            body_entered = True
+
+    async def cancel_entry() -> None:
+        nonlocal closing
+        await (started if schedule == "suppressed" else connected).wait()
+        if schedule in {"overlapping-close", "repeated-cancel"}:
+            closing = asyncio.create_task(session.close())
+        entering.cancel("cancel-entry")
+        if schedule in {"overlapping-close", "repeated-cancel"}:
+            await close_started.wait()
+            if schedule == "repeated-cancel":
+                entering.cancel("second-cancel")
+            # Let entry observe cancellation before checking that it joins the blocked close.
+            await asyncio.sleep(0)
+            entry_pending_during_close.append(not entering.done())
+            release_close.set()
+            assert closing is not None
+            await closing
+
+    loop.set_task_factory(eager_factory if eager else None)
+    cancelling = asyncio.create_task(cancel_entry())
+    entering = asyncio.create_task(use_session())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if schedule != "suppressed":
+            release.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await asyncio.wait_for(entering, timeout=2)
+        if sys.version_info >= (3, 11):
+            assert raised.value.args == ("cancel-entry",)
+        await asyncio.wait_for(cancelling, timeout=2)
+        assert not body_entered
+        if schedule == "cleanup-failure":
+            assert model.connected
+            # Allow the existing cleanup-task completion callback to publish its retry state.
+            await asyncio.sleep(0)
+            await session.close()
+            assert close_attempts == 2
+        assert not model.connected
+        assert model.closed
+        assert model.close_calls == 1
+        if schedule in {"overlapping-close", "repeated-cancel"}:
+            assert entry_pending_during_close == [True]
+    finally:
+        release.set()
+        release_close.set()
+        for task in [entering, cancelling, closing]:
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in [entering, cancelling, closing] if task is not None),
+            return_exceptions=True,
+        )
+        try:
+            await session.close()
+            await model.close()
+        finally:
+            loop.set_task_factory(original_factory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eager", [False, True], ids=["regular", "eager"])
+@pytest.mark.parametrize("failure", ["error", "cancelled-error", "task-cancelled"])
+async def test_connect_error_preserves_error_and_allows_entry_retry(eager: bool, failure: str):
+    eager_factory = getattr(asyncio, "eager_task_factory", None)
+    if eager and eager_factory is None:
+        pytest.skip("Eager task factories require Python 3.12 or newer.")
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+    error = (
+        asyncio.CancelledError("model-cancelled")
+        if failure == "cancelled-error"
+        else RuntimeError("connection unavailable")
+    )
+    attempts = 0
+
+    class RetryModel(_DummyModel):
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                if failure == "task-cancelled":
+                    task = asyncio.current_task()
+                    assert task is not None
+                    task.cancel("model-task-cancelled")
+                    await asyncio.sleep(0)
+                else:
+                    raise error
+            await super().connect(options)
+
+    model = RetryModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    loop.set_task_factory(eager_factory if eager else None)
+    try:
+        expected = asyncio.CancelledError if failure == "task-cancelled" else type(error)
+        with pytest.raises(expected) as raised:
+            await session.enter()
+        if failure == "error":
+            assert raised.value is error
+        elif sys.version_info >= (3, 11):
+            assert raised.value.args == (
+                "model-task-cancelled" if failure == "task-cancelled" else "model-cancelled",
+            )
+        assert model.close_calls == 0
+        async with session:
+            assert model.connected
+        assert model.close_calls == 1
+    finally:
+        try:
+            await session.close()
+        finally:
+            loop.set_task_factory(original_factory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eager", [False, True], ids=["regular", "eager"])
+@pytest.mark.parametrize("schedule", ["cancelled", "error", "repeated-cancel", "explicit-close"])
+async def test_cancelled_entry_before_acquisition_preserves_retry(eager: bool, schedule: str):
+    eager_factory = getattr(asyncio, "eager_task_factory", None)
+    if eager and eager_factory is None:
+        pytest.skip("Eager task factories require Python 3.12 or newer.")
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    attempts = 0
+
+    class RetryModel(_DummyModel):
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    if schedule == "repeated-cancel":
+                        await release.wait()
+                    if schedule == "error":
+                        raise RuntimeError("credential resolution failed") from None
+                    raise
+            await super().connect(options)
+
+    model = RetryModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    loop.set_task_factory(eager_factory if eager else None)
+    entering = asyncio.create_task(session.enter())
+    closing: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if schedule == "explicit-close":
+            closing = asyncio.create_task(session.close())
+        entering.cancel("before-acquisition")
+        await asyncio.wait_for(cancelled.wait(), timeout=2)
+        if schedule == "repeated-cancel":
+            entering.cancel("second-cancel")
+            await asyncio.sleep(0)
+            assert not entering.done()
+            release.set()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await asyncio.wait_for(entering, timeout=2)
+        if sys.version_info >= (3, 11):
+            assert raised.value.args == ("before-acquisition",)
+        assert not model.connected
+        if closing is not None:
+            await closing
+            with pytest.raises(UserError, match="closed"):
+                await session.enter()
+        else:
+            assert model.close_calls == 0
+            async with session:
+                assert model.connected
+        assert model.close_calls == 1
+    finally:
+        release.set()
+        if not entering.done():
+            entering.cancel()
+        await asyncio.gather(entering, return_exceptions=True)
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
+        try:
+            await session.close()
+        finally:
+            loop.set_task_factory(original_factory)
