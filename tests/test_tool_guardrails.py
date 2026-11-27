@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from typing_extensions import assert_type
 
 from agents import (
     Agent,
@@ -641,6 +642,24 @@ async def test_tool_tripwire_preserves_completed_turn_results(streaming: bool):
         "first_turn"
     ]
     assert exc.run_data.tool_output_guardrail_results == []
+
+
+def test_direct_tool_guardrail_keyword_options_typing() -> None:
+    def sync_check(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow()
+
+    async def async_check(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return sync_check(data)
+
+    assert_type(tool_input_guardrail(sync_check, name="sync"), ToolInputGuardrail[Any])
+    assert_type(tool_input_guardrail(async_check, name="async"), ToolInputGuardrail[Any])
+    assert_type(tool_output_guardrail(sync_check, name="sync"), ToolOutputGuardrail[Any])
+    assert_type(tool_output_guardrail(async_check, name="async"), ToolOutputGuardrail[Any])
+
+    guardrail = tool_input_guardrail(sync_check, name="direct")
+    assert guardrail.name == "direct"
+    assert guardrail.guardrail_function is sync_check
+    assert tool_output_guardrail(async_check, name="direct").name == "direct"
 
 
 if __name__ == "__main__":

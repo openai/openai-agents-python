@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from typing_extensions import assert_type
 
 from agents import (
     Agent,
@@ -2362,3 +2363,30 @@ async def test_output_guardrail_exception_reports_completed_results_streamed():
             pass
 
     assert _result_names(result.output_guardrail_results) == ["passes"]
+
+
+def test_direct_guardrail_keyword_options_typing() -> None:
+    def sync_check(
+        context: RunContextWrapper[str], agent: Agent[Any], value: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=context.context, tripwire_triggered=False)
+
+    async def async_check(
+        context: RunContextWrapper[str], agent: Agent[Any], value: str | list[TResponseInputItem]
+    ) -> GuardrailFunctionOutput:
+        return sync_check(context, agent, value)
+
+    assert_type(
+        input_guardrail(sync_check, name="sync", run_in_parallel=False), InputGuardrail[str]
+    )
+    assert_type(
+        input_guardrail(async_check, name="async", run_in_parallel=False), InputGuardrail[str]
+    )
+    assert_type(output_guardrail(sync_check, name="sync"), OutputGuardrail[str])
+    assert_type(output_guardrail(async_check, name="async"), OutputGuardrail[str])
+
+    guardrail = input_guardrail(sync_check, name="direct", run_in_parallel=False)
+    assert guardrail.name == "direct"
+    assert guardrail.run_in_parallel is False
+    assert guardrail.guardrail_function is sync_check
+    assert output_guardrail(async_check, name="direct").name == "direct"

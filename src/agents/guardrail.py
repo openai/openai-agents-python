@@ -201,12 +201,18 @@ _InputGuardrailFuncAsync = Callable[
 @overload
 def input_guardrail(
     func: _InputGuardrailFuncSync[TContext_co],
+    *,
+    name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> InputGuardrail[TContext_co]: ...
 
 
 @overload
 def input_guardrail(
     func: _InputGuardrailFuncAsync[TContext_co],
+    *,
+    name: str | None = None,
+    run_in_parallel: bool = True,
 ) -> InputGuardrail[TContext_co]: ...
 
 
@@ -283,12 +289,16 @@ _OutputGuardrailFuncAsync = Callable[
 @overload
 def output_guardrail(
     func: _OutputGuardrailFuncSync[TContext_co],
+    *,
+    name: str | None = None,
 ) -> OutputGuardrail[TContext_co]: ...
 
 
 @overload
 def output_guardrail(
     func: _OutputGuardrailFuncAsync[TContext_co],
+    *,
+    name: str | None = None,
 ) -> OutputGuardrail[TContext_co]: ...
 
 
