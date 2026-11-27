@@ -1047,6 +1047,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         event: RealtimeModelSendInterrupt,
     ) -> list[tuple[str, Exception]]:
         errors: list[tuple[str, Exception]] = []
+        last_audio_item = self._audio_state_tracker.get_last_audio_item()
         playback_state = self._get_playback_state()
         current_item_id = playback_state.get("current_item_id")
         current_item_content_index = playback_state.get("current_item_content_index")
@@ -1090,6 +1091,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 if current_audio_item not in source_audio_items:
                     self._audio_state_tracker.on_response_interrupted(event.response_id)
                     return errors
+        elif current_item_id is not None:
+            source_audio_items = ((current_item_id, current_item_content_index or 0),)
 
         if current_item_id is None or elapsed_ms is None:
             logger.debug(
@@ -1149,7 +1152,8 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         if current_item_id is not None and elapsed_ms is not None:
             if response_scoped and event.response_id is not None:
                 self._audio_state_tracker.on_response_interrupted(event.response_id)
-            else:
+            elif self._audio_state_tracker.get_last_audio_item() == last_audio_item:
+                # Playback and received audio can advance independently during the awaits.
                 self._audio_state_tracker.on_interrupted()
             if self._playback_tracker is not None:
                 latest_playback_state = self._playback_tracker.get_state()
@@ -1158,7 +1162,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                 latest_audio_item = (
                     (latest_item_id, latest_content_index) if latest_item_id is not None else None
                 )
-                if not response_scoped or latest_audio_item in source_audio_items:
+                if latest_audio_item in source_audio_items:
                     self._playback_tracker.on_interrupted()
 
         return errors
@@ -1172,8 +1176,14 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             await self._cancel_response(response_id=event.response_id)
             return
 
-        if event.response_id is not None:
-            self._interrupted_audio_response_ids.add(event.response_id)
+        # Mark the active response before notifying playback listeners. They can
+        # yield while more audio arrives or the next response starts.
+        manual = event.force_response_cancel and event.response_id is None
+        response_id = (
+            self._response_create_sequencer.ongoing_response_id if manual else event.response_id
+        )
+        if response_id is not None:
+            self._interrupted_audio_response_ids.add(response_id)
 
         errors = await self._interrupt_audio_playback(event)
 
@@ -1189,7 +1199,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             should_cancel_response = event.force_response_cancel or (
                 not automatic_response_cancellation_enabled
             )
-            if should_cancel_response:
+            if should_cancel_response and (
+                not manual or self._response_create_sequencer.ongoing_response_id == response_id
+            ):
                 try:
                     await self._cancel_response(response_id=event.response_id)
                 except Exception as exc:
