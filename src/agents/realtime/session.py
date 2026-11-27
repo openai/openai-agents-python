@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import json
 from collections.abc import AsyncIterator, Sequence
+from contextvars import ContextVar as _ContextVar
 from functools import partial
 from typing import Any, cast
 
@@ -105,6 +106,9 @@ class _RealtimeSessionClosedSentinel:
 
 
 _REALTIME_SESSION_CLOSED_SENTINEL = _RealtimeSessionClosedSentinel()
+_CONNECT_SCOPES: _ContextVar[tuple[object, ...]] = _ContextVar(
+    "realtime_connect_scopes", default=()
+)
 _BACKGROUND_TASK_CANCEL_GRACE_SECONDS = 1.0
 
 
@@ -240,6 +244,8 @@ class RealtimeSession(RealtimeModelListener):
         self._closing = False
         self._closed = False
         self._model_stream_ended = False
+        self._connect_task: asyncio.Task[None] | None = None
+        self._connect_scope: object | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._stored_exception: BaseException | None = None
         self._pending_tool_calls: dict[str, _PendingToolCall] = {}
@@ -279,11 +285,17 @@ class RealtimeSession(RealtimeModelListener):
         """Start the session by connecting to the model. After this, you will be able to stream
         events from the model and send messages and audio to the model.
         """
+        if self._closing or self._closed:
+            raise UserError("Realtime session is closed.")
         model_config = self._model_config.copy()
         initial_model_settings = await self._get_updated_model_settings_from_agent(
             starting_settings=self._model_config.get("initial_model_settings", None),
             agent=self._current_agent,
         )
+        if self._closing or self._closed:
+            raise UserError("Realtime session closed during entry.")
+        if self._connect_task is not None:
+            raise UserError("Realtime session is already connecting.")
         model_config["initial_model_settings"] = initial_model_settings
         self._current_dispatch_snapshot = self._dispatch_snapshot_from_settings(
             self._current_agent,
@@ -293,12 +305,29 @@ class RealtimeSession(RealtimeModelListener):
         # Add ourselves as a listener only after initial settings have been validated.
         self._model.add_listener(self)
 
+        # Credential callbacks can start nested sessions or shield a child close().
+        # Keep enclosing attempts visible to those tasks without retaining sessions.
+        self._connect_scope = object()
+        token = _CONNECT_SCOPES.set((*_CONNECT_SCOPES.get(), self._connect_scope))
         try:
-            # Connect to the model.
-            await self._model.connect(model_config)
+
+            async def connect_model() -> None:
+                # Eager factories can execute user callbacks before create_task returns.
+                self._connect_task = asyncio.current_task()
+                await self._model.connect(model_config)
+
+            self._connect_task = asyncio.create_task(connect_model())
+            await self._connect_task
         except BaseException:
             self._model.remove_listener(self)
             raise
+        finally:
+            _CONNECT_SCOPES.reset(token)
+            self._connect_scope = None
+            self._connect_task = None
+
+        if self._closing or self._closed:
+            raise UserError("Realtime session closed during entry.")
 
         # Emit initial history update
         await self._put_event(
@@ -365,7 +394,9 @@ class RealtimeSession(RealtimeModelListener):
         cleanup_task = self._cleanup_task
         current_task = asyncio.current_task()
         if cleanup_task is not None and (
-            current_task in self._guardrail_tasks or current_task in self._tool_call_tasks
+            self._connect_scope in _CONNECT_SCOPES.get()
+            or current_task in self._guardrail_tasks
+            or current_task in self._tool_call_tasks
         ):
             # Cleanup is already waiting for this tracked task, so waiting here would form a cycle.
             raise asyncio.CancelledError
@@ -2079,6 +2110,12 @@ class RealtimeSession(RealtimeModelListener):
 
         # Stop new model events before cleanup yields control.
         self._model.remove_listener(self)
+
+        # A late connect must settle before model.close() can release its transport.
+        connect_task = self._connect_task
+        if connect_task is not None and not connect_task.done():
+            connect_task.cancel()
+            await asyncio.gather(connect_task, return_exceptions=True)
 
         # Account for session-owned background work before closing its transport.
         await self._cancel_background_tasks()

@@ -238,6 +238,63 @@ async def test_aiter_exits_waiting_iterators_when_session_closes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("on_cancel", ["stop", "finish", "close_again", "nested_close"])
+async def test_close_during_connect_leaves_no_live_connection(on_cancel: str):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedModel(_DummyModel):
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                if on_cancel in {"close_again", "nested_close"}:
+                    await asyncio.wait_for(asyncio.shield(session.close()), timeout=2)
+                if on_cancel != "finish":
+                    raise
+            await super().connect(options)
+
+    class NestedModel(_DummyModel):
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            async with RealtimeSession(DelayedModel(), RealtimeAgent(name="inner"), None):
+                await super().connect(options)
+
+    model = NestedModel() if on_cancel == "nested_close" else DelayedModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+    entering = asyncio.create_task(session.enter())
+    await started.wait()
+    await session.close()
+    release.set()
+    with pytest.raises(UserError if on_cancel == "finish" else asyncio.CancelledError):
+        await entering
+    await session.close()
+    assert not model.connected
+    assert model.closed
+
+
+@pytest.mark.asyncio
+async def test_close_during_initial_settings_prevents_connect():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def instructions(*_args: Any) -> str:
+        started.set()
+        await release.wait()
+        return "Instructions"
+
+    model = _DummyModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent", instructions=instructions), None)
+    entering = asyncio.create_task(session.enter())
+    await started.wait()
+    await session.close()
+    release.set()
+    with pytest.raises(UserError, match="closed"):
+        await entering
+    assert not model.connect_calls
+
+
+@pytest.mark.asyncio
 async def test_close_waits_for_background_finalizers_before_model_close():
     order: list[str] = []
 
@@ -3052,3 +3109,72 @@ class TestUpdateAgentFunctionality:
 
         assert session._current_agent is first_agent
         assert mock_model.sent_events == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eager", [False, True], ids=["regular", "eager"])
+@pytest.mark.parametrize("close_mode", ["ordinary", "direct", "shielded", "nested"])
+async def test_immediate_connect_callback_close_owns_connect_task(eager: bool, close_mode: str):
+    eager_factory = getattr(asyncio, "eager_task_factory", None)
+    if eager and eager_factory is None:
+        pytest.skip("Eager task factories require Python 3.12 or newer.")
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+    cancellation_counts: list[tuple[int, int]] = []
+
+    class ImmediateModel(_DummyModel):
+        # This injected model exercises user code before connect() first suspends.
+        async def connect(self, options: RealtimeModelConfig) -> None:
+            if close_mode == "direct":
+                await session.close()
+            elif close_mode == "shielded":
+                await asyncio.shield(session.close())
+            elif close_mode == "nested":
+
+                class InnerModel(_DummyModel):
+                    async def connect(self, inner_options: RealtimeModelConfig) -> None:
+                        await asyncio.shield(session.close())
+                        await super().connect(inner_options)
+
+                async with RealtimeSession(InnerModel(), RealtimeAgent(name="inner"), None):
+                    await super().connect(options)
+                return
+            await super().connect(options)
+
+    model = ImmediateModel()
+    session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+
+    async def enter_without_cancelling_caller() -> None:
+        caller = asyncio.current_task()
+        assert caller is not None
+        cancelling = getattr(caller, "cancelling", lambda: 0)
+        before = cancelling()
+        try:
+            await session.enter()
+        finally:
+            cancellation_counts.append((before, cancelling()))
+
+    loop.set_task_factory(eager_factory if eager else None)
+    try:
+        if close_mode == "ordinary":
+            await asyncio.wait_for(enter_without_cancelling_caller(), timeout=2)
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(enter_without_cancelling_caller(), timeout=2)
+        await session.close()
+        assert not model.connected
+        assert model.closed
+        assert model.close_calls == 1
+        assert cancellation_counts == [(0, 0)]
+    finally:
+        try:
+            await session.close()
+            await model.close()
+        finally:
+            loop.set_task_factory(original_factory)
+
+
+def test_realtime_session_keeps_contextvar_import_private():
+    namespace: dict[str, Any] = {}
+    exec("from agents.realtime.session import *", namespace)
+    assert "ContextVar" not in namespace
