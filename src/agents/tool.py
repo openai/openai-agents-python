@@ -63,6 +63,7 @@ from ._function_tool_arguments import (
     PreparedFunctionArguments,
     arguments_unchanged,
     can_prepare_without_user_code,
+    prepare_strict_json_values as _prepare_strict_json_values,
 )
 from ._tool_identity import (
     get_explicit_function_tool_namespace,
@@ -74,7 +75,12 @@ from ._tool_identity import (
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
 from .exceptions import MCPToolCancellationError, ModelBehaviorError, ToolTimeoutError, UserError
-from .function_schema import DocstringStyle, function_schema, generate_func_documentation
+from .function_schema import (
+    DocstringStyle,
+    _build_function_schema,
+    function_schema as function_schema,
+    generate_func_documentation,
+)
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
 from .strict_schema import _copy_json_schema, ensure_strict_json_schema
@@ -2759,7 +2765,7 @@ def function_tool(
             use_docstring_info,
         )
         is_sync_function_tool = not inspect.iscoroutinefunction(the_func)
-        schema = function_schema(
+        schema = _build_function_schema(
             func=the_func,
             name_override=name_override,
             description_override=description_override
@@ -2767,6 +2773,11 @@ def function_tool(
             docstring_style=docstring_style,
             use_docstring_info=use_docstring_info,
             strict_json_schema=strict_mode,
+            validators={
+                "_prepare_strict_json_values": model_validator(mode="before")(
+                    _prepare_strict_json_values
+                )
+            },
         )
         resolved_output_json_schema, output_type_adapter = _resolve_function_tool_output(
             return_annotation=schema.return_annotation,

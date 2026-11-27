@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel
-from pydantic_core import SchemaValidator
+from pydantic import AliasPath, BaseModel
+from pydantic_core import PydanticUndefined, SchemaValidator, ValidationError, core_schema
 
 from .exceptions import UserError
 
@@ -45,6 +47,99 @@ class _UninspectableArguments(Exception):
     pass
 
 
+_STRICT_STRINGS = {
+    "date": SchemaValidator(core_schema.date_schema(strict=True)),
+    "uuid": SchemaValidator(core_schema.uuid_schema(strict=True)),
+}
+
+
+def _direct_input_key(
+    name: str, alias: Any, config: dict[str, Any], values: dict[str, Any]
+) -> str | None:
+    if alias is None or not config.get("validate_by_alias", True):
+        return name
+    if isinstance(alias, str):
+        if alias in values:
+            return alias
+    else:
+        # A validation alias can be a single path or ordered choices of paths.
+        paths = alias if isinstance(alias[0], list) else [alias]
+        for path in paths:
+            if AliasPath(*path).search_dict_for_path(values) is not PydanticUndefined:
+                # A nested match owns the field. Leave shared inputs alone.
+                return path[0] if len(path) == 1 else None
+    return name if config.get("validate_by_name") else None
+
+
+def _parameter_fields(schema: Any, model: type[BaseModel]) -> Any:
+    inner = schema["schema"]
+    if inner["type"] == "function-before":
+        callback = inner["function"]["function"]
+        # Only the generated tool model's own decoder is safe to unwrap.
+        if (
+            type(callback) is MethodType
+            and callback.__self__ is model
+            and callback.__func__ is prepare_strict_json_values
+        ):
+            return inner["schema"]
+    return inner
+
+
+def prepare_strict_json_values(cls: type[BaseModel], arguments: Any) -> Any:
+    """Decode strict wire values after plugin entry and before field validation."""
+    schema = cls.__pydantic_core_schema__
+    definitions = {item["ref"]: item for item in schema.get("definitions", ())}
+
+    def prepare(node: Any, value: Any, strict: bool = False) -> Any:
+        config = {}
+        # Schema wrappers can be several layers deep per recursive model.
+        # Recurse only when descending into a JSON container.
+        while True:
+            kind = node["type"]
+            if kind == "definition-ref":
+                node = definitions[node["schema_ref"]]
+            elif kind == "model" and not node.get("custom_init"):
+                config = node.get("config", {})
+                strict = config.get("strict", False)
+                node = _parameter_fields(node, cls)
+            elif kind == "default" and node.get("on_error") in ("omit", "default"):
+                # Python validation already accepts these inputs via the explicit fallback.
+                return value
+            elif kind in ("definitions", "nullable", "default", "function-after"):
+                node = node["schema"]
+            else:
+                break
+        if kind == "model-fields" and isinstance(value, dict):
+            for name, field in node["fields"].items():
+                key = _direct_input_key(name, field.get("validation_alias"), config, value)
+                if key is not None and key in value:
+                    value[key] = prepare(field["schema"], value[key], strict)
+        elif kind == "list" and isinstance(value, list) and "items_schema" in node:
+            for i, item in enumerate(value):
+                value[i] = prepare(node["items_schema"], item, strict)
+        elif kind == "dict" and isinstance(value, dict) and "values_schema" in node:
+            for key, item in value.items():
+                value[key] = prepare(node["values_schema"], item, strict)
+        elif kind == "tuple" and isinstance(value, list):
+            items = node["items_schema"]
+            for i, item in enumerate(value):
+                if len(items) == 1 and node.get("variadic_item_index") == 0:
+                    value[i] = prepare(items[0], item, strict)
+                elif "variadic_item_index" not in node and i < len(items):
+                    value[i] = prepare(items[i], item, strict)
+            if node.get("strict", strict):
+                return tuple(value)
+        elif kind in _STRICT_STRINGS and node.get("strict", strict) and isinstance(value, str):
+            try:
+                return _STRICT_STRINGS[kind].validate_json(json.dumps(value))
+            except ValidationError:
+                pass  # The original model reports the error with its field path.
+        # Leave branch selection and raw input for before/wrap validators to Pydantic.
+        return value
+
+    return prepare(schema, arguments)
+
+
 def can_prepare_without_user_code(model: type[BaseModel]) -> bool:
     """Allow only data-only validation of the SDK-generated parameter model.
 
@@ -62,7 +157,7 @@ def can_prepare_without_user_code(model: type[BaseModel]) -> bool:
             and schema.get("cls") is model
             and not schema.get("custom_init")
             and not schema.get("post_init")
-            and _is_data_only_schema(schema["schema"])
+            and _is_data_only_schema(_parameter_fields(schema, model))
         )
     except RecursionError:
         return False
