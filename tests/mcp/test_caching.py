@@ -558,12 +558,20 @@ async def test_dynamic_filter_mutation_cannot_corrupt_cached_tool_schemas(
 @patch("mcp.client.stdio.stdio_client", return_value=DummyStreamsContextManager())
 @patch("mcp.client.session.ClientSession.initialize", new_callable=AsyncMock, return_value=None)
 @patch("mcp.client.session.ClientSession.list_tools")
-async def test_cached_tools_is_none_before_the_first_list(
+async def test_cached_tools_distinguishes_missing_and_empty_listings(
     mock_list_tools: AsyncMock, mock_initialize: AsyncMock, mock_stdio_client
 ):
-    """The snapshot must preserve the `None` sentinel rather than reporting an empty cache."""
     server = MCPServerStdio(params={"command": tee}, cache_tools_list=True)
-    mock_list_tools.return_value = ListToolsResult(tools=[])
+    tool = MCPTool(name="new_tool", inputSchema={})
+    mock_list_tools.side_effect = [ListToolsResult(tools=[]), ListToolsResult(tools=[tool])]
 
     async with server:
         assert server.cached_tools is None
+        assert await server.list_tools() == []
+        assert server.cached_tools == []
+        assert await server.list_tools() == []
+        assert mock_list_tools.await_count == 1
+
+        server.invalidate_tools_cache()
+        assert await server.list_tools() == [tool]
+        assert mock_list_tools.await_count == 2
