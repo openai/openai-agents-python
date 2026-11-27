@@ -998,6 +998,59 @@ async def test_nested_agent_tool_approval_allows_outer_call_id_collision(
     assert executed == ["safe"]
 
 
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
+async def test_resume_keeps_sibling_approvals_with_the_same_local_call_id(
+    mode: Literal["non_streamed", "streamed"], round_trip: bool
+) -> None:
+    executed: list[str] = []
+    owners = list("ABCDEFGH")
+
+    @tool(needs_approval=True)
+    async def confirm(owner: str) -> str:
+        executed.append(owner)
+        return owner
+
+    def child(owner: str):
+        model = ScriptedModel(
+            [
+                [get_function_tool_call("confirm", json.dumps({"owner": owner}), call_id="shared")],
+                [get_text_message(owner)],
+            ]
+        )
+        return Agent(name=owner, model=model, tools=[confirm]).as_tool(
+            tool_name=f"delegate_{owner}", tool_description="Run the child."
+        )
+
+    parent = Agent(
+        name="parent",
+        tools=[child(owner) for owner in owners],
+        model=ScriptedModel(
+            [
+                [
+                    get_function_tool_call(f"delegate_{key}", '{"input":"go"}', call_id=key)
+                    for key in owners
+                ],
+                [get_text_message("done")],
+            ]
+        ),
+    )
+    config = RunConfig(tracing_disabled=True)
+    result = await _run(parent, "go", run_config=config, mode=mode)
+    # Resume repeatedly without a decision, then release one child and finally the rest.
+    for approved_count in [0, 0, 0, 1, len(owners)]:
+        state = result.to_state()
+        if round_trip:
+            state = await RunState.from_string(parent, state.to_string())
+        for item in state.get_interruptions():
+            if item.agent.name in owners[:approved_count]:
+                state.approve(item)
+        result = await _run(parent, state, run_config=config, mode=mode)
+        assert sorted(i.agent.name for i in result.interruptions) == owners[approved_count:]
+        assert sorted(executed) == owners[:approved_count]
+        assert result.final_output == ("done" if approved_count == len(owners) else None)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("round_trip", [False, True], ids=["live", "serialized"])
 async def test_parent_approval_does_not_authorize_independent_nested_run(

@@ -1612,7 +1612,7 @@ async def resolve_interrupted_turn(
     rejected_function_call_ids: set[str] = set()
     rerun_function_call_ids: set[str] = set()
     pending_interruptions: list[ToolApprovalItem] = []
-    pending_interruption_keys: set[str] = set()
+    pending_interruption_keys: set[str | int | ToolApprovalItem] = set()
     stable_function_approval_sources: dict[int, ToolApprovalItem] = {}
 
     def _has_output_item(call_id: str, expected_type: str) -> bool:
@@ -1837,7 +1837,9 @@ async def resolve_interrupted_turn(
 
         return False
 
-    def _add_pending_interruption(item: ToolApprovalItem | None) -> None:
+    def _add_pending_interruption(
+        item: ToolApprovalItem | None, *, nested_item: ToolApprovalItem | None = None
+    ) -> None:
         if item is None:
             return
         source_item = stable_function_approval_sources.get(id(item))
@@ -1853,8 +1855,13 @@ async def resolve_interrupted_turn(
             source_item.tool_lookup_key = item.tool_lookup_key
             source_item._allow_bare_name_alias = item._allow_bare_name_alias
             item = source_item
-        call_id = get_tool_approval_item_call_id(item)
-        key = call_id or f"raw:{id(item.raw_item)}"
+        # Call IDs are local to each run. Keep child approval items themselves
+        # as identity keys because a checkpoint can return temporary copies.
+        key: str | int | ToolApprovalItem
+        if _approval_matches_agent(item):
+            key = get_tool_approval_item_call_id(item) or id(item.raw_item)
+        else:
+            key = nested_item if nested_item is not None else item
         if key in pending_interruption_keys:
             return
         pending_interruption_keys.add(key)
@@ -2641,7 +2648,7 @@ async def resolve_interrupted_turn(
                 else None
             )
             if nested_status is None:
-                _add_pending_interruption(original_approval)
+                _add_pending_interruption(original_approval, nested_item=nested_item)
             continue
         approval_snapshot = validated_function_approval_items.get(original_approval)
         if approval_snapshot is None:
