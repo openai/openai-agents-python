@@ -16,6 +16,49 @@ from tests.utils.hitl import make_shell_call
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_sticky_function_approval_preserves_another_calls_rejection(streamed: bool) -> None:
+    executed: list[str] = []
+
+    @tool(needs_approval=True)
+    async def record(value: str) -> str:
+        executed.append(value)
+        return value
+
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("record", '{"value": "a"}', call_id="a"),
+                get_function_tool_call("record", '{"value": "b"}', call_id="b"),
+            ],
+            [get_function_tool_call("record", '{"value": "c"}', call_id="c")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="agent", tools=[record], model=model)
+    config = RunConfig(tracing_disabled=True)
+    paused = await Runner.run(agent, "start", run_config=config)
+    a, b = paused.interruptions
+    state = paused.to_state()
+    state.reject(a, rejection_message="Skip a")
+    state.reject(b, rejection_message="Skip b")
+    state.approve(b, always_approve=True)
+    state = await RunState.from_json(agent, state.to_json())
+
+    if streamed:
+        result = Runner.run_streamed(agent, state, run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, state, run_config=config)
+
+    assert executed == ["b", "c"]
+    assert result.final_output == "done"
+    outputs = [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)]
+    assert outputs == ["Skip a", "b", "c"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("serialized", [False, True])
 @pytest.mark.parametrize("approve", [False, True])
 async def test_sticky_approval_stays_with_agent_across_handoffs(
