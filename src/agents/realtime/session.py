@@ -332,6 +332,7 @@ class RealtimeSession(RealtimeModelListener):
                 try:
                     await asyncio.wait((connect_task,))
                 except asyncio.CancelledError:
+                    # Await connect outcome despite more cancellation; re-raise the original below.
                     pass
             if not connect_task.cancelled() and connect_task.exception() is None:
                 # Failed context entry has no __aexit__; finish the shared close first.
@@ -340,6 +341,7 @@ class RealtimeSession(RealtimeModelListener):
                     try:
                         await asyncio.wait((close_task,))
                     except asyncio.CancelledError:
+                        # Finish cleanup despite further cancellation; re-raise the original below.
                         pass
                 self._consume_task_result(close_task)
             else:
