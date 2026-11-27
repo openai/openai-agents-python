@@ -212,11 +212,15 @@ _ToolInputFuncAsync = Callable[[ToolInputGuardrailData], Awaitable[ToolGuardrail
 
 
 @overload
-def tool_input_guardrail(func: _ToolInputFuncSync) -> ToolInputGuardrail[Any]: ...
+def tool_input_guardrail(
+    func: _ToolInputFuncSync, *, name: str | None = None
+) -> ToolInputGuardrail[Any]: ...
 
 
 @overload
-def tool_input_guardrail(func: _ToolInputFuncAsync) -> ToolInputGuardrail[Any]: ...
+def tool_input_guardrail(
+    func: _ToolInputFuncAsync, *, name: str | None = None
+) -> ToolInputGuardrail[Any]: ...
 
 
 @overload
@@ -248,11 +252,15 @@ _ToolOutputFuncAsync = Callable[[ToolOutputGuardrailData], Awaitable[ToolGuardra
 
 
 @overload
-def tool_output_guardrail(func: _ToolOutputFuncSync) -> ToolOutputGuardrail[Any]: ...
+def tool_output_guardrail(
+    func: _ToolOutputFuncSync, *, name: str | None = None
+) -> ToolOutputGuardrail[Any]: ...
 
 
 @overload
-def tool_output_guardrail(func: _ToolOutputFuncAsync) -> ToolOutputGuardrail[Any]: ...
+def tool_output_guardrail(
+    func: _ToolOutputFuncAsync, *, name: str | None = None
+) -> ToolOutputGuardrail[Any]: ...
 
 
 @overload
