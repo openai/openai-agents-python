@@ -1030,9 +1030,8 @@ class ChatCmplStreamHandler:
                     tc_function = tc_delta.function
 
                     # Accumulate arguments as they come in
-                    state.function_calls[tc_delta.index].arguments += (
-                        tc_function.arguments if tc_function else ""
-                    ) or ""
+                    argument_delta = tc_function.arguments if tc_function else None
+                    state.function_calls[tc_delta.index].arguments += argument_delta or ""
 
                     # Set function name directly (it's correct from the first function call chunk)
                     if tc_function and tc_function.name:
@@ -1101,6 +1100,10 @@ class ChatCmplStreamHandler:
                             state, tc_delta.index
                         )
 
+                        # Include fragments received before the call ID in the first delta.
+                        if tc_delta.id and argument_delta:
+                            argument_delta = function_call.arguments
+
                         # Mark this function call as streaming.
                         state.function_call_streaming[tc_delta.index] = True
 
@@ -1117,16 +1120,12 @@ class ChatCmplStreamHandler:
                         )
 
                     # Stream arguments if we've started streaming this function call
-                    if (
-                        state.function_call_streaming.get(tc_delta.index, False)
-                        and tc_function
-                        and tc_function.arguments
-                    ):
+                    if state.function_call_streaming.get(tc_delta.index, False) and argument_delta:
                         output_index = output_layout.function_call_output_index(
                             state, tc_delta.index
                         )
                         yield ResponseFunctionCallArgumentsDeltaEvent(
-                            delta=tc_function.arguments,
+                            delta=argument_delta,
                             item_id=FAKE_RESPONSES_ID,
                             output_index=output_index,
                             type="response.function_call_arguments.delta",
