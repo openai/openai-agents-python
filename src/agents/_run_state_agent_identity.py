@@ -6,7 +6,7 @@ import asyncio
 import dataclasses
 import json
 import threading
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -448,10 +448,17 @@ def _agent_identity_sort_key(
     )
 
 
+def _iter_agents_with_duplicate_names(initial_agent: Agent[Any]) -> Iterator[Agent[Any]]:
+    # Unique names never need a signature, which may include non-copyable model state.
+    agents = list(_iter_agent_graph(initial_agent))
+    counts = Counter(agent.name for agent in agents)
+    return (agent for agent in agents if counts[agent.name] > 1)
+
+
 def _get_ambiguous_agent_ids(initial_agent: Agent[Any]) -> set[int]:
     """Find owners distinguishable only by graph traversal order."""
     groups: dict[tuple[str, int, str], list[int]] = {}
-    for agent in _iter_agent_graph(initial_agent):
+    for agent in _iter_agents_with_duplicate_names(initial_agent):
         priority, signature, _ = _agent_identity_sort_key(
             agent, root_agent=initial_agent, original_index=0
         )
@@ -462,7 +469,7 @@ def _get_ambiguous_agent_ids(initial_agent: Agent[Any]) -> set[int]:
 def _has_legacy_hook_identity_ambiguity(initial_agent: Agent[Any]) -> bool:
     """Whether old ordinal identities could depend on unrecorded hook state."""
     seen_prefixes: set[tuple[str, str]] = set()
-    for agent in _iter_agent_graph(initial_agent):
+    for agent in _iter_agents_with_duplicate_names(initial_agent):
         # Root priority is independent of its signature and always sorts first.
         if agent is initial_agent or agent.hooks is None or callable(agent.hooks):
             continue
