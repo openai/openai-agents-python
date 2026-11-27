@@ -5,7 +5,9 @@ import copy
 import dataclasses
 import json
 import re
+from datetime import date
 from typing import Annotated, Any, cast
+from uuid import UUID
 
 import pytest
 from pydantic import (
@@ -13,6 +15,7 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -23,6 +26,7 @@ from agents.decorators import tool
 from agents.exceptions import ModelBehaviorError
 from agents.items import ToolCallOutputItem
 from agents.testing import ScriptedModel
+from agents.tool_context import ToolContext
 from tests.realtime.session_test_support import RecordingRealtimeModel, _sent_tool_output_strings
 from tests.test_responses import get_function_tool_call, get_text_message
 
@@ -46,6 +50,181 @@ def scripted_agent(function_tool, arguments):
         ]
     )
     return Agent(name="test", model=model, tools=[function_tool])
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("approval", [False, True])
+async def test_strict_tool_arguments_accept_their_json_representations(streamed, approval):
+    class Record(BaseModel, strict=True):
+        id: UUID
+        pair: tuple[int, int]
+
+    seen = []
+
+    @tool(needs_approval=approval, failure_error_function=None)
+    async def save(day: Annotated[date, Field(strict=True)], record: Record) -> str:
+        seen.append((day, record.id, record.pair))
+        return "saved"
+
+    identifier = UUID("514c8fee-883b-488d-b6b0-c08cd642681e")
+    arguments = json.dumps({"day": "2026-11-26", "record": {"id": str(identifier), "pair": [1, 2]}})
+    agent = scripted_agent(save, arguments)
+    result = await run_agent(agent, "go", streamed)
+    if approval:
+        assert seen == []
+        state = result.to_state()
+        state.approve(result.interruptions[0])
+        result = await run_agent(
+            agent, await RunState.from_string(agent, state.to_string()), streamed
+        )
+
+    assert result.final_output == "done"
+    assert seen == [(date(2026, 11, 26), identifier, (1, 2))]
+
+
+async def test_plugin_can_prepare_raw_strict_tool_input(monkeypatch):
+    seen = []
+
+    class ParseDate:
+        def new_schema_validator(self, schema, schema_type, path, kind, config, settings):
+            return (self, None, None) if path.name == "report_args" else (None, None, None)
+
+        def on_enter(self, value, **kwargs):
+            seen.append(value["day"])
+            value["day"] = date.fromisoformat(value["day"])
+
+    monkeypatch.setattr("pydantic.plugin._loader.get_plugins", lambda: [ParseDate()])
+
+    @tool(failure_error_function=None)
+    def report(day: Annotated[date, Field(strict=True)]) -> str:
+        seen.append(day)
+        return "ok"
+
+    await run_agent(scripted_agent(report, '{"day":"2026-11-26"}'), "go")
+    assert seen == ["2026-11-26", date(2026, 11, 26)]
+
+
+@pytest.mark.parametrize("key", ["day", "when"])
+async def test_strict_wire_arguments_use_the_selected_alias(key):
+    from pydantic import AliasChoices
+
+    class Record(BaseModel, strict=True):
+        day: date = Field(validation_alias=AliasChoices("day", "when"))
+
+    seen = []
+
+    @tool(failure_error_function=None)
+    def operation(record: Record) -> str:
+        seen.append(record.day)
+        return "ok"
+
+    agent = scripted_agent(operation, json.dumps({"record": {key: "2026-11-26"}}))
+    await run_agent(agent, "go")
+    assert seen == [date(2026, 11, 26)]
+
+
+@pytest.mark.parametrize("dates,expected", [([None], None), ([], date(2026, 11, 26))])
+async def test_alias_path_precedence_preserves_sibling_input(dates, expected):
+    from pydantic import AliasChoices, AliasPath
+
+    class Record(BaseModel, strict=True, validate_by_name=True):
+        dates: list[str | None]
+        day: date | None = Field(validation_alias=AliasChoices(AliasPath("dates", 0), "when"))
+        label: str = Field(validation_alias="day")
+
+    seen = []
+
+    @tool(failure_error_function=None)
+    def operation(record: Record) -> str:
+        seen.append((record.day, record.label))
+        return "ok"
+
+    record = {"dates": dates, "when": "2026-11-26", "day": "2020-01-01"}
+    await run_agent(scripted_agent(operation, json.dumps({"record": record})), "go")
+    assert seen == [(expected, "2020-01-01")]
+
+
+async def test_strict_wire_arguments_preserve_explicit_omission():
+    from pydantic.types import OnErrorOmit
+
+    seen = []
+
+    @tool(failure_error_function=None)
+    def operation(days: list[OnErrorOmit[Annotated[date, Field(strict=True)]]]) -> str:
+        seen.append(days)
+        return "ok"
+
+    await run_agent(scripted_agent(operation, '{"days":["2026-11-26"]}'), "go")
+    assert seen == [[]]
+
+
+async def test_deeply_nested_arguments_report_a_model_behavior_error():
+    class Node(BaseModel):
+        child: "Node | None" = None
+
+    @tool(failure_error_function=None)
+    def operation(node: Node) -> str:
+        return "ok"
+
+    arguments = '{"node":' + '{"child":' * 300 + "null" + "}" * 301
+    ctx = ToolContext(None, tool_name=operation.name, tool_call_id="call", tool_arguments=arguments)
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input"):
+        await operation.on_invoke_tool(ctx, arguments)
+
+
+async def test_strict_wire_arguments_keep_python_validation_hooks(pydantic_plugin_events):
+    events = pydantic_plugin_events
+
+    def check(value: str, info: ValidationInfo) -> str:
+        events.append(info.mode)
+        return value
+
+    @tool(needs_approval=True, failure_error_function=None)
+    async def operation(
+        day: Annotated[date, Field(strict=True)],
+        label: Annotated[str, AfterValidator(check)],
+        reference: UUID | str,
+    ) -> str:
+        assert day == date(2026, 11, 26)
+        assert isinstance(reference, str)
+        events.append("body")
+        return label
+
+    agent = scripted_agent(
+        operation,
+        json.dumps({"day": "2026-11-26", "label": "ok", "reference": str(UUID(int=1))}),
+    )
+    paused = await run_agent(agent, "go")
+    assert not events
+    state = paused.to_state()
+    state.approve(paused.interruptions[0])
+    await run_agent(agent, state)
+    assert events == ["enter", "python", "success", "body"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"day": "20261126", "pair": [1, 2]},
+        {"day": "2026-11-26", "pair": [1, "2"]},
+    ],
+)
+async def test_strict_wire_arguments_preserve_invalid_input_errors(payload, pydantic_plugin_events):
+    events = pydantic_plugin_events
+
+    class Record(BaseModel, strict=True):
+        day: date
+        pair: tuple[int, int]
+
+    @tool(failure_error_function=None)
+    def operation(record: Record) -> str:
+        events.append("body")
+        return "ok"
+
+    agent = scripted_agent(operation, json.dumps({"record": payload}))
+    with pytest.raises(ModelBehaviorError):
+        await run_agent(agent, "go")
+    assert events == ["enter", "error"]
 
 
 @pytest.mark.parametrize("streamed", [False, True])

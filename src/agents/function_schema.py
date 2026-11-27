@@ -349,6 +349,26 @@ def function_schema(
         and other metadata.
     """
 
+    return _build_function_schema(
+        func,
+        docstring_style,
+        name_override,
+        description_override,
+        use_docstring_info,
+        strict_json_schema,
+    )
+
+
+def _build_function_schema(
+    func: Callable[..., Any],
+    docstring_style: DocstringStyle | None,
+    name_override: str | None,
+    description_override: str | None,
+    use_docstring_info: bool,
+    strict_json_schema: bool,
+    *,
+    validators: dict[str, Any] | None = None,
+) -> FuncSchema:
     # 1. Grab docstring info
     if use_docstring_info:
         doc_info = generate_func_documentation(func, docstring_style)
@@ -535,7 +555,11 @@ def function_schema(
 
     # 3. Dynamically build a Pydantic model
     dynamic_model = create_model(
-        f"{func_name}_args", __base__=BaseModel, __config__=model_config, **fields
+        f"{func_name}_args",
+        __base__=BaseModel,
+        __config__=model_config,
+        __validators__=validators,
+        **fields,
     )
 
     # 4. Build JSON schema from that model
