@@ -1,7 +1,9 @@
 """Agent graph identities and durable RunState ownership across save and restore."""
 
 import json
+import threading
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import pytest
@@ -10,6 +12,7 @@ from agents import (
     Agent,
     Handoff,
     ModelSettings,
+    RunConfig,
     RunContextWrapper,
     Runner,
     RunState,
@@ -41,6 +44,47 @@ class _IdentityCapability(Capability):
 
 
 class TestRunState:
+    @pytest.mark.asyncio
+    async def test_unique_name_noncopyable_model_survives_pause_save_restore(self) -> None:
+        @dataclass(eq=False)
+        class ResourceModel(ScriptedModel):
+            resource: object = field(default_factory=threading.Lock)
+
+            def __post_init__(self) -> None:
+                super().__init__(
+                    [[get_function_tool_call("approval_tool", "{}", call_id="call_resource")]]
+                )
+
+        calls: list[str] = []
+
+        @function_tool(needs_approval=True)
+        def approval_tool() -> str:
+            calls.append("approved")
+            return "completed"
+
+        agent = Agent(
+            name="unique",
+            model=ResourceModel(),
+            tools=[approval_tool],
+            tool_use_behavior="stop_on_first_tool",
+        )
+        run_config = RunConfig(tracing_disabled=True)
+        paused = await Runner.run(agent, "start", run_config=run_config)
+        assert len(paused.interruptions) == 1
+        assert calls == []
+
+        snapshot = paused.to_state().to_string()
+        restored = await RunState.from_string(agent, snapshot)
+        interruptions = restored.get_interruptions()
+        assert len(interruptions) == 1
+        assert interruptions[0].agent is agent
+        restored.approve(interruptions[0])
+
+        resumed = await Runner.run(agent, restored, run_config=run_config)
+        assert resumed.final_output == "completed"
+        assert resumed.interruptions == []
+        assert calls == ["approved"]
+
     @pytest.mark.asyncio
     async def test_from_json_restores_duplicate_name_current_agent_by_identity(self):
         """Duplicate agent names should round-trip through the serialized identity key."""
