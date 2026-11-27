@@ -1391,6 +1391,19 @@ class OpenAIResponsesWSModel(OpenAIResponsesModel):
         if request_timeouts.lock == 0 and not request_lock.locked():
             # `wait_for(..., timeout=0)` can time out before an uncontended acquire runs.
             await request_lock.acquire()
+        elif request_timeouts.lock == 0:
+            acquire = asyncio.create_task(request_lock.acquire())
+            try:
+                await self._await_websocket_with_timeout(
+                    acquire, request_timeouts.lock, "request lock wait"
+                )
+            except asyncio.CancelledError:
+                # The waiter may already own the lock when cancellation reaches this request.
+                acquire.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await acquire
+                    request_lock.release()
+                raise
         else:
             await self._await_websocket_with_timeout(
                 request_lock.acquire(),
