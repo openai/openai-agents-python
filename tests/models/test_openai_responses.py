@@ -4499,6 +4499,68 @@ async def test_websocket_model_get_response_applies_timeout_while_waiting_for_re
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("finish_first", [False, True], ids=["waiting", "acquiring"])
+async def test_websocket_cancelled_zero_pool_waiter_allows_next_request(monkeypatch, finish_first):
+    client = DummyWSClient()
+    client.timeout = httpx2.Timeout(None, pool=0.0)
+    model = OpenAIResponsesWSModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    receiving = asyncio.Event()
+    finish = asyncio.Event()
+
+    class BlockingConnection(DummyWSConnection):
+        async def recv(self) -> str:
+            # Suspend the first request at the wire while it owns the shared connection.
+            if not receiving.is_set():
+                receiving.set()
+                await finish.wait()
+            return await super().recv()
+
+    ws = BlockingConnection(
+        [_response_completed_frame("first", 1), _response_completed_frame("last", 2)]
+    )
+    monkeypatch.setattr(model, "_open_websocket_connection", AsyncMock(return_value=ws))
+
+    async def request(text: str):
+        return await model.get_response(
+            system_instructions=None,
+            input=text,
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+
+    async def cancelled_request() -> None:
+        # Python 3.10 can drop the message when cancellation crosses a task boundary.
+        with pytest.raises(asyncio.CancelledError, match="cancelled by caller"):
+            await request("cancelled")
+
+    first = asyncio.create_task(request("first"))
+    try:
+        await asyncio.wait_for(receiving.wait(), timeout=1)
+        waiter = asyncio.create_task(cancelled_request())
+        # Queue cancellation after the waiter starts, with or without a concurrent release.
+        if finish_first:
+            finish.set()
+        asyncio.get_running_loop().call_soon(waiter.cancel, "cancelled by caller")
+        await waiter
+        if not finish_first:
+            with pytest.raises(TimeoutError, match="request lock wait timed out after 0.0 seconds"):
+                await request("blocked")
+        finish.set()
+        assert (await first).response_id == "first"
+        assert (await request("last")).response_id == "last"
+        assert len(ws.sent_messages) == 2
+        assert ws.close_calls == 0
+    finally:
+        finish.set()
+        await first
+        await model.close()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_websocket_model_get_response_allows_zero_pool_timeout_when_lock_uncontended(
     monkeypatch,
 ):
