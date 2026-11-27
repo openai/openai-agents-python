@@ -608,7 +608,8 @@ async def test_sqlite_session_get_items_with_limit():
 
 
 @pytest.mark.asyncio
-async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
+@pytest.mark.parametrize("message_data", ["not valid json {{{", "null"], ids=["malformed", "null"])
+async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows(message_data):
     """limit counts valid items, expanding past corrupt newest rows."""
     with tempfile.TemporaryDirectory() as temp_dir:
         db_path = Path(temp_dir) / "test_limit_corrupt.db"
@@ -625,15 +626,20 @@ async def test_sqlite_session_get_items_limit_skips_corrupt_newest_rows():
         with session._locked_connection() as conn:
             conn.execute(
                 f"INSERT INTO {session.messages_table} (session_id, message_data) VALUES (?, ?)",
-                (session.session_id, "not valid json {{{"),
+                (session.session_id, message_data),
             )
             conn.commit()
 
         # Newest row is corrupt; limit=2 should still return the two latest valid items.
         limited = await session.get_items(limit=2)
-        assert [item.get("content") for item in limited] == ["valid 1", "valid 2"]
-
+        history = await session.get_items()
         session.close()
+
+        assert limited == [
+            {"role": "assistant", "content": "valid 1"},
+            {"role": "user", "content": "valid 2"},
+        ]
+        assert history == [{"role": "user", "content": "valid 0"}, *limited]
 
 
 @pytest.mark.asyncio

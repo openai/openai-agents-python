@@ -300,7 +300,8 @@ class SQLiteSession(SessionABC):
             for (message_data,) in rows:
                 try:
                     item = json.loads(message_data)
-                    items.append(item)
+                    if item is not None:
+                        items.append(item)
                 except (json.JSONDecodeError, TypeError):
                     # Skip invalid JSON entries
                     continue
