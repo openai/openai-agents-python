@@ -2046,6 +2046,73 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
             ("cancel_response", cancel_error),
         )
 
+    @pytest.mark.parametrize("advance_during_interrupt", [False, True])
+    @pytest.mark.parametrize("custom_playback", [False, True])
+    @pytest.mark.asyncio
+    async def test_manual_interrupt_suppresses_in_flight_audio_from_current_response(
+        self, model, monkeypatch, advance_during_interrupt, custom_playback
+    ):
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+        tracker = RealtimePlaybackTracker() if custom_playback else None
+        model._playback_tracker = tracker
+
+        async def play(event):
+            if tracker and isinstance(event, RealtimeModelAudioEvent):
+                tracker.on_play_ms(event.item_id, event.content_index, 0)
+
+        emit = AsyncMock(side_effect=play)
+        send = AsyncMock()
+        monkeypatch.setattr(model, "_emit_event", emit)
+        monkeypatch.setattr(model, "_send_raw_message", send)
+
+        async def frame(response_id):
+            await model._handle_audio_delta(
+                SimpleNamespace(
+                    response_id=response_id,
+                    item_id=f"item_{response_id}",
+                    content_index=0,
+                    delta="dGVzdA==",
+                )
+            )
+
+        async def advance():
+            await frame("old")
+            await model._mark_response_done("old")
+            await model._mark_response_created("new")
+            await frame("new")
+
+        async def on_send(event):
+            if event.type == "conversation.item.truncate" and advance_during_interrupt:
+                await advance()
+
+        send.side_effect = on_send
+        await model._mark_response_created("old")
+        await frame("old")
+        await session.interrupt()
+        if not advance_during_interrupt:
+            await advance()
+
+        events = [call.args[0] for call in emit.await_args_list]
+        assert [(event.type, event.item_id) for event in events] == [
+            ("audio", "item_old"),
+            ("audio_interrupted", "item_old"),
+            ("audio", "item_new"),
+        ]
+        sent = [call.args[0].type for call in send.await_args_list]
+        assert sent == (
+            ["conversation.item.truncate"]
+            if advance_during_interrupt
+            else ["conversation.item.truncate", "response.cancel"]
+        )
+
+        send.side_effect = None
+        await session.interrupt()
+        interrupted = emit.await_args_list[-1].args[0]
+        truncate, cancel = [call.args[0] for call in send.await_args_list[-2:]]
+        assert (interrupted.type, interrupted.item_id) == ("audio_interrupted", "item_new")
+        assert (truncate.type, truncate.item_id) == ("conversation.item.truncate", "item_new")
+        assert cancel.type == "response.cancel"
+
     @pytest.mark.asyncio
     async def test_response_scoped_interrupt_suppresses_late_source_audio_until_done(
         self, model, monkeypatch
