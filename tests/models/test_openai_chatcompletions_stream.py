@@ -2929,7 +2929,10 @@ async def test_stream_response_ignores_custom_tool_call_chunks_by_default(monkey
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
-async def test_stream_response_yields_real_time_function_call_arguments(monkeypatch) -> None:
+@pytest.mark.parametrize("late_id", [False, True], ids=["early-id", "late-id"])
+async def test_stream_response_yields_real_time_function_call_arguments(
+    monkeypatch, late_id: bool
+) -> None:
     """
     Validate that `stream_response` emits function call arguments in real-time as they
     are received, not just at the end. This test simulates the real OpenAI API behavior
@@ -2938,7 +2941,7 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     # Simulate realistic OpenAI API chunks: name first, then arguments incrementally
     tool_call_delta1 = ChoiceDeltaToolCall(
         index=0,
-        id="tool-call-123",
+        id=None if late_id else "tool-call-123",
         function=ChoiceDeltaToolCallFunction(name="write_file", arguments=""),
         type="function",
     )
@@ -2949,6 +2952,7 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     )
     tool_call_delta3 = ChoiceDeltaToolCall(
         index=0,
+        id="tool-call-123" if late_id else None,
         function=ChoiceDeltaToolCallFunction(arguments='test.py", "content": "'),
         type="function",
     )
@@ -3035,7 +3039,6 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     # Verify event structure
     assert len(created_events) == 1
     assert len(output_item_added_events) == 1
-    assert len(function_args_delta_events) == 3  # Three incremental argument chunks
     assert len(output_item_done_events) == 1
     assert len(completed_events) == 1
 
@@ -3048,8 +3051,10 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
 
     # Verify real-time argument streaming
     expected_deltas = ['{"filename": "', 'test.py", "content": "', 'print(hello)"}']
-    for i, delta_event in enumerate(function_args_delta_events):
-        assert delta_event.delta == expected_deltas[i]
+    if late_id:
+        expected_deltas = [expected_deltas[0] + expected_deltas[1], expected_deltas[2]]
+    assert [event.delta for event in function_args_delta_events] == expected_deltas
+    for delta_event in function_args_delta_events:
         assert delta_event.item_id == "__fake_id__"  # FAKE_RESPONSES_ID
         assert delta_event.output_index == 0
 
