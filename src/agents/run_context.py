@@ -1299,16 +1299,27 @@ class RunContextWrapper(Generic[TContext]):
                     scope_identity[1] if scope_identity is not None else None
                 )
                 approval_entry.approved = approve
-                approval_entry.rejected = [] if approve else True
                 if not approve:
-                    approval_entry.approved = False
+                    approval_entry.rejected = True
                     if rejection_message is not None and call_id is not None:
                         approval_entry.rejection_messages[call_id] = rejection_message
                     elif call_id is not None:
                         self._clear_rejection_message(approval_entry, call_id)
                     approval_entry.sticky_rejection_message = rejection_message
                 else:
-                    approval_entry.rejection_messages.clear()
+                    if (
+                        invocation is not None
+                        and invocation[0] == "function_call"
+                        and isinstance(approval_entry.rejected, list)
+                    ):
+                        # A new default only overrides the exact denial for this call.
+                        approval_entry.rejected = [
+                            key for key in approval_entry.rejected if key != call_id
+                        ]
+                        self._clear_rejection_message(approval_entry, call_id)
+                    else:
+                        approval_entry.rejected = []
+                        approval_entry.rejection_messages.clear()
                     approval_entry.sticky_rejection_message = None
                 continue
 
