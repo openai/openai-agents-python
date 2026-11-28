@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, AgentHooks, RunConfig, RunHooks, Runner, UserError
+from agents import Agent, AgentHooks, FunctionTool, RunConfig, RunHooks, Runner, UserError
 from agents.decorators import tool
 from agents.run_context import RunContextWrapper
 from agents.testing import ScriptedModel
@@ -675,3 +675,88 @@ async def test_handoff_target_is_registered_before_transition_awaits(
     assert effects == []
     assert target.tools == [privileged]
     await _run(target, _final_model(), "later", streamed)
+
+
+class _NoEqualityFunctionTool(FunctionTool):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("Tool configuration must compare identity, not equality.")
+
+    def __ne__(self, other: object) -> bool:
+        raise AssertionError("Tool configuration must compare identity, not equality.")
+
+
+def _no_equality_tool() -> FunctionTool:
+    async def invoke(context: RunContextWrapper[Any], arguments: str) -> str:
+        return "synthetic effect"
+
+    return _NoEqualityFunctionTool(
+        name="synthetic",
+        description="Synthetic tool for configuration ownership checks.",
+        params_json_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        on_invoke_tool=invoke,
+    )
+
+
+@pytest.mark.asyncio
+async def test_joining_a_conflicted_run_after_restoring_the_tools() -> None:
+    original = _no_equality_tool()
+    agent = Agent(name="shared", tools=[original])
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class WaitForOtherRuns(RunHooks):
+        async def on_agent_start(self, context, current_agent) -> None:
+            started.set()
+            await release.wait()
+
+    async def rejected(role: str, hooks: RunHooks[Any] | None = None) -> None:
+        model = _final_model()
+        with pytest.raises(UserError, match="concurrent runs"):
+            await _run(agent, model, role, False, hooks)
+        assert not model.calls
+
+    first = asyncio.create_task(rejected("first", WaitForOtherRuns()))
+    try:
+        await asyncio.wait_for(started.wait(), 10)
+        agent.tools[:] = [_no_equality_tool()]
+        await rejected("second")
+        agent.tools[:] = [original]
+        await rejected("third")
+    finally:
+        release.set()
+        await asyncio.wait_for(first, 10)
+
+    await _run(agent, _final_model(), "fresh", False)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_registration_still_detects_a_restored_tool_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _no_equality_tool()
+    shared = Agent(name="shared", tools=[original])
+    model = _final_model()
+
+    def interrupted(*args: object) -> None:
+        raise RecursionError("interrupted registration")
+
+    class Visit(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            shared.tools[:] = [_no_equality_tool()]
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    "agents.run_internal.agent_tool_configuration._observe_tools", interrupted
+                )
+                with pytest.raises(RecursionError, match="interrupted registration"):
+                    await shared.get_all_tools(context)
+            shared.tools[:] = [original]
+            with pytest.raises(UserError, match="concurrent runs"):
+                await shared.get_all_tools(context)
+
+    class StartVisitor(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await _run(Agent(name="visitor"), _final_model(), "inner", False, Visit())
+
+    with pytest.raises(UserError, match="concurrent runs"):
+        await _run(shared, model, "outer", False, StartVisitor())
+    assert not model.calls
+    await _run(shared, _final_model(), "fresh", False)

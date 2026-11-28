@@ -20,6 +20,7 @@ class _ToolResolution:
     initial_tools: tuple[Tool, ...]
     tools_assigned: bool = False
     conflicted: bool = False
+    checked: bool = False
 
 
 @dataclass
@@ -36,14 +37,24 @@ _resolution_lock = Lock()
 
 
 def _observe_tools(active: list[_ToolResolution], tools: tuple[Tool, ...]) -> None:
-    if len(active) > 1 and any(
+    if len(active) <= 1:
+        return
+    # Each registration checks all live snapshots. Until a conflict, they
+    # have identical ordered tool identities. An interrupted registration
+    # leaves the newest reader unchecked, so observations keep scanning.
+    first = active[0]
+    candidates = active if first.conflicted or not active[-1].checked else (first,)
+    if any(
         resolution.tools_assigned
         or len(resolution.initial_tools) != len(tools)
-        or any(
-            before is not after
-            for before, after in zip(resolution.initial_tools, tools, strict=False)
+        or (
+            resolution.initial_tools is not tools
+            and any(
+                before is not after
+                for before, after in zip(resolution.initial_tools, tools, strict=False)
+            )
         )
-        for resolution in active
+        for resolution in candidates
     ):
         for resolution in active:
             resolution.conflicted = True
@@ -92,6 +103,7 @@ def register_agent_tool_configuration(agent: AgentBase[Any]) -> None:
         active.append(resolution)
         owner.resolutions[agent_id] = resolution
         _observe_tools(active, resolution.initial_tools)
+        resolution.checked = True
 
 
 def assign_agent_tools(agent: AgentBase[Any], tools: list[Tool]) -> None:
@@ -113,7 +125,8 @@ def snapshot_agent_tools(agent: AgentBase[Any]) -> tuple[Tool, ...]:
         tools = tuple(agent.tools)
         active = _resolutions.get(id(agent), [])
         _observe_tools(active, tools)
-        conflicted = any(resolution.conflicted for resolution in active)
+        # A conflict marks every current reader. Later readers only append.
+        conflicted = bool(active) and active[0].conflicted
     if conflicted:
         _raise_conflict()
     return tools
