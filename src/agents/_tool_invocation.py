@@ -13,6 +13,9 @@ from ._tool_identity import (
     get_hosted_mcp_approval_request_identity,
 )
 
+_STRING_TYPES = (str, bytes, bytearray)
+_JSON_PRIMITIVES = (str, int, float, bool)
+
 _TOOL_INVOCATION_TYPES = frozenset(
     {
         "apply_patch_call",
@@ -95,9 +98,9 @@ def _normalize_value(value: Any, *, exclude_none: bool = False) -> Any:
             for key, item in sorted(mapping.items(), key=lambda pair: str(pair[0]))
             if not (exclude_none and item is None)
         }
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+    if isinstance(value, Sequence) and not isinstance(value, _STRING_TYPES):
         return [_normalize_value(item, exclude_none=exclude_none) for item in value]
-    if value is None or isinstance(value, str | int | float | bool):
+    if value is None or isinstance(value, _JSON_PRIMITIVES):
         return value
     return str(value)
 
